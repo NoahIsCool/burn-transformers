@@ -1,0 +1,63 @@
+== source 2cf83d7030867dae96b7b23d2a8bbdc3efe06fc2 dirty=0
+== cmd cargo test --locked --release --no-default-features --features std,metal,tokenizers,chat-templates --test nemotron_h_artifacts
+== start 2026-10-18T09:40:53Z uptime  5:40  up 16 days, 15:01, 3 users, load averages: 2.50 2.79 2.81
+    Finished `release` profile [optimized] target(s) in 0.36s
+     Running tests/nemotron_h_artifacts.rs (/Volumes/bag of holding/cargo-targets/tfm-nemotron-envelope/release/deps/nemotron_h_artifacts-4cd54efee0f15525)
+
+running 52 tests
+test compares_pinned_nemotron_f16_with_official_base_reference ... ignored, requires the pinned Nemotron checkpoint and base oracle, Metal, and about 80 GiB free unified memory
+test diagnoses_pinned_nemotron_decision_14_time_step_clamp ... ignored, requires the pinned Nemotron checkpoint and base oracle, Metal, and about 80 GiB free unified memory
+test loads_pinned_nemotron_f16_and_smokes_base_inference ... ignored, requires authenticated Nemotron 3.5 weights, Metal, and about 80 GiB free unified memory
+test nemotron_h_base_reference::tests::hidden_points_report_their_execution_path ... ok
+test nemotron_h_base_reference::tests::matrix_rows_require_one_complete_vocabulary_slice ... ok
+test nemotron_h_base_reference::tests::ranking_is_descending_and_tie_stable ... ok
+test adversarial_component_oracle_is_strict_and_source_bound ... ok
+test nemotron_h_base_reference::tests::reviewed_anchor_set_is_complete ... ok
+test nemotron_h_f16_graphs::tests::inventory_pins_the_two_new_graphs ... ok
+test acceptance_record_matches_pinned_header_evidence ... ok
+test nemotron_h_parity::tests::bounds_are_inclusive_and_refuse_nan ... ok
+test nemotron_h_parity::tests::corresponding_row_accepts_exact_and_scaled_values ... ok
+test nemotron_h_base_reference::tests::validated_payload_accessors_preserve_path_identity ... ok
+test nemotron_h_base_reference::tests::top_level_schema_rejects_unknown_fields ... ok
+test nemotron_h_parity::tests::compiled_slacks_are_rounded_and_per_path ... ok
+test nemotron_h_base_reference::tests::filename_policy_is_fail_closed ... ok
+test nemotron_h_parity::tests::corresponding_row_accepts_exact_threshold ... ok
+test nemotron_h_parity::tests::corresponding_row_rejects_crossed_paths ... ok
+test nemotron_h_parity::tests::hidden_trace_gate_is_phase_specific ... ok
+test nemotron_h_parity::tests::normalized_deviation_is_the_unit_row_distance ... ok
+test nemotron_h_parity::tests::corresponding_row_rejects_every_invalid_numerical_class ... ok
+test nemotron_h_parity::tests::path_envelope_takes_each_graphs_worst_row ... ok
+test nemotron_h_parity::tests::hidden_trace_gate_rejects_invalid_values ... ok
+test nemotron_h_parity::tests::leave_one_out_check_requires_the_derived_slack ... ok
+test nemotron_h_parity::tests::top1_ties_select_the_lowest_token_id ... ok
+test nemotron_h_parity::tests::summary_enforces_contiguous_complete_coverage ... ok
+test nemotron_h_parity::tests::truth_rows_are_judged_after_the_whole_path ... ok
+test nemotron_h_precision_reference::tests::row_families_bind_their_streams_and_counts ... ok
+test nemotron_h_parity::tests::slack_rounding_matches_the_envelope_round ... ok
+test nemotron_h_parity::tests::path_envelope_refuses_unusable_graphs ... ok
+test nemotron_h_reference::tests::f32_hex_decoder_is_little_endian ... ok
+test nemotron_h_parity::tests::truth_summary_enforces_order_coverage_and_identity ... ok
+test nemotron_h_reference::tests::unreviewed_real_anchors_are_all_absent ... ok
+test nemotron_h_reference::tests::synthetic_schema_rejects_unknown_fields ... ok
+test nemotron_h_f16_graphs::tests::directories_must_hold_exactly_their_members ... ok
+test nemotron_h_precision_reference::tests::manifest_validation_is_fail_closed ... ok
+test official_base_reference_anchors_are_complete ... ok
+test official_f16_graphs_admit_each_other_leave_one_out ... ignored, requires the external Nemotron oracle, precision, and F16 graph bundles
+test official_mtp_reference_bundle_is_fail_closed_before_anchor_review ... ok
+test nemotron_h_reference::tests::bundle_filename_policy_is_fail_closed ... ok
+test validates_pinned_nemotron_control_and_weight_payloads ... ignored, requires all 65.8 GB of nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16 revision a9904d24bcc1d289a1950fa9d2b978c47cf903b9
+test pinned_index_schema_is_fail_closed ... ok
+test validates_pinned_nemotron_official_base_reference_bundle ... ignored, requires the independently reviewed external Nemotron base-reference bundle
+test validates_pinned_nemotron_official_mtp_reference_bundle ... ignored, requires separately reviewed pinned vLLM Nemotron MTP evidence
+test nemotron_h_precision_reference::tests::rows_decode_exactly_and_reject_malformed_payloads ... ok
+test nemotron_h_reference::tests::f32_payload_validation_rejects_non_finite_and_trailing_data ... ok
+test nemotron_h_f16_graphs::tests::manifest_validation_is_fail_closed ... ok
+test physical_header_shape_and_dtype_histogram_is_exact ... ok
+test index_total_size_overcounts_only_base_router_matrices ... ok
+test pinned_config_index_and_headers_have_exact_identity ... ok
+test mtp_inventory_is_complete_isolated_and_matches_runtime_contract ... ok
+test corrected_metadata_produces_complete_f16_plan ... ok
+
+test result: ok. 45 passed; 0 failed; 7 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+== exit=0

@@ -1,0 +1,79 @@
+== source 2cf83d7030867dae96b7b23d2a8bbdc3efe06fc2 dirty=0
+== binary /Volumes/bag of holding/cargo-targets/tfm-nemotron-envelope/release/deps/nemotron_h_artifacts-4cd54efee0f15525 sha256 50c9a3dfa10a47e30d64cbccd12730dfad03956e6269014954c7cb6fc2a965a3
+== test official_f16_graphs_admit_each_other_leave_one_out (ignored)
+== env TRANSFORMERS_NEMOTRON_H_F16_GRAPHS_DIR=/Volumes/bag of holding/models/transformers-acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24-f16-graphs
+== env TRANSFORMERS_NEMOTRON_H_PRECISION_DIR=/Volumes/bag of holding/models/transformers-acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24-precision.bundle
+== env TRANSFORMERS_NEMOTRON_H_REFERENCE_DIR=/Volumes/bag of holding/models/transformers-acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24-reference.bundle
+== cwd /Users/nover/repos/transformers-worktrees/tfm-nemotron-envelope
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-nemotron-envelope/release/deps/nemotron_h_artifacts-4cd54efee0f15525 --ignored --exact --nocapture --test-threads 1 official_f16_graphs_admit_each_other_leave_one_out
+== start 2026-10-18T09:35:16+00:00
+== start uptime 5:35  up 16 days, 14:55, 3 users, load averages: 4.49 4.07 3.17
+== start top-cpu   PID  %CPU    RSS     ELAPSED COMM
+== start top-cpu 20184  14.4 634944 03-08:34:02 /Users/nover/Library/Application Support/Claude/claude-code/2.1.295/9d6405864fdc/claude.app/Contents/MacOS/claude
+== start top-cpu   796  10.7  19856 16-14:53:20 /usr/sbin/coreaudiod
+== start top-cpu 90510  10.0  52736       00:00 /Library/Frameworks/Python.framework/Versions/3.11/Resources/Python.app/Contents/MacOS/Python
+== start top-cpu 59357   6.9 567408    08:16:39 /Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Versions/155.0.8059.80/Helpers/Codex (Renderer).app/Contents/MacOS/Codex (Renderer)
+== start top-cpu 59299   5.4  39920    08:16:46 /Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Versions/155.0.8059.80/Helpers/Codex (Service).app/Contents/MacOS/Codex (Service)
+== start top-cpu  6933   2.2 457536 02-19:14:51 /Applications/Firefox.app/Contents/MacOS/firefox
+== start top-cpu 73534   1.6 397328    12:51:40 /Applications/Firefox.app/Contents/MacOS/plugin-container.app/Contents/MacOS/plugin-container
+== start top-cpu 39210   1.3 446992    08:46:58 /Applications/Firefox.app/Contents/MacOS/plugin-container.app/Contents/MacOS/plugin-container
+== start free-memory 92% swap-used 7668886405 bytes
+== start disk / free 20.5 GiB
+== start disk /Volumes/bag of holding free 16.6 GiB
+== start disk /Volumes/T9 free 293.6 GiB
+
+running 1 test
+test official_f16_graphs_admit_each_other_leave_one_out ... Nemotron official F16 envelope Prompt: official cpu-eager worst delta 4.014610e-2 (cosine 0.999194145) at decision 0, leave-one-out 1.0002
+Nemotron official F16 envelope Prompt: official cpu-sdpa worst delta 4.000650e-2 (cosine 0.999199740) at decision 0, leave-one-out 0.9965
+Nemotron official F16 envelope Prompt: official mps-eager worst delta 4.013720e-2 (cosine 0.999194502) at decision 0, leave-one-out 0.9998
+Nemotron official F16 envelope Prompt: official mps-sdpa worst delta 3.996200e-2 (cosine 0.999201519) at decision 0, leave-one-out 0.9954
+Nemotron official F16 envelope Prompt: envelope 4.014610e-2 (cpu-eager), slack 1.1, bound 4.416071e-2, cosine floor 0.999024916
+Nemotron official F16 envelope Teacher: official cpu-eager worst delta 5.230607e-2 (cosine 0.998632038) at decision 27, leave-one-out 0.4951
+Nemotron official F16 envelope Teacher: official cpu-sdpa worst delta 1.056400e-1 (cosine 0.994420097) at decision 18, leave-one-out 1.0042
+Nemotron official F16 envelope Teacher: official mps-eager worst delta 1.052006e-1 (cosine 0.994466421) at decision 18, leave-one-out 0.9958
+Nemotron official F16 envelope Teacher: official mps-sdpa worst delta 1.048258e-1 (cosine 0.994505771) at decision 18, leave-one-out 0.9923
+Nemotron official F16 envelope Teacher: envelope 1.056400e-1 (cpu-sdpa), slack 1.1, bound 1.162040e-1, cosine floor 0.993248318
+Nemotron official F16 envelope Cached: official cpu-eager worst delta 4.249860e-2 (cosine 0.999096934) at decision 26, leave-one-out 0.8097
+Nemotron official F16 envelope Cached: official cpu-sdpa worst delta 4.000650e-2 (cosine 0.999199740) at decision 0, leave-one-out 0.7622
+Nemotron official F16 envelope Cached: official mps-eager worst delta 5.224850e-2 (cosine 0.998635047) at decision 22, leave-one-out 0.9954
+Nemotron official F16 envelope Cached: official mps-sdpa worst delta 5.248829e-2 (cosine 0.998622490) at decision 22, leave-one-out 1.0046
+Nemotron official F16 envelope Cached: envelope 5.248829e-2 (mps-sdpa), slack 1.1, bound 5.773712e-2, cosine floor 0.998333213
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 51 filtered out; finished in 0.71s
+
+        1.12 real         0.67 user         0.04 sys
+           270925824  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+               16814  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   0  voluntary context switches
+                  15  involuntary context switches
+         10534821105  instructions retired
+          2616299350  cycles elapsed
+           265011896  peak memory footprint
+== exit=0 wall=5.0s min_free_pct=92 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0 min_root_free_gib=20.5
+== source after run 2cf83d7030867dae96b7b23d2a8bbdc3efe06fc2 dirty=0
+== end 2026-10-18T09:35:21+00:00
+== end uptime 5:35  up 16 days, 14:55, 3 users, load averages: 4.29 4.04 3.16
+== end top-cpu   PID  %CPU    RSS     ELAPSED COMM
+== end top-cpu   796  10.6  19856 16-14:53:25 /usr/sbin/coreaudiod
+== end top-cpu  8631   7.4 172624 04-06:44:47 /Users/nover/Library/Application Support/Claude/claude-code/2.1.295/9d6405864fdc/claude.app/Contents/MacOS/claude
+== end top-cpu 20184   6.6 634944 03-08:34:07 /Users/nover/Library/Application Support/Claude/claude-code/2.1.295/9d6405864fdc/claude.app/Contents/MacOS/claude
+== end top-cpu 59357   5.7 573200    08:16:44 /Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Versions/155.0.8059.80/Helpers/Codex (Renderer).app/Contents/MacOS/Codex (Renderer)
+== end top-cpu 59299   3.5  39904    08:16:51 /Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Versions/155.0.8059.80/Helpers/Codex (Service).app/Contents/MacOS/Codex (Service)
+== end top-cpu 23675   3.3 202848 02-12:41:46 /Users/nover/Library/Application Support/Claude/claude-code/2.1.295/9d6405864fdc/claude.app/Contents/MacOS/claude
+== end top-cpu  6933   2.3 457520 02-19:14:56 /Applications/Firefox.app/Contents/MacOS/firefox
+== end top-cpu 25337   1.5 229664 01-20:41:51 /Users/nover/Library/Application Support/Claude/claude-code/2.1.295/9d6405864fdc/claude.app/Contents/MacOS/claude
+== end free-memory 92% swap-used 7668886405 bytes
+== end disk / free 20.5 GiB
+== end disk /Volumes/bag of holding free 16.6 GiB
+== end disk /Volumes/T9 free 293.6 GiB

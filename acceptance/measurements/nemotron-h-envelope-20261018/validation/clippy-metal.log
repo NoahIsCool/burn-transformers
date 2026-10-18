@@ -1,0 +1,5 @@
+== source 2cf83d7030867dae96b7b23d2a8bbdc3efe06fc2 dirty=0
+== cmd cargo clippy --locked --no-default-features --features std,metal,tokenizers,chat-templates --test nemotron_h_artifacts -- -D warnings
+== start 2026-10-18T09:40:50Z uptime  5:40  up 16 days, 15:01, 3 users, load averages: 2.46 2.78 2.81
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.76s
+== exit=0
