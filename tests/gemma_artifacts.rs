@@ -97,101 +97,108 @@
 //! # Half precision
 //!
 //! `TRANSFORMERS_GEMMA_DTYPE` selects the stored dtype: `f32` (the default;
-//! everything above), `bf16` (the Flex profile), or `f16` (the Metal
-//! profile); any other value panics. A half-precision run is judged against
-//! the same F32 bundles, with bounds measured from the official
-//! implementation, as in `tests/llama_family_artifacts.rs`:
+//! everything above) or `bf16` (the Flex profile, and the CUDA one); any other
+//! value panics, and `f16` is refused (see [F16](#f16)). A half-precision run
+//! is judged against the same F32 bundles, with bounds measured from the
+//! official implementation by `tests/support/half_precision_calibration.rs`,
+//! as in `tests/llama_family_artifacts.rs`: `TRANSFORMERS_GEMMA_OFFICIAL_DIRS`
+//! and `TRANSFORMERS_GEMMA_LONG_OFFICIAL_DIRS` list (separated as in `PATH`)
+//! the four bundles in which Transformers evaluates the short and long truths
+//! in BF16 on the CPU and on MPS, with eager and SDPA attention, and
+//! `TRANSFORMERS_GEMMA_DECODE_TRUTH_DIR` and
+//! `TRANSFORMERS_GEMMA_LONG_DECODE_TRUTH_DIR` name the F32 CPU-eager decode
+//! truths, which add the reference's own stateless logits at the greedy
+//! positions. That module validates each pairing fail closed before the
+//! checkpoint loads. Per prompt, this crate's logits must stay within
+//! `s_max E_max` at every position and `s_mean E_mean` on average, where `E`
+//! is the largest deviation of the four official graphs from the truth and the
+//! slacks are that module's leave-one-out constants (`1.5` and `1.3` in BF16).
 //! `TRANSFORMERS_GEMMA_BF16_REFERENCE_DIR` and
-//! `TRANSFORMERS_GEMMA_LONG_BF16_REFERENCE_DIR` name the short and long
-//! bundles' BF16 twins (`--dtype bfloat16`, same prompts and greedy lengths),
-//! and `tests/support/half_precision_calibration.rs` validates each pairing
-//! fail closed before the checkpoint loads. If Transformers' own BF16 logits
-//! deviate from a prompt's F32 logits by at most `M` and on average by `μ`,
-//! this crate's must stay within `1.2 M` at every position and `1.2 μ` on
-//! average; the factor and its derivation from gpt-oss-20b measurements are
-//! documented in that module. A Metal/F16 run is held to the same BF16
-//! bounds, reused as an upper limit because no official F16 bundle can be
-//! generated; they do not reflect F16 rounding, so its pass is weaker
-//! evidence than a Flex/BF16 pass. Cached prefills, batched rows, and the long
-//! prompt's chunk ends must lie within their prompt's `1.2 M`, and also
-//! within `0.5` of the same run's stateless pass. The greedy continuations
-//! are judged by the same teacher-forced rule as an F32 run, with their
-//! prompt's maximum bound `1.2 M` as the tolerance: every step whose
-//! reference margin exceeds `2.4 M` is compared and every other step is
-//! skipped as a tie. Whatever the margins, the short cached greedy test
-//! also checks the decode path: every decode step must lie within `0.5` of
-//! the same run's stateless pass at its position, and the longest short
-//! prompt, prefilled for its first quarter and then decoded token by token,
-//! must meet both bounds of its prompt at every position, as gpt-oss's
-//! cached long-prompt test does. `TRANSFORMERS_GEMMA_TOLERANCE` and
-//! `TRANSFORMERS_GEMMA_LONG_TOLERANCE` are refused, because they would
-//! replace the calibration; `TRANSFORMERS_GEMMA_MIN_GREEDY` still applies.
+//! `TRANSFORMERS_GEMMA_LONG_BF16_REFERENCE_DIR`, which named one official BF16
+//! bundle each under the previous rule, are refused.
 //!
-//! The official BF16 bundles generated on 2026-10-17 (recorded in
-//! `acceptance/measurements/half-precision-calibration-20261017.json`)
-//! deviate from their F32 twins by `0.384` (position 5), `0.592` (1), and
-//! `0.748` (3) at most and `0.038`, `0.052`, and `0.063` on average on the
-//! short prompts, where 26 of 32 greedy steps are decisive. On the 1237-token
-//! prompt the maximum is `8.07`, at position 855 (before the window), and the
-//! mean `0.066`; no long greedy step is decisive, so the long cached test
+//! Whatever the margins, both cached tests check the decode path against the
+//! decode truths: the short test's 32 decode rows and the long test's 8 decode
+//! rows after the rings wrap, cached and stateless at the same positions, must
+//! each meet the bounds of the official graphs' decode rows; the
+//! cached-versus-stateless gap is printed as a diagnostic only. The longest
+//! short prompt, prefilled for its first quarter and then decoded token by
+//! token, is judged against the envelope of the official graphs' own cached
+//! decode under that protocol. Cached prefills, batched rows, and the long
+//! prompt's chunk ends must lie within their prompt's `s_max E_max` and,
+//! provisionally, within `0.5` of the same run's stateless pass. The greedy
+//! continuations are judged by the same teacher-forced rule as an F32 run, at
+//! the larger of prompt 0's and the decode rows' maximum bounds.
+//! `TRANSFORMERS_GEMMA_TOLERANCE` and `TRANSFORMERS_GEMMA_LONG_TOLERANCE` are
+//! refused, because they would replace the calibration;
+//! `TRANSFORMERS_GEMMA_MIN_GREEDY` still applies. An F32 run's cached tests
+//! read the decode truths too and compare their cached decode rows with them
+//! at the F32 tolerances.
+//!
+//! No long greedy step is decisive at half precision, so the long cached test
 //! needs `TRANSFORMERS_GEMMA_MIN_GREEDY=0`, which drops only its argmax floor.
 //! The variable applies to the whole process, so that test runs alone: in the
 //! same invocation it would also drop the floor of the short cached greedy
-//! test, whose 26 decisive steps the default minimum of 2 must keep checking.
-//! At half precision the long logits test
-//! reads every position, so its mean is defined as the official one. Its
-//! maximum bound, `9.7`, exceeds what a missing window moves at the window's
-//! first positions (`1.7` in F32), so the tenfold decisiveness check above
-//! cannot hold there; a half-precision run instead requires the run without
-//! the window to fail the half-precision rule on the whole prompt (the F32
-//! run keeps the stronger check). For the same reason the maximum bound
-//! cannot catch a ring that keeps or evicts the wrong keys in the long cached
-//! test, which the F32 run catches through its `5e-3` tolerance; at half
-//! precision both chunk ends and all 8 decode steps after the wrap must
-//! instead lie within `0.5` of the same run's stateless sliding-window pass
-//! at their positions, the pass that the long logits test ties to the
-//! bundle. The first runs of this crate against these bounds are recorded in
-//! `acceptance/measurements/mac-validation-20261017.json`. At `c2936fe`,
-//! which evaluates half-precision tanh GELU in F32, Flex/BF16 passes the
-//! prompt-logit (maxima `0.346`, `0.514`, `0.582`), batched, long-logit, and
-//! long cached tests, and the short cached greedy test fails one decode step
-//! (`0.75` from the stateless pass against `0.5`), a tolerance that
-//! Transformers' own SDPA and MPS BF16 decodes exceed as well. Every Metal/F16
-//! test fails on non-finite logits: gemma-3-4b-it's residual stream reaches
-//! `5.1e4` after block 4 and turns non-finite in block 5 in Transformers' own
-//! CPU and MPS F16 evaluations too, so the Metal/F16 profile cannot pass as
-//! specified. To run the Flex/BF16 gates, run every test but the long cached
-//! one with the default minimum, then that test alone with the minimum
-//! lowered:
+//! test. At half precision the long logits test reads every position, so its
+//! mean is defined as the official one. Its maximum bound exceeds what a
+//! missing window moves at the window's first positions (`1.7` in F32), so the
+//! tenfold decisiveness check above cannot hold there; a half-precision run
+//! instead requires the run without the window to fail the half-precision
+//! rule on the whole prompt (the F32 run keeps the stronger check). For the
+//! same reason the maximum bound cannot catch a ring that keeps or evicts the
+//! wrong keys in the long cached test, which the F32 run catches through its
+//! `5e-3` tolerance; at half precision both chunk ends must lie within `0.5`
+//! of the same run's stateless sliding-window pass, and the 8 decode rows
+//! after the wrap are held to the decode truth. The official bundles, their
+//! digests, the envelopes, and the derivation of the slacks are recorded in
+//! `acceptance/measurements/half-precision-envelope-20261018.json`. To run the
+//! Flex/BF16 gates, run every test but the long cached one with the default
+//! minimum, then that test alone with the minimum lowered:
 //!
 //! ```text
+//! R=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38
+//! S=7a50e44
 //! export TRANSFORMERS_GEMMA_DTYPE=bf16 \
 //!   TRANSFORMERS_GEMMA_DIR=/Volumes/T9/models/google/gemma-3-4b-it \
-//!   TRANSFORMERS_GEMMA_REFERENCE_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38 \
-//!   TRANSFORMERS_GEMMA_BF16_REFERENCE_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-bf16 \
-//!   TRANSFORMERS_GEMMA_LONG_REFERENCE_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long \
-//!   TRANSFORMERS_GEMMA_LONG_BF16_REFERENCE_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long-bf16
+//!   TRANSFORMERS_GEMMA_REFERENCE_DIR=$R TRANSFORMERS_GEMMA_DECODE_TRUTH_DIR=$R-f32-cpu-eager \
+//!   TRANSFORMERS_GEMMA_OFFICIAL_DIRS=$R-bf16-cpu-eager-$S:$R-bf16-cpu-sdpa-$S:$R-bf16-mps-eager-$S:$R-bf16-mps-sdpa-$S \
+//!   TRANSFORMERS_GEMMA_LONG_REFERENCE_DIR=$R-long TRANSFORMERS_GEMMA_LONG_DECODE_TRUTH_DIR=$R-long-f32-cpu-eager \
+//!   TRANSFORMERS_GEMMA_LONG_OFFICIAL_DIRS=$R-long-bf16-cpu-eager-$S:$R-long-bf16-cpu-sdpa-$S:$R-long-bf16-mps-eager-$S:$R-long-bf16-mps-sdpa-$S
 //! cargo test --release --test gemma_artifacts -- --ignored --nocapture --test-threads 1 \
-//!   --skip long_context_cached_decode_wraps_the_rings
+//!   --skip long_context_cached_decode_wraps_the_rings --skip f16
 //! TRANSFORMERS_GEMMA_MIN_GREEDY=0 cargo test --release --test gemma_artifacts -- \
 //!   --ignored --exact flex_long_context_cached_decode_wraps_the_rings --nocapture
 //! ```
 //!
-//! For Metal/F16, export `TRANSFORMERS_GEMMA_DTYPE=f16`, add
-//! `--features metal`, filter the first command to `metal::` (otherwise it
-//! also runs the Flex tests in F16), and name
-//! `metal::metal_long_context_cached_decode_wraps_the_rings` in the second.
+//! `official_graphs_calibrate_the_half_precision_envelope` prints every
+//! official deviation, envelope, bound, and the decisive greedy steps of both
+//! truths, and `official_graphs_admit_each_other_leave_one_out` fails if an
+//! official graph lies outside the envelope of the other three under the
+//! compiled slacks, which means they must be re-derived. Both read the
+//! bundles alone (no checkpoint, no Burn model), so their passes qualify no
+//! Burn run.
 //!
-//! `official_bf16_references_calibrate_the_half_precision_bounds` prints
-//! these figures from the four bundles alone (no checkpoint, no Burn model,
-//! so its pass qualifies no Burn run):
+//! # F16
 //!
-//! ```text
-//! TRANSFORMERS_GEMMA_REFERENCE_DIR=... TRANSFORMERS_GEMMA_BF16_REFERENCE_DIR=... \
-//! TRANSFORMERS_GEMMA_LONG_REFERENCE_DIR=... TRANSFORMERS_GEMMA_LONG_BF16_REFERENCE_DIR=... \
-//! cargo test --test gemma_artifacts -- --ignored --exact \
-//!   official_bf16_references_calibrate_the_half_precision_bounds --nocapture
-//! ```
+//! Gemma 3 has no F16 gate profile; Metal is qualified in F32 (the `metal::`
+//! tests without `TRANSFORMERS_GEMMA_DTYPE`) and half precision on Flex (and
+//! CUDA) in BF16. The published gemma-3-4b-it checkpoint overflows F16 in
+//! Transformers too: the first value beyond F16's `65,504` is the residual
+//! addition after block 5's MLP at the BOS position, channel 443
+//! (`51,941.5 + 21,568.1 = 73,509.6` in F32), identically in torch CPU and MPS
+//! F16 and in this crate's Metal and Flex F16, and every logit after it is
+//! NaN; gemma-3-12b-it and gemma-3-27b-it overflow at blocks 6 and 8. All four
+//! official F16 graphs of the short and long truths are therefore non-finite,
+//! so no F16 envelope exists and an F16 run could only fail as uncalibrated.
+//! `TRANSFORMERS_GEMMA_DTYPE=f16` is refused with that explanation instead.
+//! The bundle-only test
+//! `official_f16_graphs_overflow_so_gemma_has_no_f16_envelope` reads the
+//! official F16 graphs named by `TRANSFORMERS_GEMMA_F16_OFFICIAL_DIRS` and
+//! `TRANSFORMERS_GEMMA_LONG_F16_OFFICIAL_DIRS` and requires the envelope to be
+//! refused as uncalibrated. The crate itself still loads Gemma 3 in F16 and
+//! evaluates the faithful graph; whether it should refuse such loads by
+//! default is a policy question left to the maintainer (recorded in
+//! `acceptance/measurements/half-precision-envelope-20261018.json`).
 //!
 //! # CUDA
 //!
@@ -218,19 +225,19 @@
 //! logits to leave ten times the long tolerance, so a TF32 long tolerance
 //! must stay below a tenth of the `1.7` that removing the window moves them.
 //!
-//! `TRANSFORMERS_GEMMA_DTYPE`, the BF16 twins, and the official calibration
-//! select and judge a half-precision run on CUDA exactly as on Flex and Metal
-//! ([Half precision](#half-precision)), and the long cached test again runs
-//! alone with `TRANSFORMERS_GEMMA_MIN_GREEDY=0`. Such a run refuses
+//! `TRANSFORMERS_GEMMA_DTYPE=bf16` and the official envelope select and judge
+//! a half-precision run on CUDA exactly as on Flex
+//! ([Half precision](#half-precision)), against the envelope of the four
+//! official graphs evaluated on the Mac's CPU and MPS, and the long cached test
+//! again runs alone with `TRANSFORMERS_GEMMA_MIN_GREEDY=0`. Such a run refuses
 //! `TRANSFORMERS_GEMMA_TOLERANCE` and `TRANSFORMERS_GEMMA_LONG_TOLERANCE` on
 //! every device and prints the probe's finding without acting on it: TF32
 //! rounds F32 operands, while the matrix products of this graph take the
 //! stored F16 or BF16 tensors as operands (F32 appears only in elementwise
 //! steps and reductions such as normalization, softmax, and activation
-//! functions). Because gemma-3-4b-it overflows F16 in both implementations
-//! (above), an `f16` run is expected to fail on CUDA as well, and `bf16` is
-//! the meaningful half-precision run there. All of this is read from the
-//! source, not measured: no CUDA run, in any dtype, has been recorded yet.
+//! functions). `f16` is refused on CUDA as everywhere ([F16](#f16)). All of
+//! this is read from the source, not measured: no CUDA run, in any dtype, has
+//! been recorded yet.
 
 #![cfg(feature = "flex")]
 
@@ -247,7 +254,8 @@ use burn::{
     tensor::{Int, Tensor, TensorData, backend::Backend},
 };
 use half_precision_calibration::{
-    Calibration, Deviation, HalfPrecisionGate, is_half_precision, reject_overrides, run_dtype,
+    DecodeTruth, Deviation, Envelope, HalfPrecisionGate, is_half_precision, refuse_retired,
+    reject_overrides, required_directories, run_dtype,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -256,7 +264,7 @@ use transformers::{
     TokenMask,
     attention::AttentionConnectivity,
     cache::CacheConfig,
-    checkpoint::{DTypePolicy, LoadOptions},
+    checkpoint::{DTypePolicy, LoadOptions, TensorDType},
     models::AutoCausalDecodeState,
 };
 
@@ -348,6 +356,62 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+/// The environment variables naming one truth bundle and what judges runs against it.
+struct BundleVariables {
+    /// The F32 truth bundle.
+    reference: &'static str,
+    /// The truth's F32 CPU-eager decode truth.
+    decode_truth: &'static str,
+    /// The four official BF16 graphs (half-precision runs only).
+    official: &'static str,
+    /// The four official F16 graphs, read only to show that no F16 envelope exists.
+    official_f16: &'static str,
+}
+
+/// Variables of the short-prompt bundle.
+const SHORT: BundleVariables = BundleVariables {
+    reference: "TRANSFORMERS_GEMMA_REFERENCE_DIR",
+    decode_truth: "TRANSFORMERS_GEMMA_DECODE_TRUTH_DIR",
+    official: "TRANSFORMERS_GEMMA_OFFICIAL_DIRS",
+    official_f16: "TRANSFORMERS_GEMMA_F16_OFFICIAL_DIRS",
+};
+
+/// Variables of the long-context bundle.
+const LONG: BundleVariables = BundleVariables {
+    reference: "TRANSFORMERS_GEMMA_LONG_REFERENCE_DIR",
+    decode_truth: "TRANSFORMERS_GEMMA_LONG_DECODE_TRUTH_DIR",
+    official: "TRANSFORMERS_GEMMA_LONG_OFFICIAL_DIRS",
+    official_f16: "TRANSFORMERS_GEMMA_LONG_F16_OFFICIAL_DIRS",
+};
+
+/// Variables of the previous single-bundle half-precision rule, and what replaces each.
+const RETIRED: [(&str, &str); 2] = [
+    (
+        "TRANSFORMERS_GEMMA_BF16_REFERENCE_DIR",
+        "TRANSFORMERS_GEMMA_OFFICIAL_DIRS and TRANSFORMERS_GEMMA_DECODE_TRUTH_DIR",
+    ),
+    (
+        "TRANSFORMERS_GEMMA_LONG_BF16_REFERENCE_DIR",
+        "TRANSFORMERS_GEMMA_LONG_OFFICIAL_DIRS and TRANSFORMERS_GEMMA_LONG_DECODE_TRUTH_DIR",
+    ),
+];
+
+/// Refuses an F16 run: Gemma 3 has no F16 gate profile.
+///
+/// # Panics
+///
+/// If `dtype` is F16; see the module documentation's [F16](self#f16) section.
+fn refuse_f16(dtype: TensorDType) {
+    assert!(
+        dtype != TensorDType::F16,
+        "TRANSFORMERS_GEMMA_DTYPE=f16 is not a gate profile: gemma-3-4b-it overflows F16 in \
+         Transformers' own CPU and MPS F16 graphs too (block 5's post-MLP residual add at BOS reaches \
+         73,509.6 > 65,504), so no official F16 envelope exists; qualify Metal in F32 and half \
+         precision in bf16 (see tests/gemma_artifacts.rs, F16, and \
+         acceptance/measurements/half-precision-envelope-20261018.json)"
+    );
+}
+
 /// Returns the directory named by the environment variable `name`.
 fn directory(name: &str) -> PathBuf {
     std::env::var_os(name)
@@ -384,51 +448,52 @@ fn minimum_greedy() -> usize {
 ///
 /// The tolerance decides greedy steps ([`check_teacher_forced_greedy`]). In
 /// an F32 run it is the bundle's absolute logit tolerance and also judges
-/// every logit; in a half-precision run it is the maximum bound of the
-/// bundle's prompt 0 ([`HalfPrecisionGate::greedy_tolerance`]), and the gate
-/// judges the logits.
+/// every logit; in a half-precision run it is the gate's greedy bound
+/// ([`HalfPrecisionGate::greedy_tolerance`]), and the gate judges the logits.
 type Loaded<B> = (AutoCausalLm<B>, Reference, f32, Option<HalfPrecisionGate>);
 
 /// Loads the checkpoint and the short-prompt bundle.
 fn load<B: Backend>(device: &B::Device) -> Loaded<B> {
-    load_bundle(
-        &directory("TRANSFORMERS_GEMMA_REFERENCE_DIR"),
-        "TRANSFORMERS_GEMMA_BF16_REFERENCE_DIR",
-        tolerance,
-        device,
-    )
+    load_bundle(&SHORT, tolerance, device)
 }
 
-/// Loads the checkpoint in `TRANSFORMERS_GEMMA_DTYPE` after checking it matches the bundle in `reference_dir`.
+/// Loads the checkpoint in `TRANSFORMERS_GEMMA_DTYPE` after checking it matches the bundle `variables` names.
 ///
 /// A multimodal checkpoint must report its vision tower, and nothing else,
-/// as intentionally ignored. The device is probed first. An F32 run (the
+/// as intentionally ignored. The retired single-bundle variables and an F16
+/// run are refused first. The device is then probed. An F32 run (the
 /// default) takes the tolerance `f32_tolerance` resolves from the probe, so a
-/// TF32 device without an explicit tolerance fails before loading. An F16 or
-/// BF16 run refuses both F32 tolerance overrides on every device and is
-/// judged by the official calibration from the bundle that the environment
-/// variable `official_variable` names, which is validated before the
-/// checkpoint loads. Either run then prints one line with the probe's
-/// finding and what judges the run: the F32 tolerance, or, in half
-/// precision, the official calibration and its greedy tolerance, so a
+/// TF32 device without an explicit tolerance fails before loading. A BF16 run
+/// refuses both F32 tolerance overrides on every device and is judged by the
+/// official envelope of the bundles `variables` names, which is validated
+/// before the checkpoint loads. Either run then prints one line with the
+/// probe's finding and what judges the run: the F32 tolerance, or, in half
+/// precision, the official envelope and its greedy tolerance, so a
 /// half-precision log states that the probe was not applied.
 fn load_bundle<B: Backend>(
-    reference_dir: &Path,
-    official_variable: &str,
+    variables: &BundleVariables,
     f32_tolerance: fn(MatmulPrecision) -> f32,
     device: &B::Device,
 ) -> Loaded<B> {
+    refuse_retired(&RETIRED);
     let dtype = run_dtype("TRANSFORMERS_GEMMA_DTYPE");
+    refuse_f16(dtype);
+    let reference_dir = directory(variables.reference);
     let precision = MatmulPrecision::probe::<B>(device);
     let (tolerance, half) = if is_half_precision(dtype) {
         reject_overrides(&[
             "TRANSFORMERS_GEMMA_TOLERANCE",
             "TRANSFORMERS_GEMMA_LONG_TOLERANCE",
         ]);
-        let half = HalfPrecisionGate::new(dtype, reference_dir, &directory(official_variable));
+        let half = HalfPrecisionGate::new(
+            dtype,
+            &reference_dir,
+            &directory(variables.decode_truth),
+            &required_directories(variables.official),
+        );
         let tolerance = half.greedy_tolerance();
         eprintln!(
-            "F32 matrix products use {precision:?} inputs; the {dtype:?} run is judged by the official calibration, greedy steps at {tolerance:e}"
+            "F32 matrix products use {precision:?} inputs; the {dtype:?} run is judged by the official envelope, greedy steps at {tolerance:e}"
         );
         (tolerance, Some(half))
     } else {
@@ -437,7 +502,7 @@ fn load_bundle<B: Backend>(
         (tolerance, None)
     };
     let model_dir = directory("TRANSFORMERS_GEMMA_DIR");
-    let reference = Reference::read(reference_dir);
+    let reference = Reference::read(&reference_dir);
     let config = std::fs::read(model_dir.join("config.json")).unwrap();
     assert_eq!(
         hex(&Sha256::digest(&config)),
@@ -548,19 +613,24 @@ fn check_prompt_logits<B: Backend>(device: &B::Device) {
     }
 }
 
-/// The cached greedy continuation of prompt 0 matches at every decisive step.
+/// The cached greedy continuation of prompt 0 matches at every decisive step, and its decode rows match the decode truth.
 ///
 /// The reference's tokens are fed back, so ties are skipped rather than
 /// ending the comparison; see [`check_teacher_forced_greedy`], which decides
-/// an F32 run's steps at its tolerance and a half-precision run's at prompt
-/// 0's maximum bound. A half-precision run also checks the prefill against
-/// the stateless pass and, because few or no steps may be decisive, the
-/// decode path regardless of the margins: every decode step against the same
-/// run's stateless pass over prompt 0 and the greedy tokens, and the longest
-/// prompt decoded token by token against the bundle
-/// ([`check_cached_prompt_decode`]).
+/// an F32 run's steps at its tolerance and a half-precision run's at the
+/// gate's greedy bound. Whatever the margins, every decode row is also judged
+/// against the decode truth in `TRANSFORMERS_GEMMA_DECODE_TRUTH_DIR`: an F32
+/// run's cached rows at its tolerance ([`DecodeTruth::check_f32`]), a
+/// half-precision run's cached rows and its stateless rows at the same
+/// positions by the official decode envelope
+/// ([`HalfPrecisionGate::check_decode`]). A half-precision run also checks
+/// the prefill against the stateless pass (provisionally) and the longest
+/// prompt decoded token by token ([`check_cached_prompt_decode`]).
 fn check_cached_greedy<B: Backend>(device: &B::Device) {
     let (model, reference, tolerance, half) = load::<B>(device);
+    let f32_truth = half
+        .is_none()
+        .then(|| DecodeTruth::read(&directory(SHORT.reference), &directory(SHORT.decode_truth)));
     let prompt = &reference.prompts[0];
     let capacity = prompt.tokens.len() + reference.greedy.len();
     let mut state = model
@@ -590,13 +660,11 @@ fn check_cached_greedy<B: Backend>(device: &B::Device) {
             half.check_consistency("cached prefill", &logits, &stateless);
         }
     }
-    // A half-precision run keeps every decode step's logits for the checks below.
+    // Every decode step's logits are kept for the decode-row checks below.
     let mut decoded = Vec::new();
     let mut decode = |token| {
         let logits = decode_one(&model, &mut state, token, device);
-        if half.is_some() {
-            decoded.push(logits.clone());
-        }
+        decoded.push(logits.clone());
         logits
     };
     check_teacher_forced_greedy(
@@ -608,21 +676,24 @@ fn check_cached_greedy<B: Backend>(device: &B::Device) {
         logits,
         &mut decode,
     );
-    let Some(half) = &half else {
-        return;
-    };
     // The comparison decodes no token after its last step; decoding the last
     // greedy token too gives every token of the continuation one decode step,
     // and decode step s, fed greedy token s at position T + s, returns the
-    // stateless pass's logits at that position.
+    // logits of that position, the decode truth's row s.
     let Some(&(token, _)) = reference.greedy.last() else {
         panic!("the bundle's greedy continuation is empty, so no decode step can be checked");
     };
     decode(token);
+    let Some(half) = &half else {
+        f32_truth
+            .expect("an F32 run reads the decode truth")
+            .check_f32("cached decode", &decoded, tolerance);
+        return;
+    };
     let continued = continued_prompt(&reference);
     let positions: Vec<usize> = (prompt.tokens.len()..continued.len()).collect();
     let stateless = logits_at(&model, &continued, &positions, device);
-    half.check_decode_steps("cached decode", prompt.tokens.len(), &decoded, &stateless);
+    half.check_decode("cached decode", prompt.tokens.len(), &decoded, &stateless);
     check_cached_prompt_decode(&model, &reference, half, device);
 }
 
@@ -656,29 +727,25 @@ fn continued_prompt(reference: &Reference) -> Vec<i64> {
         .collect()
 }
 
-/// Decodes the longest prompt token by token after a prefill of its first quarter and judges it by the half-precision rule.
+/// Decodes the longest prompt token by token after a prefill of its first quarter and judges it by the official prompt-decode envelope.
 ///
-/// The prefill returns the logits of each of its positions and every later
-/// position comes from one cached decode step, so the assembled
-/// `[tokens, V]` logits cover the whole prompt and must meet both of its
-/// bounds, as a stateless pass must. This bounds the decode path against
-/// the reference bundle itself, whatever the greedy margins, as gpt-oss's
-/// `check_cached_long_prompt` does. The short prompts stay below the sliding
-/// window, so no ring wraps here (the long-context test covers that).
+/// The prompt and the prefill length are the ones the official graphs used
+/// ([`HalfPrecisionGate::prompt_decode_plan`]). The prefill returns the
+/// logits of each of its positions and every later position comes from one
+/// cached decode step, so the assembled `[tokens, V]` logits cover the whole
+/// prompt and must meet both bounds of the official graphs' own cached decode
+/// under the same protocol, as gpt-oss's `check_cached_long_prompt` bounds its
+/// decode path against the bundle itself. The short prompts stay below the
+/// sliding window, so no ring wraps here (the long-context test covers that).
 fn check_cached_prompt_decode<B: Backend>(
     model: &AutoCausalLm<B>,
     reference: &Reference,
     half: &HalfPrecisionGate,
     device: &B::Device,
 ) {
-    let (index, prompt) = reference
-        .prompts
-        .iter()
-        .enumerate()
-        .max_by_key(|(_, prompt)| prompt.tokens.len())
-        .unwrap();
+    let (index, prefill) = half.prompt_decode_plan();
+    let prompt = &reference.prompts[index];
     let length = prompt.tokens.len();
-    let prefill = (length / 4).max(1);
     let mut state = model
         .new_decode_state(CacheConfig::new(1, length).unwrap(), 1, device)
         .unwrap();
@@ -700,9 +767,8 @@ fn check_cached_prompt_decode<B: Backend>(
     for &token in &prompt.tokens[prefill..] {
         logits.extend(decode_one(model, &mut state, token, device));
     }
-    half.check_prompt(
+    half.check_prompt_decode(
         &format!("prompt {index} decoded after a {prefill}-token prefill"),
-        index,
         &logits,
         &prompt.logits,
     );
@@ -775,12 +841,7 @@ type LoadedLong<B> = (
 
 /// Loads the long-context bundle and returns the model, bundle, tolerance, sliding window, and gate.
 fn load_long<B: Backend>(device: &B::Device) -> LoadedLong<B> {
-    let (model, reference, tolerance, half) = load_bundle::<B>(
-        &directory("TRANSFORMERS_GEMMA_LONG_REFERENCE_DIR"),
-        "TRANSFORMERS_GEMMA_LONG_BF16_REFERENCE_DIR",
-        long_tolerance,
-        device,
-    );
+    let (model, reference, tolerance, half) = load_bundle::<B>(&LONG, long_tolerance, device);
     let AutoCausalLm::Gemma(gemma) = &model else {
         panic!("the checkpoint must load as the Gemma family");
     };
@@ -974,15 +1035,21 @@ fn check_long_context_logits<B: Backend>(device: &B::Device) {
 /// evicted range's successors. Both chunks' last logits and every decisive
 /// greedy token must match the reference.
 ///
-/// A half-precision run applies the long prompt's maximum bound to the chunk
-/// ends and, the continuation being teacher-forced, compares every decisive
-/// greedy step. That bound (`9.7`) is far above what a ring that keeps or
-/// evicts the wrong keys moves, so the chunk ends and every decode step after
-/// the wrap must also agree with the same run's stateless sliding-window pass
-/// within the self-consistency tolerance (`0.5`), as the short cached prefill
-/// does; the long logits test ties that stateless pass to the bundle.
+/// Whatever the margins, the 8 decode rows after the wrap are judged against
+/// the long decode truth in `TRANSFORMERS_GEMMA_LONG_DECODE_TRUTH_DIR`: an F32
+/// run's cached rows at the long tolerance, a half-precision run's cached and
+/// stateless rows by the official decode envelope. A half-precision run also
+/// applies the long prompt's maximum bound to the chunk ends; that bound is
+/// far above what a ring that keeps or evicts the wrong keys moves, so the
+/// chunk ends must also agree with the same run's stateless sliding-window
+/// pass within the provisional self-consistency tolerance (`0.5`), as the
+/// short cached prefill does; the long logits test ties that stateless pass to
+/// the bundle.
 fn check_long_context_cached<B: Backend>(device: &B::Device) {
     let (model, reference, tolerance, window, half) = load_long::<B>(device);
+    let f32_truth = half
+        .is_none()
+        .then(|| DecodeTruth::read(&directory(LONG.reference), &directory(LONG.decode_truth)));
     let prompt = &reference.prompts[0];
     let vocabulary = reference.vocabulary;
     let length = prompt.tokens.len();
@@ -1034,13 +1101,11 @@ fn check_long_context_cached<B: Backend>(device: &B::Device) {
         eprintln!("cached chunk {range:?}: max |Δ| = {largest:e} at position {last}");
         assert!(largest <= tolerance, "cached chunk {range:?}");
     }
-    // A half-precision run keeps every decode step's logits for the check below.
+    // Every decode step's logits are kept for the decode-row checks below.
     let mut decoded = Vec::new();
     let mut decode = |token| {
         let logits = decode_one(&model, &mut state, token, device);
-        if judged.is_some() {
-            decoded.push(logits.clone());
-        }
+        decoded.push(logits.clone());
         logits
     };
     check_teacher_forced_greedy(
@@ -1052,15 +1117,19 @@ fn check_long_context_cached<B: Backend>(device: &B::Device) {
         logits,
         &mut decode,
     );
-    let Some((half, stateless)) = &judged else {
-        return;
-    };
     // As in the short cached test, the last greedy token is decoded too, so
     // every token of the continuation has its decode step.
-    if let Some(&(token, _)) = reference.greedy.last() {
-        decode(token);
-    }
-    half.check_decode_steps(
+    let Some(&(token, _)) = reference.greedy.last() else {
+        panic!("the long bundle's greedy continuation is empty, so no decode step can be checked");
+    };
+    decode(token);
+    let Some((half, stateless)) = &judged else {
+        f32_truth
+            .expect("an F32 run reads the long decode truth")
+            .check_f32("long cached decode", &decoded, tolerance);
+        return;
+    };
+    half.check_decode(
         "long cached decode",
         length,
         &decoded,
@@ -1068,28 +1137,130 @@ fn check_long_context_cached<B: Backend>(device: &B::Device) {
     );
 }
 
-/// The official BF16 bundles' distance from the F32 bundles, which sets the half-precision bounds.
-///
-/// Reads only the short and long bundle pairs, validates each pairing, and
-/// prints each manifest's SHA-256, each prompt's official maximum (with its
-/// position and vocabulary entry) and mean deviation, the bounds the rule
-/// derives, and the greedy steps a half-precision run compares. No Burn model
-/// runs, so a pass qualifies no Burn run.
+/// An F16 run is refused before anything loads, naming the measured overflow; BF16 and F32 runs are not.
 #[test]
-#[ignore = "needs TRANSFORMERS_GEMMA_REFERENCE_DIR, _LONG_REFERENCE_DIR, and their _BF16_ twins (bundles only)"]
-fn official_bf16_references_calibrate_the_half_precision_bounds() {
-    for (truth, official) in [
-        (
-            "TRANSFORMERS_GEMMA_REFERENCE_DIR",
-            "TRANSFORMERS_GEMMA_BF16_REFERENCE_DIR",
-        ),
-        (
-            "TRANSFORMERS_GEMMA_LONG_REFERENCE_DIR",
-            "TRANSFORMERS_GEMMA_LONG_BF16_REFERENCE_DIR",
-        ),
+fn f16_runs_are_refused_with_the_measured_overflow() {
+    refuse_f16(TensorDType::BF16);
+    refuse_f16(TensorDType::F32);
+    let refused = std::panic::catch_unwind(|| refuse_f16(TensorDType::F16))
+        .expect_err("an F16 run must be refused");
+    // A literal assertion message is a `&str` payload, a formatted one a `String`.
+    let message = refused
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| {
+            refused
+                .downcast_ref::<&str>()
+                .map(|text| (*text).to_owned())
+        })
+        .unwrap_or_default();
+    for fragment in [
+        "TRANSFORMERS_GEMMA_DTYPE=f16 is not a gate profile",
+        "73,509.6 > 65,504",
+        "no official F16 envelope exists",
+        "acceptance/measurements/half-precision-envelope-20261018.json",
     ] {
-        let (truth, official) = (directory(truth), directory(official));
-        Calibration::read(&truth, &official).report(&truth, &official);
+        assert!(
+            message.contains(fragment),
+            "{fragment:?} missing from {message:?}"
+        );
+    }
+}
+
+/// Reads the official BF16 envelope of the bundle `variables` names, from the bundles alone.
+///
+/// # Panics
+///
+/// If a retired variable is set, the dtype is not BF16, or [`Envelope::read`]
+/// refuses the bundles.
+fn official_envelope(variables: &BundleVariables) -> Envelope {
+    refuse_retired(&RETIRED);
+    let dtype = run_dtype("TRANSFORMERS_GEMMA_DTYPE");
+    refuse_f16(dtype);
+    assert!(
+        is_half_precision(dtype),
+        "set TRANSFORMERS_GEMMA_DTYPE=bf16 to read the official BF16 envelope"
+    );
+    Envelope::read(
+        dtype,
+        &directory(variables.reference),
+        &directory(variables.decode_truth),
+        &required_directories(variables.official),
+    )
+}
+
+/// The official BF16 graphs' distance from the short and long truths, which sets the half-precision bounds.
+///
+/// Reads only the bundles, validates each pairing, and prints each
+/// manifest's SHA-256, each official graph's maximum (with its position and
+/// vocabulary entry) and mean deviation of every prompt, the decode rows, and
+/// the decoded prompt, the envelopes and bounds, and the greedy steps a
+/// half-precision run compares. No Burn model runs, so a pass qualifies no
+/// Burn run.
+#[test]
+#[ignore = "needs TRANSFORMERS_GEMMA_DTYPE=bf16 and the short and long _REFERENCE_DIR, _DECODE_TRUTH_DIR, and _OFFICIAL_DIRS (bundles only)"]
+fn official_graphs_calibrate_the_half_precision_envelope() {
+    for variables in [&SHORT, &LONG] {
+        official_envelope(variables).report(&directory(variables.reference));
+    }
+}
+
+/// Every official BF16 graph lies within the envelope of the other three under the compiled slacks.
+///
+/// A failure means the slacks must be re-derived with
+/// `scripts/derive_half_precision_envelope.py`, never tuned; see the support
+/// module's Slack section. Bundles only.
+#[test]
+#[ignore = "needs TRANSFORMERS_GEMMA_DTYPE=bf16 and the short and long _REFERENCE_DIR, _DECODE_TRUTH_DIR, and _OFFICIAL_DIRS (bundles only)"]
+fn official_graphs_admit_each_other_leave_one_out() {
+    for variables in [&SHORT, &LONG] {
+        official_envelope(variables).assert_leave_one_out();
+    }
+}
+
+/// Transformers' own F16 graphs of both truths overflow, so Gemma 3 has no F16 envelope.
+///
+/// Reads the four official F16 graphs named by
+/// `TRANSFORMERS_GEMMA_F16_OFFICIAL_DIRS` and
+/// `TRANSFORMERS_GEMMA_LONG_F16_OFFICIAL_DIRS` and requires the envelope to be
+/// refused as uncalibrated, which is why `TRANSFORMERS_GEMMA_DTYPE=f16` is
+/// refused (see [F16](self#f16)). Bundles only.
+#[test]
+#[ignore = "needs the short and long _REFERENCE_DIR, _DECODE_TRUTH_DIR, and _F16_OFFICIAL_DIRS (bundles only)"]
+fn official_f16_graphs_overflow_so_gemma_has_no_f16_envelope() {
+    refuse_retired(&RETIRED);
+    for variables in [&SHORT, &LONG] {
+        let (truth, decode_truth, official) = (
+            directory(variables.reference),
+            directory(variables.decode_truth),
+            required_directories(variables.official_f16),
+        );
+        let refused = std::panic::catch_unwind(|| {
+            Envelope::read(TensorDType::F16, &truth, &decode_truth, &official)
+        })
+        .err()
+        .unwrap_or_else(|| {
+            panic!(
+                "{}: the official F16 graphs have an envelope",
+                truth.display()
+            )
+        });
+        let message = refused
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| {
+                refused
+                    .downcast_ref::<&str>()
+                    .map(|text| (*text).to_owned())
+            })
+            .unwrap_or_default();
+        eprintln!("{}: {message}", truth.display());
+        assert!(
+            message.starts_with("uncalibrated: official ")
+                && message.contains(" float16 non-finite at "),
+            "{}: the F16 envelope must be refused as uncalibrated, not with {message:?}",
+            truth.display()
+        );
     }
 }
 

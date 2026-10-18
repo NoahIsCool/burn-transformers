@@ -68,100 +68,79 @@
 //! the same F32 bundle (the F64 one for Qwen2-7B): against a half-precision
 //! bundle the two implementations' roundings would add, as the gpt-oss gate
 //! found. Its bounds are not chosen here but measured from the official
-//! implementation: `TRANSFORMERS_LLAMA_FAMILY_BF16_REFERENCE_DIR` names the
-//! bundle's BF16 twin, written by the same script with `--dtype bfloat16` from
-//! the same checkpoint, prompts, and greedy length, and
-//! `tests/support/half_precision_calibration.rs` validates the pairing fail
-//! closed (configuration and weight digests, versions, vocabulary,
-//! truncation, prompts and token IDs, dtype labels) before the checkpoint
-//! loads. Per prompt, Transformers' own BF16 logits deviate from the F32
-//! bundle by at most `M` and on average by `μ`; this crate's logits must stay
-//! within `1.2 M` at every position and `1.2 μ` on average. The factor `1.2`
-//! is the largest ratio of a Burn half-precision statistic to the official
-//! one measured on gpt-oss-20b (`1.1725`), rounded up; that module documents
-//! its derivation and fixes it for every checkpoint. The bounds are BF16's in
-//! both profiles: no official F16 bundle can be generated, so the Metal/F16
-//! run reuses them as an upper limit that does not reflect F16's eightfold
-//! smaller rounding unit, and its pass is weaker evidence than a Flex/BF16
-//! pass (that module's F16 runs section). The cached prefill and
-//! each batched row must lie within their prompt's `1.2 M` of the bundle and
-//! within `0.5` of the stateless pass (the gpt-oss self-consistency
-//! tolerance for F16 and BF16). The greedy continuation is judged by the
-//! same teacher-forced rule as an F32 run, with prompt 0's maximum bound
-//! `1.2 M` as the tolerance: every step whose reference margin exceeds
-//! `2.4 M` is compared and every other step is skipped as a tie. Whatever
-//! the margins, the cached greedy test also checks the decode path: every
-//! decode step must lie within `0.5` of the same run's stateless pass over
-//! prompt 0 and the greedy tokens at its position, and the longest prompt,
-//! prefilled for its first quarter and then decoded token by token, must
-//! meet both bounds of its prompt at every position, as gpt-oss's cached
-//! long-prompt test does.
-//! `TRANSFORMERS_LLAMA_FAMILY_TOLERANCE` is refused, because it would replace
-//! the calibration; `TRANSFORMERS_LLAMA_FAMILY_MIN_GREEDY` still applies.
+//! implementation, by `tests/support/half_precision_calibration.rs`:
+//! `TRANSFORMERS_LLAMA_FAMILY_OFFICIAL_DIRS` lists (separated as in `PATH`)
+//! the four bundles in which Transformers evaluates the same checkpoint,
+//! prompts, and greedy length in the run's dtype on the CPU and on MPS, with
+//! eager and SDPA attention, and `TRANSFORMERS_LLAMA_FAMILY_DECODE_TRUTH_DIR`
+//! names the decode truth, the F32 (F64) CPU-eager bundle that adds the
+//! reference's own stateless logits at the greedy positions. That module
+//! validates the pairing fail closed before the checkpoint loads. Per prompt,
+//! this crate's logits must stay within `s_max E_max` at every position and
+//! `s_mean E_mean` on average, where `E` is the largest deviation of the four
+//! official graphs from the truth and the slacks are that module's
+//! leave-one-out constants (`1.5` and `1.3` in BF16). If any official graph of
+//! the dtype is non-finite (Qwen2-7B in F16, whose official CPU and MPS eager
+//! F16 logits are NaN on every prompt), the run fails as uncalibrated before
+//! the checkpoint loads. `TRANSFORMERS_LLAMA_FAMILY_BF16_REFERENCE_DIR`, which
+//! named one official BF16 bundle under the previous rule, is refused.
 //!
-//! The official BF16 bundles were generated on 2026-10-17 (Transformers
-//! 5.2.0, PyTorch 2.10.0) and are recorded with their SHA-256s in
-//! `acceptance/measurements/half-precision-calibration-20261017.json`. Per
-//! prompt, they deviate from their twins by:
+//! The cached greedy test also checks the decode path whatever the margins:
+//! its cached decode rows, and the stateless pass's rows at the same
+//! positions, must each meet the bounds of the official graphs' decode rows
+//! against the decode truth; the cached-versus-stateless gap is printed as a
+//! diagnostic only. The longest prompt (the first of equal ones), prefilled for
+//! its first quarter and then decoded token by token, is judged against the
+//! envelope of the official graphs' own cached decode under that protocol. The
+//! cached prefill and each batched row must lie within their prompt's
+//! `s_max E_max` of the bundle and, provisionally, within `0.5` of the
+//! stateless pass. The greedy continuation is judged by the same
+//! teacher-forced rule as an F32 run, at the larger of prompt 0's and the
+//! decode rows' maximum bounds. `TRANSFORMERS_LLAMA_FAMILY_TOLERANCE` is
+//! refused, because it would replace the calibration;
+//! `TRANSFORMERS_LLAMA_FAMILY_MIN_GREEDY` still applies, and where no greedy
+//! step is decisive the cached greedy test needs it set to `0`, which drops
+//! only the argmax floor, not the decode checks. An F32 run's cached greedy
+//! test reads the decode truth too and compares its cached decode rows with
+//! it at the F32 tolerance.
 //!
-//! | checkpoint | max \|Δ\| (position) | mean \|Δ\| | decisive greedy steps |
-//! | --- | --- | --- | --- |
-//! | SmolLM-135M | `1.46` (0), `1.10` (0), `1.65` (0) | `0.190`, `0.075`, `0.071` | 0 of 32 |
-//! | Qwen3-4B | `0.700` (0), `0.701` (0), `0.880` (0) | `0.078`, `0.043`, `0.054` | 26 of 32 |
-//! | SmolLM3-3B | `6.28` (0), `6.67` (0), `5.33` (0) | `0.156`, `0.079`, `0.177` | 0 of 32 |
-//! | Qwen2-7B (F64 bundle) | `8.49` (0), `6.85` (0), `10.7` (0) | `0.421`, `0.312`, `0.675` | 0 of 32 |
-//! | Llama-3.1-8B | `0.137` (4), `0.212` (5), `0.182` (7) | `0.017`, `0.022`, `0.023` | 27 of 32 |
-//!
-//! Except on Llama-3.1-8B, the largest official deviation lies at the first
-//! position, whose massive activations round worst in BF16, so the maximum
-//! bound is loose at later positions and the mean is the sharper check.
-//! Where no greedy step is decisive, the cached greedy test needs
-//! `TRANSFORMERS_LLAMA_FAMILY_MIN_GREEDY=0`, as gpt-oss's half-precision
-//! greedy tests do; that drops only the argmax floor, not the decode checks.
-//! Only the cached greedy test reads the variable, so for SmolLM-135M,
-//! SmolLM3-3B, and Qwen2-7B it can be added to the whole command below.
-//! Qwen2-7B's official BF16 run already picks another first token than its
-//! F64 bundle. The first runs of this crate against these bounds (source
-//! `53f167b`, `acceptance/measurements/mac-validation-20261017.json`) pass
-//! every Metal/F16 test of all five checkpoints and every Flex/BF16 test of
-//! Qwen2-7B and Llama-3.1-8B. Flex/BF16 fails SmolLM-135M's prompt-logit and
-//! cached greedy tests (prompt 1, position 0: `1.436` against `1.322`),
-//! SmolLM3-3B's prompt-logit test (prompt 1 mean `0.0971` against `0.0947`),
-//! and the cached decode steps of Qwen3-4B (`0.5625`) and SmolLM3-3B
-//! (`0.516`) against the `0.5` self-consistency tolerance; the record traces
-//! these to the rule's width (some of Transformers' own SDPA and MPS BF16
-//! graphs fail it too) and to the twice-rounded half-precision SiLU of
-//! `feed_forward::apply_activation`. To run the Flex/BF16 gate (set `f16`,
-//! `--features metal`, and the `metal::` tests for Metal/F16):
+//! The official bundles, their digests, the envelopes, and the derivation of
+//! the slacks are recorded in
+//! `acceptance/measurements/half-precision-envelope-20261018.json`. To run the
+//! Flex/BF16 gate (set `f16`, `--features metal`, and the `metal::` tests for
+//! Metal/F16, with the `f16` bundles):
 //!
 //! ```text
+//! R=/Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b
 //! TRANSFORMERS_LLAMA_FAMILY_DTYPE=bf16 \
 //! TRANSFORMERS_LLAMA_FAMILY_DIR=/Volumes/T9/models/meta-llama/Llama-3.1-8B \
-//! TRANSFORMERS_LLAMA_FAMILY_REFERENCE_DIR=/Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b \
-//! TRANSFORMERS_LLAMA_FAMILY_BF16_REFERENCE_DIR=/Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b-bf16 \
+//! TRANSFORMERS_LLAMA_FAMILY_REFERENCE_DIR=$R \
+//! TRANSFORMERS_LLAMA_FAMILY_DECODE_TRUTH_DIR=$R-f32-cpu-eager \
+//! TRANSFORMERS_LLAMA_FAMILY_OFFICIAL_DIRS=$R-bf16-cpu-eager-7a50e44:$R-bf16-cpu-sdpa-7a50e44:$R-bf16-mps-eager-7a50e44:$R-bf16-mps-sdpa-7a50e44 \
 //! cargo test --release --test llama_family_artifacts -- --ignored --nocapture --test-threads 1
 //! ```
 //!
-//! The official BF16 bundle takes the twin's prompts (`--prompt`, repeated in
+//! Each official bundle takes the truth's prompts (`--prompt`, repeated in
 //! order) and greedy length; for the default prompts:
 //!
 //! ```text
 //! python3 -I scripts/generate_causal_lm_reference.py --dtype bfloat16 \
+//!   --device mps --attn-implementation sdpa \
+//!   --decode-tokens-from /Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b --prompt-decode \
 //!   --model-dir /Volumes/T9/models/meta-llama/Llama-3.1-8B \
-//!   --output /Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b-bf16 \
+//!   --output /Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b-bf16-mps-sdpa-7a50e44 \
 //!   --repository meta-llama/Llama-3.1-8B --revision d04e592bb4f6aa9cfee91e2e20afa771667e1d4b
 //! ```
 //!
-//! `official_bf16_reference_calibrates_the_half_precision_bounds` reproduces
-//! the table from the two bundles alone. It loads no checkpoint and runs no
-//! Burn model, so its pass qualifies no Burn run:
-//!
-//! ```text
-//! TRANSFORMERS_LLAMA_FAMILY_REFERENCE_DIR=/Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b \
-//! TRANSFORMERS_LLAMA_FAMILY_BF16_REFERENCE_DIR=/Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b-bf16 \
-//! cargo test --test llama_family_artifacts -- --ignored --exact \
-//!   official_bf16_reference_calibrates_the_half_precision_bounds --nocapture
-//! ```
+//! The decode truth is the same command with the truth's `--dtype` (`float32`,
+//! or `float64` for Qwen2-7B), the default CPU eager graph, and no
+//! `--prompt-decode`. Two bundle-only tests read the same variables but load
+//! no checkpoint and run no Burn model, so their passes qualify no Burn run:
+//! `official_graphs_calibrate_the_half_precision_envelope` prints every
+//! official deviation, envelope, bound, and the decisive greedy steps, and
+//! `official_graphs_admit_each_other_leave_one_out` fails if an official graph
+//! lies outside the envelope of the other three under the compiled slacks,
+//! which means they must be re-derived.
 //!
 //! # CUDA
 //!
@@ -184,11 +163,12 @@
 //! `TRANSFORMERS_LLAMA_FAMILY_TOLERANCE` and qualifies TF32 execution, not
 //! F32 numerics.
 //!
-//! `TRANSFORMERS_LLAMA_FAMILY_DTYPE`, the BF16 twin, and the official
-//! calibration select and judge a half-precision run on CUDA exactly as on
-//! Flex and Metal ([Half precision](#half-precision)): `bf16` is held to the
-//! official evaluation in its own precision, `f16` to the same bounds as an
-//! upper limit. Such a run refuses `TRANSFORMERS_LLAMA_FAMILY_TOLERANCE` on
+//! `TRANSFORMERS_LLAMA_FAMILY_DTYPE` and the official envelope select and
+//! judge a half-precision run on CUDA exactly as on Flex and Metal
+//! ([Half precision](#half-precision)): each dtype is held to the envelope of
+//! the four official graphs in its own precision, which were evaluated on the
+//! Mac's CPU and MPS (no official CUDA graph is part of the envelope). Such a
+//! run refuses `TRANSFORMERS_LLAMA_FAMILY_TOLERANCE` on
 //! every device and prints the probe's finding without acting on it: TF32
 //! rounds F32 operands, while the matrix products of these graphs take the
 //! stored F16 or BF16 tensors as operands (F32 appears only in elementwise
@@ -211,8 +191,8 @@ use burn::{
     tensor::{Int, Tensor, TensorData, backend::Backend},
 };
 use half_precision_calibration::{
-    Calibration, HalfPrecisionGate, is_half_precision, reject_overrides, required_directory,
-    run_dtype,
+    DecodeTruth, Envelope, HalfPrecisionGate, is_half_precision, refuse_retired, reject_overrides,
+    required_directories, required_directory, run_dtype,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -309,6 +289,12 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+/// Variables of the previous single-bundle half-precision rule, and what replaces each.
+const RETIRED: [(&str, &str); 1] = [(
+    "TRANSFORMERS_LLAMA_FAMILY_BF16_REFERENCE_DIR",
+    "TRANSFORMERS_LLAMA_FAMILY_OFFICIAL_DIRS and TRANSFORMERS_LLAMA_FAMILY_DECODE_TRUTH_DIR",
+)];
+
 /// Returns the checkpoint directory and the bundle directory.
 fn directories() -> (PathBuf, PathBuf) {
     (
@@ -350,19 +336,26 @@ type Loaded<B> = (AutoCausalLm<B>, Reference, f32, Option<HalfPrecisionGate>);
 /// tolerance from the probe ([`f32_tolerance`]), so a TF32 device without an
 /// explicit `TRANSFORMERS_LLAMA_FAMILY_TOLERANCE` fails before loading. An
 /// F16 or BF16 run refuses that variable on every device and is judged by
-/// the official calibration from `TRANSFORMERS_LLAMA_FAMILY_BF16_REFERENCE_DIR`,
-/// which is validated before the checkpoint loads.
+/// the official envelope of `TRANSFORMERS_LLAMA_FAMILY_OFFICIAL_DIRS` and
+/// `TRANSFORMERS_LLAMA_FAMILY_DECODE_TRUTH_DIR`, which is validated before the
+/// checkpoint loads. The retired single-bundle variable is refused in either
+/// dtype.
 fn load<B: Backend>(device: &B::Device) -> Loaded<B> {
+    refuse_retired(&RETIRED);
     let dtype = run_dtype("TRANSFORMERS_LLAMA_FAMILY_DTYPE");
     let precision = MatmulPrecision::probe::<B>(device);
     let (model_dir, reference_dir) = directories();
     let (tolerance, half) = if is_half_precision(dtype) {
         reject_overrides(&["TRANSFORMERS_LLAMA_FAMILY_TOLERANCE"]);
-        let official = required_directory("TRANSFORMERS_LLAMA_FAMILY_BF16_REFERENCE_DIR");
-        let half = HalfPrecisionGate::new(dtype, &reference_dir, &official);
+        let half = HalfPrecisionGate::new(
+            dtype,
+            &reference_dir,
+            &required_directory("TRANSFORMERS_LLAMA_FAMILY_DECODE_TRUTH_DIR"),
+            &required_directories("TRANSFORMERS_LLAMA_FAMILY_OFFICIAL_DIRS"),
+        );
         let tolerance = half.greedy_tolerance();
         eprintln!(
-            "F32 matrix products use {precision:?} inputs; the {dtype:?} run is judged by the official calibration, greedy steps at {tolerance:e}"
+            "F32 matrix products use {precision:?} inputs; the {dtype:?} run is judged by the official envelope, greedy steps at {tolerance:e}"
         );
         (tolerance, Some(half))
     } else {
@@ -474,28 +467,24 @@ fn decode_one<B: Backend>(
     )
 }
 
-/// Decodes the longest prompt token by token after a prefill of its first quarter and judges it by the half-precision rule.
+/// Decodes the longest prompt token by token after a prefill of its first quarter and judges it by the official prompt-decode envelope.
 ///
-/// The prefill returns the logits of each of its positions and every later
-/// position comes from one cached decode step, so the assembled
-/// `[tokens, V]` logits cover the whole prompt and must meet both of its
-/// bounds, as a stateless pass must. This bounds the decode path against
-/// the reference bundle itself, whatever the greedy margins, as gpt-oss's
-/// `check_cached_long_prompt` does.
+/// The prompt and the prefill length are the ones the official graphs used
+/// ([`HalfPrecisionGate::prompt_decode_plan`]). The prefill returns the
+/// logits of each of its positions and every later position comes from one
+/// cached decode step, so the assembled `[tokens, V]` logits cover the whole
+/// prompt and must meet both bounds of the official graphs' own cached decode
+/// under the same protocol, as gpt-oss's `check_cached_long_prompt` bounds its
+/// decode path against the bundle itself.
 fn check_cached_prompt_decode<B: Backend>(
     model: &AutoCausalLm<B>,
     reference: &Reference,
     half: &HalfPrecisionGate,
     device: &B::Device,
 ) {
-    let (index, prompt) = reference
-        .prompts
-        .iter()
-        .enumerate()
-        .max_by_key(|(_, prompt)| prompt.tokens.len())
-        .unwrap();
+    let (index, prefill) = half.prompt_decode_plan();
+    let prompt = &reference.prompts[index];
     let length = prompt.tokens.len();
-    let prefill = (length / 4).max(1);
     let mut state = model
         .new_decode_state(CacheConfig::new(1, length).unwrap(), 1, device)
         .unwrap();
@@ -517,9 +506,8 @@ fn check_cached_prompt_decode<B: Backend>(
     for &token in &prompt.tokens[prefill..] {
         logits.extend(decode_one(model, &mut state, token, device));
     }
-    half.check_prompt(
+    half.check_prompt_decode(
         &format!("prompt {index} decoded after a {prefill}-token prefill"),
-        index,
         &logits,
         &prompt.logits,
     );
@@ -564,19 +552,27 @@ fn check_prompt_logits<B: Backend>(device: &B::Device) {
     }
 }
 
-/// The cached greedy continuation of prompt 0 matches at every decisive step.
+/// The cached greedy continuation of prompt 0 matches at every decisive step, and its decode rows match the decode truth.
 ///
 /// The reference's tokens are fed back, so ties are skipped rather than
 /// ending the comparison; see [`check_teacher_forced_greedy`], which decides
-/// an F32 run's steps at its tolerance and a half-precision run's at prompt
-/// 0's maximum bound. A half-precision run also checks the prefill against
-/// the stateless pass and, because few or no steps may be decisive, the
-/// decode path regardless of the margins: every decode step against the same
-/// run's stateless pass over prompt 0 and the greedy tokens, and the longest
-/// prompt decoded token by token against the bundle
-/// ([`check_cached_prompt_decode`]).
+/// an F32 run's steps at its tolerance and a half-precision run's at the
+/// gate's greedy bound. Whatever the margins, every decode row is also judged
+/// against the decode truth in `TRANSFORMERS_LLAMA_FAMILY_DECODE_TRUTH_DIR`:
+/// an F32 run's cached rows at its tolerance ([`DecodeTruth::check_f32`]), a
+/// half-precision run's cached rows and its stateless rows at the same
+/// positions by the official decode envelope
+/// ([`HalfPrecisionGate::check_decode`]). A half-precision run also checks
+/// the prefill against the stateless pass (provisionally) and the longest
+/// prompt decoded token by token ([`check_cached_prompt_decode`]).
 fn check_cached_greedy<B: Backend>(device: &B::Device) {
     let (model, reference, tolerance, half) = load::<B>(device);
+    let f32_truth = half.is_none().then(|| {
+        DecodeTruth::read(
+            &directories().1,
+            &required_directory("TRANSFORMERS_LLAMA_FAMILY_DECODE_TRUTH_DIR"),
+        )
+    });
     let prompt = &reference.prompts[0];
     let capacity = prompt.tokens.len() + reference.greedy.len();
     let mut state = model
@@ -602,13 +598,11 @@ fn check_cached_greedy<B: Backend>(device: &B::Device) {
             half.check_consistency("cached prefill", &logits, &stateless);
         }
     }
-    // A half-precision run keeps every decode step's logits for the checks below.
+    // Every decode step's logits are kept for the decode-row checks below.
     let mut decoded = Vec::new();
     let mut decode = |token| {
         let logits = decode_one(&model, &mut state, token, device);
-        if half.is_some() {
-            decoded.push(logits.clone());
-        }
+        decoded.push(logits.clone());
         logits
     };
     check_teacher_forced_greedy(
@@ -620,21 +614,24 @@ fn check_cached_greedy<B: Backend>(device: &B::Device) {
         logits,
         &mut decode,
     );
-    let Some(half) = &half else {
-        return;
-    };
     // The comparison decodes no token after its last step; decoding the last
     // greedy token too gives every token of the continuation one decode step,
     // and decode step s, fed greedy token s at position T + s, returns the
-    // stateless pass's logits at that position.
+    // logits of that position, the decode truth's row s.
     let Some(&(token, _)) = reference.greedy.last() else {
         panic!("the bundle's greedy continuation is empty, so no decode step can be checked");
     };
     decode(token);
+    let Some(half) = &half else {
+        f32_truth
+            .expect("an F32 run reads the decode truth")
+            .check_f32("cached decode", &decoded, tolerance);
+        return;
+    };
     let continued = continued_prompt(&reference);
     let positions: Vec<usize> = (prompt.tokens.len()..continued.len()).collect();
     let stateless = logits_at(&model, &continued, &positions, device);
-    half.check_decode_steps("cached decode", prompt.tokens.len(), &decoded, &stateless);
+    half.check_decode("cached decode", prompt.tokens.len(), &decoded, &stateless);
     check_cached_prompt_decode(&model, &reference, half, device);
 }
 
@@ -690,19 +687,51 @@ fn check_batched_prefill<B: Backend>(device: &B::Device) {
     }
 }
 
-/// The official BF16 bundle's distance from the F32 (or F64) bundle, which sets the half-precision bounds.
+/// Reads the official envelope of `TRANSFORMERS_LLAMA_FAMILY_DTYPE` from the bundles alone.
 ///
-/// Reads only the two bundles, validates their pairing, and prints each
-/// manifest's SHA-256, each prompt's official maximum (with its position and
-/// vocabulary entry) and mean deviation, the bounds the rule derives, and the
-/// greedy steps a half-precision run compares. No Burn model runs, so a pass
-/// qualifies no Burn run.
+/// # Panics
+///
+/// If the dtype is not half precision or [`Envelope::read`] refuses the bundles.
+fn official_envelope() -> Envelope {
+    refuse_retired(&RETIRED);
+    let dtype = run_dtype("TRANSFORMERS_LLAMA_FAMILY_DTYPE");
+    assert!(
+        is_half_precision(dtype),
+        "set TRANSFORMERS_LLAMA_FAMILY_DTYPE to bf16 or f16 to read the official envelope of that dtype"
+    );
+    Envelope::read(
+        dtype,
+        &required_directory("TRANSFORMERS_LLAMA_FAMILY_REFERENCE_DIR"),
+        &required_directory("TRANSFORMERS_LLAMA_FAMILY_DECODE_TRUTH_DIR"),
+        &required_directories("TRANSFORMERS_LLAMA_FAMILY_OFFICIAL_DIRS"),
+    )
+}
+
+/// The official graphs' distance from the truth, which sets the half-precision bounds of `TRANSFORMERS_LLAMA_FAMILY_DTYPE`.
+///
+/// Reads only the bundles, validates their pairing, and prints each
+/// manifest's SHA-256, each official graph's maximum (with its position and
+/// vocabulary entry) and mean deviation of every prompt, the decode rows, and
+/// the decoded prompt, the envelopes and bounds, and the greedy steps a
+/// half-precision run compares. No Burn model runs, so a pass qualifies no
+/// Burn run; an uncalibrated truth fails.
 #[test]
-#[ignore = "needs TRANSFORMERS_LLAMA_FAMILY_REFERENCE_DIR and _BF16_REFERENCE_DIR (bundles only)"]
-fn official_bf16_reference_calibrates_the_half_precision_bounds() {
-    let truth = required_directory("TRANSFORMERS_LLAMA_FAMILY_REFERENCE_DIR");
-    let official = required_directory("TRANSFORMERS_LLAMA_FAMILY_BF16_REFERENCE_DIR");
-    Calibration::read(&truth, &official).report(&truth, &official);
+#[ignore = "needs TRANSFORMERS_LLAMA_FAMILY_DTYPE, _REFERENCE_DIR, _DECODE_TRUTH_DIR, and _OFFICIAL_DIRS (bundles only)"]
+fn official_graphs_calibrate_the_half_precision_envelope() {
+    official_envelope().report(&required_directory(
+        "TRANSFORMERS_LLAMA_FAMILY_REFERENCE_DIR",
+    ));
+}
+
+/// Every official graph lies within the envelope of the other three under the compiled slacks.
+///
+/// A failure means the slacks must be re-derived with
+/// `scripts/derive_half_precision_envelope.py`, never tuned; see the support
+/// module's Slack section. Bundles only.
+#[test]
+#[ignore = "needs TRANSFORMERS_LLAMA_FAMILY_DTYPE, _REFERENCE_DIR, _DECODE_TRUTH_DIR, and _OFFICIAL_DIRS (bundles only)"]
+fn official_graphs_admit_each_other_leave_one_out() {
+    official_envelope().assert_leave_one_out();
 }
 
 /// Flex (F32, or `TRANSFORMERS_LLAMA_FAMILY_DTYPE`): every prompt position's logits.
