@@ -112,6 +112,19 @@ statements of the envelope record, which stays byte-identical with the other
 earlier records. `scripts/tests/test_half_precision_review_record.py`
 recomputes its statuses, figures, and identities. It promotes no checkpoint.
 
+The [Nemotron-H envelope record](nemotron-h-envelope-20261018.json) replaces
+the Nemotron-H official-precision gate's two-graph floor with an envelope
+over four official F16 graphs (CPU and MPS, eager and SDPA attention) and a
+per-path leave-one-out slack from those graphs alone. It holds the method
+registered before any new data, the two new SDPA graph bundles' manifests and
+generator logs (a first, resident MPS attempt swapped and was stopped), a
+control repeating the oracle's MPS eager graph (not bitwise equal to it), the
+derivation and its assessment written before any Burn row, and the gate run
+at `2cf83d7`, which passes with every slack at the rounding's `1.1`.
+`scripts/tests/test_nemotron_h_envelope_record.py` recomputes its statuses,
+figures, quotes, ordering, and identities, and the earlier records stay
+byte-identical. It promotes no checkpoint.
+
 ## Published and repository-only records
 
 The crates.io package carries only part of this directory, because the
