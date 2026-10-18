@@ -77,6 +77,26 @@ findings, and leaves the October 17 records byte-identical;
 `scripts/tests/test_half_precision_envelope_record.py` ties every quoted
 figure, status, and identity to the committed logs. It promotes no checkpoint.
 
+The [half-precision follow-ups record](half-precision-followups-20261017.json),
+named for the round that began on October 17 with the decision measurements,
+completes that round. It repeats the decisions with their rationale,
+rejected alternatives, and review flags, verbatim from the decision stage's
+report, and states what each led to. It also records the October 18 rerun of
+every Llama-family and Gemma gate at the integrated head `8181605`: 106
+processes in the worktree itself, from release binaries rebuilt there that
+are byte-identical to the `f9f78b5` gate binaries. 94 pass; the 12 expected
+failures are Qwen2-7B's uncalibrated F16 runs and the Gemma Metal/F16 and
+Metal BF16 refusals. The 99 runs with an `f9f78b5` counterpart reproduce its
+output exactly, and all 40 F32 gates repeat every printed statistic of the
+last pre-SiLU round. The round still fails, because the Nemotron-H
+official-precision failure at `f9f78b5` stands. The campaign directory holds
+the rerun's logs and harness, the digests of every bundle, checkpoint
+configuration, and binary the runs read, the final head checks, and the
+stage reports. The envelope and October 17 records stay byte-identical, and
+`scripts/tests/test_half_precision_followups_record.py` recomputes every
+status, comparison, and identity from the committed logs. The record promotes
+no checkpoint.
+
 ## Published and repository-only records
 
 The crates.io package carries only part of this directory, because the

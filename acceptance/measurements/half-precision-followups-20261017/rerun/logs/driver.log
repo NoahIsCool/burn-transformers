@@ -1,0 +1,128 @@
+2026-10-18T05:05:35+00:00 calibration.SmolLM-135M.bf16.official_graphs_calibrate_the_half_precision_envelope exit=0
+2026-10-18T05:05:37+00:00 calibration.SmolLM-135M.bf16.official_graphs_admit_each_other_leave_one_out exit=0
+2026-10-18T05:05:38+00:00 calibration.SmolLM-135M.f16.official_graphs_calibrate_the_half_precision_envelope exit=0
+2026-10-18T05:05:39+00:00 calibration.SmolLM-135M.f16.official_graphs_admit_each_other_leave_one_out exit=0
+2026-10-18T05:05:41+00:00 calibration.Qwen3-4B.bf16.official_graphs_calibrate_the_half_precision_envelope exit=0
+2026-10-18T05:05:42+00:00 calibration.Qwen3-4B.bf16.official_graphs_admit_each_other_leave_one_out exit=0
+2026-10-18T05:05:44+00:00 calibration.Qwen3-4B.f16.official_graphs_calibrate_the_half_precision_envelope exit=0
+2026-10-18T05:05:46+00:00 calibration.Qwen3-4B.f16.official_graphs_admit_each_other_leave_one_out exit=0
+2026-10-18T05:05:47+00:00 calibration.SmolLM3-3B.bf16.official_graphs_calibrate_the_half_precision_envelope exit=0
+2026-10-18T05:05:48+00:00 calibration.SmolLM3-3B.bf16.official_graphs_admit_each_other_leave_one_out exit=0
+2026-10-18T05:05:49+00:00 calibration.SmolLM3-3B.f16.official_graphs_calibrate_the_half_precision_envelope exit=0
+2026-10-18T05:05:50+00:00 calibration.SmolLM3-3B.f16.official_graphs_admit_each_other_leave_one_out exit=0
+2026-10-18T05:05:52+00:00 calibration.Qwen2-7B-f64.bf16.official_graphs_calibrate_the_half_precision_envelope exit=0
+2026-10-18T05:05:53+00:00 calibration.Qwen2-7B-f64.bf16.official_graphs_admit_each_other_leave_one_out exit=0
+2026-10-18T05:05:55+00:00 calibration.Qwen2-7B-f64.f16.official_graphs_calibrate_the_half_precision_envelope exit=101
+2026-10-18T05:05:56+00:00 calibration.Qwen2-7B-f64.f16.official_graphs_admit_each_other_leave_one_out exit=101
+2026-10-18T05:05:57+00:00 calibration.Llama-3.1-8B.bf16.official_graphs_calibrate_the_half_precision_envelope exit=0
+2026-10-18T05:05:58+00:00 calibration.Llama-3.1-8B.bf16.official_graphs_admit_each_other_leave_one_out exit=0
+2026-10-18T05:05:59+00:00 calibration.Llama-3.1-8B.f16.official_graphs_calibrate_the_half_precision_envelope exit=0
+2026-10-18T05:06:00+00:00 calibration.Llama-3.1-8B.f16.official_graphs_admit_each_other_leave_one_out exit=0
+2026-10-18T05:06:27+00:00 calibration.gemma.bf16.official_graphs_calibrate_the_half_precision_envelope exit=0
+2026-10-18T05:06:45+00:00 calibration.gemma.bf16.official_graphs_admit_each_other_leave_one_out exit=0
+2026-10-18T05:06:46+00:00 calibration.gemma.f16.official_f16_graphs_overflow_so_gemma_has_no_f16_envelope exit=0
+2026-10-18T05:06:48+00:00 gemma.f16.refusal-unit.f16_runs_are_refused_with_the_measured_overflow exit=0
+2026-10-18T05:06:48+00:00 waiting for the lock (SmolLM-135M)
+2026-10-18T05:06:48+00:00 lock acquired (SmolLM-135M)
+2026-10-18T05:06:49+00:00 SmolLM-135M.f32.flex.prompt_logits_match_the_reference exit=0
+2026-10-18T05:06:50+00:00 SmolLM-135M.f32.flex.cached_greedy_matches_the_reference exit=0
+2026-10-18T05:06:51+00:00 SmolLM-135M.f32.flex.batched_prefill_matches_the_reference exit=0
+2026-10-18T05:06:52+00:00 SmolLM-135M.f32.metal.prompt_logits_match_the_reference exit=0
+2026-10-18T05:06:54+00:00 SmolLM-135M.f32.metal.cached_greedy_matches_the_reference exit=0
+2026-10-18T05:06:55+00:00 SmolLM-135M.f32.metal.batched_prefill_matches_the_reference exit=0
+2026-10-18T05:06:57+00:00 SmolLM-135M.bf16.flex.prompt_logits_match_the_reference exit=0
+2026-10-18T05:07:04+00:00 SmolLM-135M.bf16.flex.cached_greedy_matches_the_reference exit=0
+2026-10-18T05:07:06+00:00 SmolLM-135M.bf16.flex.batched_prefill_matches_the_reference exit=0
+2026-10-18T05:07:07+00:00 SmolLM-135M.f16.metal.prompt_logits_match_the_reference exit=0
+2026-10-18T05:07:09+00:00 SmolLM-135M.f16.metal.cached_greedy_matches_the_reference exit=0
+2026-10-18T05:07:10+00:00 SmolLM-135M.f16.metal.batched_prefill_matches_the_reference exit=0
+2026-10-18T05:07:10+00:00 lock released (SmolLM-135M)
+2026-10-18T05:07:11+00:00 waiting for the lock (Qwen3-4B)
+2026-10-18T05:07:11+00:00 lock acquired (Qwen3-4B)
+2026-10-18T05:07:26+00:00 Qwen3-4B.f32.flex.prompt_logits_match_the_reference exit=0
+2026-10-18T05:07:40+00:00 Qwen3-4B.f32.flex.cached_greedy_matches_the_reference exit=0
+2026-10-18T05:07:45+00:00 Qwen3-4B.f32.flex.batched_prefill_matches_the_reference exit=0
+2026-10-18T05:07:54+00:00 Qwen3-4B.f32.metal.prompt_logits_match_the_reference exit=0
+2026-10-18T05:08:04+00:00 Qwen3-4B.f32.metal.cached_greedy_matches_the_reference exit=0
+2026-10-18T05:08:09+00:00 Qwen3-4B.f32.metal.batched_prefill_matches_the_reference exit=0
+2026-10-18T05:08:15+00:00 Qwen3-4B.bf16.flex.prompt_logits_match_the_reference exit=0
+2026-10-18T05:08:54+00:00 Qwen3-4B.bf16.flex.cached_greedy_matches_the_reference exit=0
+2026-10-18T05:09:02+00:00 Qwen3-4B.bf16.flex.batched_prefill_matches_the_reference exit=0
+2026-10-18T05:09:09+00:00 Qwen3-4B.f16.metal.prompt_logits_match_the_reference exit=0
+2026-10-18T05:09:17+00:00 Qwen3-4B.f16.metal.cached_greedy_matches_the_reference exit=0
+2026-10-18T05:09:23+00:00 Qwen3-4B.f16.metal.batched_prefill_matches_the_reference exit=0
+2026-10-18T05:09:23+00:00 lock released (Qwen3-4B)
+2026-10-18T05:09:23+00:00 waiting for the lock (SmolLM3-3B)
+2026-10-18T05:09:23+00:00 lock acquired (SmolLM3-3B)
+2026-10-18T05:09:37+00:00 SmolLM3-3B.f32.flex.prompt_logits_match_the_reference exit=0
+2026-10-18T05:09:48+00:00 SmolLM3-3B.f32.flex.cached_greedy_matches_the_reference exit=0
+2026-10-18T05:09:52+00:00 SmolLM3-3B.f32.flex.batched_prefill_matches_the_reference exit=0
+2026-10-18T05:09:58+00:00 SmolLM3-3B.f32.metal.prompt_logits_match_the_reference exit=0
+2026-10-18T05:10:07+00:00 SmolLM3-3B.f32.metal.cached_greedy_matches_the_reference exit=0
+2026-10-18T05:10:11+00:00 SmolLM3-3B.f32.metal.batched_prefill_matches_the_reference exit=0
+2026-10-18T05:10:16+00:00 SmolLM3-3B.bf16.flex.prompt_logits_match_the_reference exit=0
+2026-10-18T05:10:43+00:00 SmolLM3-3B.bf16.flex.cached_greedy_matches_the_reference exit=0
+2026-10-18T05:10:49+00:00 SmolLM3-3B.bf16.flex.batched_prefill_matches_the_reference exit=0
+2026-10-18T05:10:53+00:00 SmolLM3-3B.f16.metal.prompt_logits_match_the_reference exit=0
+2026-10-18T05:11:00+00:00 SmolLM3-3B.f16.metal.cached_greedy_matches_the_reference exit=0
+2026-10-18T05:11:06+00:00 SmolLM3-3B.f16.metal.batched_prefill_matches_the_reference exit=0
+2026-10-18T05:11:06+00:00 lock released (SmolLM3-3B)
+2026-10-18T05:11:06+00:00 waiting for the lock (Llama-3.1-8B)
+2026-10-18T05:11:06+00:00 lock acquired (Llama-3.1-8B)
+2026-10-18T05:11:41+00:00 Llama-3.1-8B.f32.flex.prompt_logits_match_the_reference exit=0
+2026-10-18T05:12:07+00:00 Llama-3.1-8B.f32.flex.cached_greedy_matches_the_reference exit=0
+2026-10-18T05:12:18+00:00 Llama-3.1-8B.f32.flex.batched_prefill_matches_the_reference exit=0
+2026-10-18T05:12:33+00:00 Llama-3.1-8B.f32.metal.prompt_logits_match_the_reference exit=0
+2026-10-18T05:12:49+00:00 Llama-3.1-8B.f32.metal.cached_greedy_matches_the_reference exit=0
+2026-10-18T05:12:58+00:00 Llama-3.1-8B.f32.metal.batched_prefill_matches_the_reference exit=0
+2026-10-18T05:13:11+00:00 Llama-3.1-8B.bf16.flex.prompt_logits_match_the_reference exit=0
+2026-10-18T05:14:07+00:00 Llama-3.1-8B.bf16.flex.cached_greedy_matches_the_reference exit=0
+2026-10-18T05:14:24+00:00 Llama-3.1-8B.bf16.flex.batched_prefill_matches_the_reference exit=0
+2026-10-18T05:14:35+00:00 Llama-3.1-8B.f16.metal.prompt_logits_match_the_reference exit=0
+2026-10-18T05:14:48+00:00 Llama-3.1-8B.f16.metal.cached_greedy_matches_the_reference exit=0
+2026-10-18T05:14:58+00:00 Llama-3.1-8B.f16.metal.batched_prefill_matches_the_reference exit=0
+2026-10-18T05:14:58+00:00 lock released (Llama-3.1-8B)
+2026-10-18T05:14:58+00:00 waiting for the lock (Qwen2-7B-f64)
+2026-10-18T05:14:58+00:00 lock acquired (Qwen2-7B-f64)
+2026-10-18T05:15:29+00:00 Qwen2-7B-f64.f32.flex.prompt_logits_match_the_reference exit=0
+2026-10-18T05:15:55+00:00 Qwen2-7B-f64.f32.flex.cached_greedy_matches_the_reference exit=0
+2026-10-18T05:16:03+00:00 Qwen2-7B-f64.f32.flex.batched_prefill_matches_the_reference exit=0
+2026-10-18T05:16:17+00:00 Qwen2-7B-f64.f32.metal.prompt_logits_match_the_reference exit=0
+2026-10-18T05:16:34+00:00 Qwen2-7B-f64.f32.metal.cached_greedy_matches_the_reference exit=0
+2026-10-18T05:16:42+00:00 Qwen2-7B-f64.f32.metal.batched_prefill_matches_the_reference exit=0
+2026-10-18T05:16:51+00:00 Qwen2-7B-f64.bf16.flex.prompt_logits_match_the_reference exit=0
+2026-10-18T05:17:42+00:00 Qwen2-7B-f64.bf16.flex.cached_greedy_matches_the_reference exit=0
+2026-10-18T05:17:53+00:00 Qwen2-7B-f64.bf16.flex.batched_prefill_matches_the_reference exit=0
+2026-10-18T05:17:55+00:00 Qwen2-7B-f64.f16.metal.prompt_logits_match_the_reference exit=101
+2026-10-18T05:17:56+00:00 Qwen2-7B-f64.f16.metal.cached_greedy_matches_the_reference exit=101
+2026-10-18T05:17:57+00:00 Qwen2-7B-f64.f16.metal.batched_prefill_matches_the_reference exit=101
+2026-10-18T05:17:57+00:00 lock released (Qwen2-7B-f64)
+2026-10-18T05:17:57+00:00 waiting for the lock (gemma)
+2026-10-18T05:17:57+00:00 lock acquired (gemma)
+2026-10-18T05:18:12+00:00 gemma.f32.flex.prompt_logits_match_the_reference exit=0
+2026-10-18T05:18:27+00:00 gemma.f32.flex.cached_greedy_matches_the_reference exit=0
+2026-10-18T05:18:32+00:00 gemma.f32.flex.batched_prefill_matches_the_reference exit=0
+2026-10-18T05:19:20+00:00 gemma.f32.flex.long_context_logits_cross_the_sliding_window exit=0
+2026-10-18T05:19:49+00:00 gemma.f32.flex.long_context_cached_decode_wraps_the_rings exit=0
+2026-10-18T05:19:57+00:00 gemma.f32.metal.prompt_logits_match_the_reference exit=0
+2026-10-18T05:20:07+00:00 gemma.f32.metal.cached_greedy_matches_the_reference exit=0
+2026-10-18T05:20:13+00:00 gemma.f32.metal.batched_prefill_matches_the_reference exit=0
+2026-10-18T05:20:25+00:00 gemma.f32.metal.long_context_logits_cross_the_sliding_window exit=0
+2026-10-18T05:20:36+00:00 gemma.f32.metal.long_context_cached_decode_wraps_the_rings exit=0
+2026-10-18T05:20:44+00:00 gemma.bf16.flex.prompt_logits_match_the_reference exit=0
+2026-10-18T05:21:35+00:00 gemma.bf16.flex.cached_greedy_matches_the_reference exit=0
+2026-10-18T05:21:46+00:00 gemma.bf16.flex.batched_prefill_matches_the_reference exit=0
+2026-10-18T05:23:02+00:00 gemma.bf16.flex.long_context_logits_cross_the_sliding_window exit=0
+2026-10-18T05:24:16+00:00 gemma.bf16.flex.long_context_cached_decode_wraps_the_rings exit=0
+2026-10-18T05:24:16+00:00 lock released (gemma)
+2026-10-18T05:24:16+00:00 waiting for the lock (refusals)
+2026-10-18T05:24:16+00:00 lock acquired (refusals)
+2026-10-18T05:24:17+00:00 refusal.gemma.f16.metal.prompt_logits_match_the_reference exit=101
+2026-10-18T05:24:18+00:00 refusal.gemma.f16.metal.cached_greedy_matches_the_reference exit=101
+2026-10-18T05:24:19+00:00 refusal.gemma.f16.metal.batched_prefill_matches_the_reference exit=101
+2026-10-18T05:24:20+00:00 refusal.gemma.f16.metal.long_context_logits_cross_the_sliding_window exit=101
+2026-10-18T05:24:22+00:00 refusal.gemma.f16.metal.long_context_cached_decode_wraps_the_rings exit=101
+2026-10-18T05:24:24+00:00 refusal.gemma.bf16.metal.prompt_logits_match_the_reference exit=101
+2026-10-18T05:24:25+00:00 refusal.SmolLM-135M.bf16.metal.prompt_logits_match_the_reference exit=101
+2026-10-18T05:24:25+00:00 lock released (refusals)
+2026-10-18T05:24:25+00:00 done calibration SmolLM-135M Qwen3-4B SmolLM3-3B Llama-3.1-8B Qwen2-7B-f64 gemma refusals

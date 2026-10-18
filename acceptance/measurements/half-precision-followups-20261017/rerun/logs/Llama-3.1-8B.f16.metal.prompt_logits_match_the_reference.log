@@ -1,0 +1,47 @@
+== source 818160545802c1374f7607d26ce20cc86d2d758d dirty=0
+== checkout /Users/nover/repos/transformers-worktrees/tfm-half-followups2 (branch claude/tfm-half-followups2)
+== binary /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/llama_family_artifacts-693e11c29d0eb894 sha256 72a204e1c37262448b47e772e980a72cba33fc8ae1618af1385ad521009db738
+== metal/F16 metal::metal_prompt_logits_match_the_reference
+== env TRANSFORMERS_LLAMA_FAMILY_DECODE_TRUTH_DIR=/Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b-f32-cpu-eager
+== env TRANSFORMERS_LLAMA_FAMILY_DIR=/Volumes/T9/models/meta-llama/Llama-3.1-8B
+== env TRANSFORMERS_LLAMA_FAMILY_DTYPE=f16
+== env TRANSFORMERS_LLAMA_FAMILY_OFFICIAL_DIRS=/Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b-f16-cpu-eager-7a50e44:/Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b-f16-cpu-sdpa-7a50e44:/Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b-f16-mps-eager-7a50e44:/Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b-f16-mps-sdpa-7a50e44
+== env TRANSFORMERS_LLAMA_FAMILY_REFERENCE_DIR=/Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b
+== cwd /Users/nover/repos/transformers-worktrees/tfm-half-followups2
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/llama_family_artifacts-693e11c29d0eb894 --ignored --exact --nocapture --test-threads 1 metal::metal_prompt_logits_match_the_reference
+== start 2026-10-18T05:14:24+00:00 load 4.02 3.76 3.21 free 90%
+
+running 1 test
+test metal::metal_prompt_logits_match_the_reference ... F16 bounds of prompt 0: max 1.901039257645607e-1, mean 8.30993399655944e-3 (1.7 and 1.7 times the official envelope 1.118258386850357e-1, 4.888196468564377e-3)
+F16 bounds of prompt 1: max 1.901039257645607e-1, mean 6.843262705825846e-3 (1.7 and 1.7 times the official envelope 1.118258386850357e-1, 4.025448650485792e-3)
+F16 bounds of prompt 2: max 1.901039257645607e-1, mean 7.466436090650365e-3 (1.7 and 1.7 times the official envelope 1.118258386850357e-1, 4.392021229794332e-3)
+F16 bounds of decode rows: max 5.794070959091186e-2, mean 4.641327962204196e-3 (1.7 and 1.7 times the official envelope 3.4082770347595215e-2, 2.730192918943645e-3)
+F16 bounds of prompt 1 decoded rows: max 1.901039257645607e-1, mean 6.904407626362898e-3 (1.7 and 1.7 times the official envelope 1.118258386850357e-1, 4.061416250801705e-3)
+F32 matrix products use F32 inputs; the F16 run is judged by the official envelope, greedy steps at 1.9010392e-1
+prompt 0: 6 tokens, max |Δ| = 1.026858240365982e-1 at position 0 (bound 1.901039257645607e-1), mean |Δ| = 4.38271168778463e-3 (bound 8.30993399655944e-3)
+prompt 1: 14 tokens, max |Δ| = 1.026858240365982e-1 at position 0 (bound 1.901039257645607e-1), mean |Δ| = 3.752916037458718e-3 (bound 6.843262705825846e-3)
+prompt 2: 9 tokens, max |Δ| = 1.026858240365982e-1 at position 0 (bound 1.901039257645607e-1), mean |Δ| = 3.969059308039585e-3 (bound 7.466436090650365e-3)
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 33 filtered out; finished in 9.23s
+
+        9.25 real         5.34 user         3.61 sys
+          7850262528  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             1213246  page reclaims
+                   6  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                  22  voluntary context switches
+               37398  involuntary context switches
+        135587800430  instructions retired
+         32944207671  cycles elapsed
+         22509540560  peak memory footprint
+== exit=0 wall=10.2s min_free_pct=74 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+== source after run 818160545802c1374f7607d26ce20cc86d2d758d dirty=0

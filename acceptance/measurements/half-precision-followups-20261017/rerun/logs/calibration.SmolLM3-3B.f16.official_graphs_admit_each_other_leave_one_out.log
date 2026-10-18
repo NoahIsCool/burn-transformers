@@ -1,0 +1,57 @@
+== source 818160545802c1374f7607d26ce20cc86d2d758d dirty=0
+== checkout /Users/nover/repos/transformers-worktrees/tfm-half-followups2 (branch claude/tfm-half-followups2)
+== binary /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/llama_family_artifacts-693e11c29d0eb894 sha256 72a204e1c37262448b47e772e980a72cba33fc8ae1618af1385ad521009db738
+== bundles/F16 official_graphs_admit_each_other_leave_one_out
+== env TRANSFORMERS_LLAMA_FAMILY_DECODE_TRUTH_DIR=/Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28-f32-cpu-eager
+== env TRANSFORMERS_LLAMA_FAMILY_DTYPE=f16
+== env TRANSFORMERS_LLAMA_FAMILY_OFFICIAL_DIRS=/Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28-f16-cpu-eager-7a50e44:/Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28-f16-cpu-sdpa-7a50e44:/Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28-f16-mps-eager-7a50e44:/Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28-f16-mps-sdpa-7a50e44
+== env TRANSFORMERS_LLAMA_FAMILY_REFERENCE_DIR=/Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28
+== cwd /Users/nover/repos/transformers-worktrees/tfm-half-followups2
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/llama_family_artifacts-693e11c29d0eb894 --ignored --exact --nocapture --test-threads 1 official_graphs_admit_each_other_leave_one_out
+== start 2026-10-18T05:05:49+00:00 load 5.48 3.89 2.89 free 90%
+
+running 1 test
+test official_graphs_admit_each_other_leave_one_out ... prompt 0: official cpu-eager leave-one-out max ratio 0.9903 (slack 1.7), mean ratio 0.7958 (slack 1.7)
+prompt 0: official cpu-sdpa leave-one-out max ratio 0.9903 (slack 1.7), mean ratio 0.8852 (slack 1.7)
+prompt 0: official mps-eager leave-one-out max ratio 1.0000 (slack 1.7), mean ratio 1.0347 (slack 1.7)
+prompt 0: official mps-sdpa leave-one-out max ratio 1.0000 (slack 1.7), mean ratio 0.9664 (slack 1.7)
+prompt 1: official cpu-eager leave-one-out max ratio 1.0000 (slack 1.7), mean ratio 0.9779 (slack 1.7)
+prompt 1: official cpu-sdpa leave-one-out max ratio 1.0000 (slack 1.7), mean ratio 0.8303 (slack 1.7)
+prompt 1: official mps-eager leave-one-out max ratio 1.0000 (slack 1.7), mean ratio 1.0226 (slack 1.7)
+prompt 1: official mps-sdpa leave-one-out max ratio 1.0000 (slack 1.7), mean ratio 0.8400 (slack 1.7)
+prompt 2: official cpu-eager leave-one-out max ratio 0.9912 (slack 1.7), mean ratio 0.8215 (slack 1.7)
+prompt 2: official cpu-sdpa leave-one-out max ratio 0.9912 (slack 1.7), mean ratio 1.2173 (slack 1.7)
+prompt 2: official mps-eager leave-one-out max ratio 1.0000 (slack 1.7), mean ratio 0.8094 (slack 1.7)
+prompt 2: official mps-sdpa leave-one-out max ratio 1.0000 (slack 1.7), mean ratio 0.6471 (slack 1.7)
+decode rows: official cpu-eager leave-one-out max ratio 1.0192 (slack 1.7), mean ratio 1.1669 (slack 1.7)
+decode rows: official cpu-sdpa leave-one-out max ratio 0.9443 (slack 1.7), mean ratio 0.7790 (slack 1.7)
+decode rows: official mps-eager leave-one-out max ratio 0.9812 (slack 1.7), mean ratio 0.7923 (slack 1.7)
+decode rows: official mps-sdpa leave-one-out max ratio 0.8666 (slack 1.7), mean ratio 0.8569 (slack 1.7)
+prompt 1 decoded rows: official cpu-eager leave-one-out max ratio 1.0000 (slack 1.7), mean ratio 1.0388 (slack 1.7)
+prompt 1 decoded rows: official cpu-sdpa leave-one-out max ratio 1.0000 (slack 1.7), mean ratio 0.9550 (slack 1.7)
+prompt 1 decoded rows: official mps-eager leave-one-out max ratio 1.0000 (slack 1.7), mean ratio 0.9090 (slack 1.7)
+prompt 1 decoded rows: official mps-sdpa leave-one-out max ratio 1.0000 (slack 1.7), mean ratio 0.9627 (slack 1.7)
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 33 filtered out; finished in 0.62s
+
+        0.62 real         0.59 user         0.02 sys
+           102301696  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                6507  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   0  voluntary context switches
+                  12  involuntary context switches
+          8934152566  instructions retired
+          2377426477  cycles elapsed
+            96780888  peak memory footprint
+== exit=0 wall=1.0s min_free_pct=90 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+== source after run 818160545802c1374f7607d26ce20cc86d2d758d dirty=0

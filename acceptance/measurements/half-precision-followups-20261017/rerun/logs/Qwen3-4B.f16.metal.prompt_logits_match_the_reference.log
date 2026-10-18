@@ -1,0 +1,47 @@
+== source 818160545802c1374f7607d26ce20cc86d2d758d dirty=0
+== checkout /Users/nover/repos/transformers-worktrees/tfm-half-followups2 (branch claude/tfm-half-followups2)
+== binary /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/llama_family_artifacts-693e11c29d0eb894 sha256 72a204e1c37262448b47e772e980a72cba33fc8ae1618af1385ad521009db738
+== metal/F16 metal::metal_prompt_logits_match_the_reference
+== env TRANSFORMERS_LLAMA_FAMILY_DECODE_TRUTH_DIR=/Volumes/T9/transformers-references/Qwen3-4B-531c80e2-f32-cpu-eager
+== env TRANSFORMERS_LLAMA_FAMILY_DIR=/Volumes/T9/models/Qwen/Qwen3-4B
+== env TRANSFORMERS_LLAMA_FAMILY_DTYPE=f16
+== env TRANSFORMERS_LLAMA_FAMILY_OFFICIAL_DIRS=/Volumes/T9/transformers-references/Qwen3-4B-531c80e2-f16-cpu-eager-7a50e44:/Volumes/T9/transformers-references/Qwen3-4B-531c80e2-f16-cpu-sdpa-7a50e44:/Volumes/T9/transformers-references/Qwen3-4B-531c80e2-f16-mps-eager-7a50e44:/Volumes/T9/transformers-references/Qwen3-4B-531c80e2-f16-mps-sdpa-7a50e44
+== env TRANSFORMERS_LLAMA_FAMILY_REFERENCE_DIR=/Volumes/T9/transformers-references/Qwen3-4B-531c80e2
+== cwd /Users/nover/repos/transformers-worktrees/tfm-half-followups2
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/llama_family_artifacts-693e11c29d0eb894 --ignored --exact --nocapture --test-threads 1 metal::metal_prompt_logits_match_the_reference
+== start 2026-10-18T05:09:03+00:00 load 3.60 3.65 3.00 free 90%
+
+running 1 test
+test metal::metal_prompt_logits_match_the_reference ... F16 bounds of prompt 0: max 1.5104503631591795e-1, mean 1.7173070232383528e-2 (1.7 and 1.7 times the official envelope 8.885002136230469e-2, 1.0101806019049135e-2)
+F16 bounds of prompt 1: max 9.974029064178466e-2, mean 1.0936770106939572e-2 (1.7 and 1.7 times the official envelope 5.8670759201049805e-2, 6.433394180552689e-3)
+F16 bounds of prompt 2: max 2.8752803802490234e-1, mean 1.112420461114093e-2 (1.7 and 1.7 times the official envelope 1.6913414001464844e-1, 6.543649771259371e-3)
+F16 bounds of decode rows: max 1.9297208786010742e-1, mean 2.8723791494685597e-2 (1.7 and 1.7 times the official envelope 1.1351299285888672e-1, 1.689634793805035e-2)
+F16 bounds of prompt 1 decoded rows: max 1.0378084182739257e-1, mean 1.3028007143125887e-2 (1.7 and 1.7 times the official envelope 6.104755401611328e-2, 7.663533613603463e-3)
+F32 matrix products use F32 inputs; the F16 run is judged by the official envelope, greedy steps at 1.9297208e-1
+prompt 0: 5 tokens, max |Δ| = 5.670738220214844e-2 at position 4 (bound 1.5104503631591795e-1), mean |Δ| = 7.523782157067082e-3 (bound 1.7173070232383528e-2)
+prompt 1: 13 tokens, max |Δ| = 5.672168731689453e-2 at position 0 (bound 9.974029064178466e-2), mean |Δ| = 7.132161303378714e-3 (bound 1.0936770106939572e-2)
+prompt 2: 8 tokens, max |Δ| = 1.6913414001464844e-1 at position 0 (bound 2.8752803802490234e-1), mean |Δ| = 6.276627115547145e-3 (bound 1.112420461114093e-2)
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 33 filtered out; finished in 5.09s
+
+        5.11 real         3.29 user         1.82 sys
+          4674879488  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              660541  page reclaims
+                  14  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   0  voluntary context switches
+               21135  involuntary context switches
+         75025534704  instructions retired
+         18783528461  cycles elapsed
+         11850026464  peak memory footprint
+== exit=0 wall=6.1s min_free_pct=82 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+== source after run 818160545802c1374f7607d26ce20cc86d2d758d dirty=0

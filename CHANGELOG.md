@@ -733,6 +733,18 @@ earlier row-by-row or per-chunk algorithm, which each test keeps as an oracle.
   (`0.998558` against `0.998635`) with the once-rounded Mamba-2 convolution
   SiLU; a control reverting only that site passes. No bound was changed and
   no checkpoint is promoted.
+- A half-precision follow-ups record holds the round's decisions verbatim,
+  with their rationale and review flags. It also records a rerun of every
+  Llama-family and Gemma gate at the integrated head `8181605`: 106 processes
+  in the worktree, from rebuilt binaries byte-identical to the `f9f78b5` gate
+  binaries, checked by `scripts/tests/test_half_precision_followups_record.py`
+  ([record](acceptance/measurements/half-precision-followups-20261017.json)).
+  94 pass, and 12 fail as expected: Qwen2-7B's uncalibrated F16 runs, the
+  Gemma Metal/F16 refusals, and Metal BF16's load error on Burn 0.21. Every run
+  that also ran at `f9f78b5` reproduces its output exactly, and every F32 gate
+  repeats the pre-SiLU round's printed statistics. The Nemotron-H
+  official-precision failure was not rerun and stands. No checkpoint is
+  promoted.
 - The configuration fuzz target covers all eleven family parsers without
   count filters, and the modular-spec generator draws clamped experts,
   embedding scales, and logit caps.

@@ -398,8 +398,11 @@ rule; the F32 run keeps the tenfold check.
 The official bundles (`<truth>-<bf16|f16>-<cpu|mps>-<eager|sdpa>-7a50e44` in
 `/Volumes/T9/transformers-references`, from the generator at `7a50e44`,
 SHA-256 `a4ed0db4…`), every file digest, the derivation tables, and the Burn
-runs at the integrated head are recorded in the
+runs at the gate head `f9f78b5` are recorded in the
 [half-precision envelope record](acceptance/measurements/half-precision-envelope-20261018.json).
+Their rerun at the integrated head `8181605`, and the decisions behind the
+rule, are in the
+[half-precision follow-ups record](acceptance/measurements/half-precision-followups-20261017.json).
 The bundle-only tests `official_graphs_calibrate_the_half_precision_envelope`
 and `official_graphs_admit_each_other_leave_one_out` (both families) and
 `official_f16_graphs_overflow_so_gemma_has_no_f16_envelope` read the bundles
@@ -415,8 +418,10 @@ gemma-3-12b-it and gemma-3-27b-it overflow at blocks 6 and 8. Metal's Gemma
 qualification is F32, and Flex/BF16 (and CUDA BF16) are its half-precision
 profiles. Metal cannot run BF16 on the pinned Burn 0.21 (CubeCL 0.10 declares
 no BF16 storage, its MSL math functions have no `bfloat` overloads, and
-cubek-matmul refuses BF16), so the gate refuses it with the existing
-`backend cannot store checkpoint dtype BF16` error; a probe of Burn 0.22
+cubek-matmul refuses BF16), so a Metal BF16 gate fails at load with the
+existing `backend cannot store checkpoint dtype BF16` error (measured at
+`8181605` on SmolLM-135M and gemma-3-4b-it, at the first parameter
+`model.embed_tokens.weight`); a probe of Burn 0.22
 passes every step, which an upgrade (a maintainer decision: MSRV 1.95 and the
 backend-erased tensor API) would revisit. The crate still loads Gemma 3 in F16
 and evaluates the faithful graph; whether it should refuse such loads by
@@ -796,14 +801,72 @@ record promotes no checkpoint.
   Flex/BF16 prefill medians by `-3.7%` and `+0.7%` and its decode medians by
   `-0.2%` and `+4.7%` over three alternated rounds.
 
-Still open after these replays, the follow-ups, the Mac validation round, and
-the official-envelope round (which closes the Mac validation round's
+### Integrated-head rerun (October 18)
+
+The [half-precision follow-ups record](acceptance/measurements/half-precision-followups-20261017.json)
+completes the round above. It repeats the round's six decisions verbatim,
+with their rationale, rejected alternatives, and review flags; decision (d)
+and its Metal BF16 part await the maintainer. It also records a rerun of
+every Llama-family and Gemma gate at the integrated head `8181605`, the
+envelope record's own commit. That commit differs from `f9f78b5` only by a
+`///` comment on a test-only field, Markdown, and the envelope record with its
+campaign directory and Python test. Each of the 106 tests ran in its own
+process in the worktree itself, which was clean
+before and after every run. Every real-checkpoint group held the heavy-model
+lock, and the memory watchdog never fired. The record's campaign directory
+holds the logs, the harness, and the digests of every bundle, checkpoint
+configuration, and binary the runs read.
+`scripts/tests/test_half_precision_followups_record.py` recomputes every
+status and comparison from the committed logs.
+
+- Build: the first build compiled nothing. The envelope round had built its
+  binaries from a git-archive export into the same `CARGO_TARGET_DIR`, and
+  cargo judged them fresh for the worktree. After the worktree's `src/lib.rs`
+  modification time was updated (its bytes and Git blob unchanged), cargo
+  recompiled the crate from the worktree. Both test binaries are
+  byte-identical to the `f9f78b5` gate binaries (`llama_family_artifacts`
+  `72a204e1…`, `gemma_artifacts` `533d5d9c…`). A stage that switches source
+  trees in a shared target directory must force or verify a rebuild before
+  it attributes a run to a checkout.
+- Results: 94 runs pass and 12 fail as expected. The expected failures are
+  Qwen2-7B's three Metal/F16 gates and two F16 calibration tests
+  (uncalibrated), the five Metal Gemma gates with `f16` (refused before
+  loading), and Metal BF16 on SmolLM-135M and gemma-3-4b-it (the contextual
+  load error). No run fails unexpectedly. The Llama family passes all 30 F32
+  gates, all 15 Flex/BF16 gates, and the 12 Metal/F16 gates of its four
+  F16-calibrated checkpoints. gemma-3-4b-it passes all 10 F32 and all 5
+  Flex/BF16 gates. The other 21 bundle-only tests, which evaluate no Burn
+  model, pass, and so does the ordinary unit test of Gemma's F16 refusal.
+- Reproduction: the 99 runs that the envelope round also ran produce the same
+  test output (thread ids and timings masked) and the same exit status. Their
+  peak footprints differ from it by `-3.7%` to `+0.6%`; the largest peak is
+  44.0 GB, in Llama-3.1-8B's Metal/F32 batched prefill. All 40 F32 gates repeat
+  verbatim every printed `|Δ|` line and greedy count of the last pre-SiLU F32
+  runs (Llama family at `53f167b`, Gemma at `c2936fe`). The once-rounded SiLU
+  therefore leaves F32 unchanged at printed precision; the F32 decode-truth
+  rows are new and have no earlier counterpart.
+- Margins: unchanged. The two nearest are still Gemma's Flex/BF16 cached
+  decode row at step 13 (`2.153` against `2.279`, 94.5% of its bound) and
+  SmolLM-135M Metal/F16's prompt-0 mean (`0.03593` against `0.03848`, 93.4%).
+  Under the envelope tolerance no greedy step is decisive for SmolLM-135M,
+  SmolLM3-3B, or Qwen2-7B in Flex/BF16, or for Gemma's long prompt.
+- Not rerun: the larger checkpoints (Nemotron-H, Qwen3.5-0.8B, Qwen3.8-27B,
+  Muse-Glimmer-30B, DeepSeek-V2-Lite, Qwen3-30B-A3B), gpt-oss, FLAN-T5, CUDA
+  and ROCm, coverage, and the package gate. At `8181605` only the Python
+  tests, the documentation audit, and `cargo fmt --check` ran again. The other
+  source checks passed at `1816d73`, and no Rust source changed after it. The
+  Nemotron-H official-precision failure at `f9f78b5` therefore stands at the
+  integrated head, and the round does not pass.
+
+Still open after these replays, the follow-ups, the Mac validation round, the
+official-envelope round (which closes the Mac validation round's
 calibration-rule, decode-tolerance, and SiLU questions and the Gemma Metal/F16
-profile):
+profile), and its integrated-head rerun:
 
 - real-weight Nemotron MTP parity, and official F32 hidden traces for its
   base gate;
-- the Nemotron-H official-precision failure at `f9f78b5` (above), traced to
+- the Nemotron-H official-precision failure at `f9f78b5` (above; not rerun at
+  `8181605`, which compiles the same library code), traced to
   the once-rounded Mamba-2 convolution SiLU. That gate's floors are each
   path's worst official F16 row, so Burn-side half-precision deviations such
   as teacher decision 30 (`0.997612` from F32 at `7bd057e`, where both

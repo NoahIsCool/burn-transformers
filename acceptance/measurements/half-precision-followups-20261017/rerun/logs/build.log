@@ -1,0 +1,14 @@
+== source 818160545802c1374f7607d26ce20cc86d2d758d dirty=0
+== checkout /Users/nover/repos/transformers-worktrees/tfm-half-followups2 CARGO_TARGET_DIR=/Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates
+== start 2026-10-18T05:04:06+00:00
+== src/lib.rs sha256 before touch 038a29f78cab81e6f8dab9488f91287bf96fcfa983a54be4ab597136143fa925
+== touched src/lib.rs (mtime only); sha256 after 038a29f78cab81e6f8dab9488f91287bf96fcfa983a54be4ab597136143fa925; git blob b621be3ad4d840832770481fe8e918a33be60900 HEAD blob b621be3ad4d840832770481fe8e918a33be60900
+== cmd cargo test --locked --release --features metal,tokenizers --test llama_family_artifacts --test gemma_artifacts --no-run
+   Compiling transformers v0.1.0 (/Users/nover/repos/transformers-worktrees/tfm-half-followups2)
+    Finished `release` profile [optimized] target(s) in 1m 00s
+  Executable tests/gemma_artifacts.rs (/Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/gemma_artifacts-7e9fb558e3797b0a)
+  Executable tests/llama_family_artifacts.rs (/Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/llama_family_artifacts-693e11c29d0eb894)
+== exit=0 end 2026-10-18T05:05:07+00:00
+== binary /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/gemma_artifacts-7e9fb558e3797b0a sha256 533d5d9c242bcc783dea609917c57471e30f92fd01b010316e1dde57993b2e17
+== binary /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/llama_family_artifacts-693e11c29d0eb894 sha256 72a204e1c37262448b47e772e980a72cba33fc8ae1618af1385ad521009db738
+== source after build 818160545802c1374f7607d26ce20cc86d2d758d dirty=0
