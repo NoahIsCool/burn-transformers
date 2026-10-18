@@ -832,6 +832,30 @@ class ReleaseGateTests(unittest.TestCase):
                 self.assertEqual(GATES.package_archive(), Path("/explicit/target/package/renamed-crate-2.3.4-rc.1.crate"))
                 self.assertEqual(GATES.package_directory(), Path("/explicit/target/package/renamed-crate-2.3.4-rc.1"))
 
+    def test_package_is_burn_transformers_and_its_library_is_transformers(self):
+        """The package takes the repository's name; the import path stays ``transformers``.
+
+        crates.io's ``transformers`` belongs to another publisher, so the
+        package is ``burn-transformers`` and its archive
+        ``burn-transformers-VERSION.crate``. The guides, doctests, examples,
+        and integration tests import ``transformers``, so ``[lib] name`` must
+        not follow the package. The fuzz harnesses depend on the crate by path
+        and must name the package; an extracted archive omits ``fuzz/``, so
+        there only the manifest is checked.
+        """
+
+        manifest = tomllib.loads((GATES.CRATE / "Cargo.toml").read_text())
+        self.assertEqual(manifest["package"]["name"], "burn-transformers")
+        self.assertEqual(manifest["lib"]["name"], "transformers")
+        with mock.patch.dict(GATES.os.environ, {"CARGO_TARGET_DIR": "/explicit/target"}, clear=True):
+            self.assertEqual(GATES.package_archive(), Path(
+                f"/explicit/target/package/burn-transformers-{manifest['package']['version']}.crate"))
+        if GATES.package_contents.is_packaged_archive(GATES.CRATE):
+            return
+        fuzz = tomllib.loads((GATES.CRATE / "fuzz/Cargo.toml").read_text())
+        dependency = fuzz["dependencies"]["transformers"]
+        self.assertEqual((dependency["package"], dependency["path"]), ("burn-transformers", ".."))
+
     def test_package_include_matches_the_evidence_policy(self):
         """Cargo's include list publishes exactly the evidence package_contents.py allows."""
 
@@ -998,7 +1022,8 @@ class ReleaseGateTests(unittest.TestCase):
     def test_guide_doctest_crate_depends_on_this_crate_by_path(self):
         """The scratch crate uses the source gate's features and this crate's lockfile."""
 
-        for package_name in ("transformers", "renamed-transformers"):
+        # The current package, the 0.1.0 one, and a hypothetical later rename.
+        for package_name in ("burn-transformers", "transformers", "renamed-transformers"):
             with self.subTest(package=package_name):
                 self.check_guide_doctest_crate(package_name)
 
@@ -1006,8 +1031,9 @@ class ReleaseGateTests(unittest.TestCase):
         """Generate the guide doctest crate for a crate whose package is ``package_name``.
 
         The guides import the library as ``transformers``, so the dependency
-        keeps that key and names the package explicitly; a renamed package
-        with ``[lib] name = "transformers"`` then needs no tooling change.
+        keeps that key and names the package explicitly; a package renamed
+        with ``[lib] name = "transformers"``, as ``burn-transformers`` is,
+        then needs no tooling change.
         """
 
         with tempfile.TemporaryDirectory() as directory:
