@@ -21,12 +21,26 @@ The Cargo package is renamed from `transformers` to `burn-transformers`,
 because the crates.io name `transformers` belongs to another publisher. The
 library keeps the name `transformers` (`[lib] name = "transformers"`), so no
 `use transformers::…` path changes; only manifests and Cargo commands that
-name the package do. Cargo rejects a dependency whose key or `package` names
-a package that does not exist, so a 0.1.0 dependency fails until it changes:
+name the package do. Change a 0.1.0 dependency on this repository even where
+Cargo still accepts it:
+
+- A path dependency, `transformers = { path = "…" }`, fails: Cargo reads only
+  the manifest at that path and reports
+  ``no matching package named `transformers` found``.
+- A git dependency, `transformers = { git = "…" }`, is not rejected, because
+  the historical acceptance snapshots
+  `acceptance/measurements/v0_3-*/executed-source/` keep that name and Cargo
+  searches every manifest in the checkout, and the path dependencies those
+  manifests name, for the package. On the machine that recorded the
+  acceptance harnesses, their absolute path dependencies can lead Cargo to
+  another checkout, which it builds however stale, with only a
+  `skipping duplicate package` warning. Elsewhere it picks a snapshot, which
+  has no library target, so `use transformers::…` fails as an unresolved
+  import.
 
 | If your project | Change it to |
 | --- | --- |
-| Depends on `transformers = { path = "…" }` or `transformers = { git = "…" }` | Rename the key, keeping the other options: `burn-transformers = { path = "…" }` or `burn-transformers = { git = "…" }`. To keep the key, add the package instead: `transformers = { package = "burn-transformers", path = "…" }`. |
+| Depends on `transformers = { path = "…" }` or `transformers = { git = "…" }` | Rename the key, keeping the other options: `burn-transformers = { path = "…" }` or `burn-transformers = { git = "…" }`. To keep the key, add the package instead: `transformers = { package = "burn-transformers", path = "…" }`, or the same with `git = "…"`. |
 | Runs `cargo … -p transformers` or `--package transformers` | Use `-p burn-transformers`. |
 | Looks for the archive `transformers-VERSION.crate` | Cargo now writes `burn-transformers-VERSION.crate`. |
 

@@ -235,8 +235,12 @@ code written against unreleased sources.
   ([MIGRATION.md](MIGRATION.md#dependency)) to
   `burn-transformers = { git = "https://github.com/NoahIsCool/burn-transformers", … }`
   (or keep it with `transformers = { package = "burn-transformers", … }`, as
-  `fuzz/Cargo.toml` now does); `cargo -p` selectors name `burn-transformers`,
-  and `cargo package` writes `burn-transformers-0.1.0.crate`. Nothing is
+  `fuzz/Cargo.toml` now does). An old path dependency fails to resolve, but an
+  old git dependency still resolves, to a historical acceptance snapshot named
+  `transformers` or to another checkout that an acceptance harness's path
+  dependency reaches, so it fails with an unrelated error or builds stale
+  source; change it too. `cargo -p` selectors name `burn-transformers`, and
+  `cargo package` writes `burn-transformers-0.1.0.crate`. Nothing is
   published.
 - **Public API.** Exhaustive matches on `MixerSpec`, `FeedForwardSpec`, both
   `RopeScaling` enums, `QuantizationExclusion`, and `RopeConfigError` need arms
