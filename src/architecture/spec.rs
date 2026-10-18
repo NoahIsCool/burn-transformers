@@ -535,10 +535,17 @@ impl ScoreScale {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OutputGateActivation {
-    /// `out * sigmoid(g)`, as in Qwen3-Next and Qwen3.5 gated attention.
+    /// `out * sigmoid(g)`, as in Qwen3-Next, Qwen3.5, and Muse Glimmer gated attention.
+    ///
+    /// Muse Glimmer's pinned reference (`modeling_muse_glimmer.py`, SHA-256
+    /// `459498a7…`, used by `scripts/generate_muse_glimmer_reference.py`)
+    /// computes `attn_output * torch.sigmoid(self.gate_proj(hidden_states))`.
     #[default]
     Sigmoid,
-    /// `out * g * sigmoid(g)`, as in Muse Glimmer.
+    /// `out * g * sigmoid(g)`, a SiLU gate for experimental specifications.
+    ///
+    /// No pinned reference family gates attention this way; in F16 and BF16
+    /// the SiLU is evaluated in F32 and rounded once, like PyTorch's `silu`.
     Silu,
 }
 
