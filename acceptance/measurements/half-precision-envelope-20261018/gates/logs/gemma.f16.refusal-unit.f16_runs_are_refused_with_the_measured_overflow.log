@@ -1,0 +1,35 @@
+== source f9f78b5fc7cca9d1a8afaf29f8f9df04fe7c3008 (git archive export /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src)
+== binary /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/gemma_artifacts-7e9fb558e3797b0a sha256 533d5d9c242bcc783dea609917c57471e30f92fd01b010316e1dde57993b2e17 build A
+== unit f16_runs_are_refused_with_the_measured_overflow
+== cwd /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/gemma_artifacts-7e9fb558e3797b0a --exact --nocapture --test-threads 1 f16_runs_are_refused_with_the_measured_overflow
+== start 2026-10-18T01:35:19+00:00 load 6.89 6.17 7.60 free 86%
+
+running 1 test
+test f16_runs_are_refused_with_the_measured_overflow ... 
+thread 'f16_runs_are_refused_with_the_measured_overflow' (40827841) panicked at tests/gemma_artifacts.rs:405:5:
+TRANSFORMERS_GEMMA_DTYPE=f16 is not a gate profile: gemma-3-4b-it overflows F16 in Transformers' own CPU and MPS F16 graphs too (block 5's post-MLP residual add at BOS reaches 73,509.6 > 65,504), so no official F16 envelope exists; qualify Metal in F32 and half precision in bf16 (see tests/gemma_artifacts.rs, F16, and acceptance/measurements/half-precision-envelope-20261018.json)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 39 filtered out; finished in 0.00s
+
+        0.02 real         0.00 user         0.00 sys
+             7798784  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                 740  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                  11  voluntary context switches
+                  24  involuntary context switches
+            45763677  instructions retired
+            23322408  cycles elapsed
+             2736632  peak memory footprint
+== exit=0 wall=1.0s min_free_pct=87 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0

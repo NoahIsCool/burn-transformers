@@ -1,0 +1,19 @@
+qwen2 float32 ('cpu', 'eager') IDENTICAL 5 files
+qwen2 float32 ('cpu', 'sdpa') IDENTICAL 5 files
+qwen2 float32 ('mps', 'eager') IDENTICAL 5 files
+qwen2 float32 ('mps', 'sdpa') IDENTICAL 5 files
+qwen2 bfloat16 ('cpu', 'eager') IDENTICAL 5 files
+qwen2 bfloat16 ('cpu', 'sdpa') IDENTICAL 5 files
+qwen2 bfloat16 ('mps', 'eager') IDENTICAL 5 files
+qwen2 bfloat16 ('mps', 'sdpa') IDENTICAL 5 files
+gpt-oss float32 ('cpu', 'eager') IDENTICAL 5 files
+gpt-oss bfloat16 ('cpu', 'eager') IDENTICAL 5 files
+gemma3-text float32 ('cpu', 'eager') IDENTICAL 5 files
+gemma3-text float32 ('cpu', 'sdpa') IDENTICAL 5 files
+gemma3-text float32 ('mps', 'eager') IDENTICAL 5 files
+gemma3-text float32 ('mps', 'sdpa') IDENTICAL 5 files
+gemma3-text bfloat16 ('cpu', 'eager') IDENTICAL 5 files
+gemma3-text bfloat16 ('cpu', 'sdpa') IDENTICAL 5 files
+gemma3-text bfloat16 ('mps', 'eager') IDENTICAL 5 files
+gemma3-text bfloat16 ('mps', 'sdpa') IDENTICAL 5 files
+ALL IDENTICAL

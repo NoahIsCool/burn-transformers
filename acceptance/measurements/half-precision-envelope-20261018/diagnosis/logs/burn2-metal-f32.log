@@ -1,0 +1,31 @@
+== source f9f78b5fc7cca9d1a8afaf29f8f9df04fe7c3008 (transformers path dependency on the gate export)
+== binary /Volumes/bag of holding/cargo-targets/tfm-half-followups2-diag/release/block-dump sha256 dc7031a1f4af2ef6010ecdb9d13bf5a98bdac3f7906fd2e3f03218e4c0071c6f (diag/burn-tool, src/main.rs sha256 bbd4443965b3b3dc8753d6b097aba4ba1a2c61b82fceb5416ccd8a3260f64ac9; the first attempt, burn-metal-f32.log, asked the default graph for scores, which it does not expose)
+== Qwen2-7B per-block diagnosis: Burn Metal f32, default and eager graphs, the truth's three prompts
+== cwd /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/diag
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-half-followups2-diag/release/block-dump f32 /Volumes/T9/models/Qwen/Qwen2-7B /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/diag/qwen2-7b-prompts.txt /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/diag/data/burn2-metal-f32
+== start 2026-10-18T04:46:32+00:00 load 2.42 2.50 2.50
+prompt 0: 5 tokens, default graph, written to /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/diag/data/burn2-metal-f32/prompt0
+prompt 1: 13 tokens, default graph, written to /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/diag/data/burn2-metal-f32/prompt1
+prompt 2: 8 tokens, default graph, written to /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/diag/data/burn2-metal-f32/prompt2
+prompt 0: 5 tokens, eager graph, written to /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/diag/data/burn2-metal-f32/prompt0
+prompt 1: 13 tokens, eager graph, written to /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/diag/data/burn2-metal-f32/prompt1
+prompt 2: 8 tokens, eager graph, written to /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/diag/data/burn2-metal-f32/prompt2
+      110.82 real         6.34 user        65.96 sys
+         18113986560  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             2404732  page reclaims
+                  99  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                 565  voluntary context switches
+              567952  involuntary context switches
+       1134945462544  instructions retired
+        263690412877  cycles elapsed
+         39205658112  peak memory footprint
+== exit=0 wall=111.5s end=2026-10-18T04:48:23+00:00 load_end 1.53 min_free_pct=67 max_swap_growth_mib=0 swapin_mib=2 pressured_swapin_mib=0

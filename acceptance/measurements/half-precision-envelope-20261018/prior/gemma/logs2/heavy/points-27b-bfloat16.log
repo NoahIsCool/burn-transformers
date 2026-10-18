@@ -1,0 +1,133 @@
+== step points-27b-bfloat16
+== start 2026-10-17T23:01:06Z load (4.3828125, 66.06494140625, 103.2158203125)
+== env {'HF_HUB_OFFLINE': '1', 'TRANSFORMERS_OFFLINE': '1', 'HF_HUB_DISABLE_PROGRESS_BARS': '1'}
+== cmd ['/Library/Frameworks/Python.framework/Versions/3.11/bin/python3', '-I', '/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/gemma/scripts2/gemma3_overflow_points.py', '/Volumes/T9/models/google/gemma-3-27b-it', '/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38', 'bfloat16', '/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/gemma/logs2/heavy/points-27b-bfloat16.json', '--no-bos']
+prompt 0 (6 tokens, first id 2, 208.6 s): logits finite=True; first point >= 65520: (8, 'out', 83456.0, 0, 104); first non-finite: None
+               in: max 8.847e+05 (layer 59, pos 0, ch 104); later positions max 1.27e+05; layers >= 65520: [9, 10, 11, 12, 13, 14]... (53)
+       input_norm: max 3360 (layer 25, pos 1, ch 1278); later positions max 3360; layers >= 65520: [] (0)
+                q: max 314 (layer 0, pos 3, ch 2923); later positions max 314; layers >= 65520: [] (0)
+                k: max 2784 (layer 54, pos 1, ch 1889); later positions max 2784; layers >= 65520: [] (0)
+                v: max 1152 (layer 54, pos 1, ch 198); later positions max 1152; layers >= 65520: [] (0)
+         attn_ctx: max 664 (layer 0, pos 0, ch 77); later positions max 656; layers >= 65520: [] (0)
+           o_proj: max 3744 (layer 0, pos 0, ch 2130); later positions max 3200; layers >= 65520: [] (0)
+   post_attn_norm: max 4.531e+04 (layer 61, pos 0, ch 104); later positions max 1.626e+04; layers >= 65520: [] (0)
+        resid_mid: max 8.847e+05 (layer 59, pos 0, ch 104); later positions max 1.295e+05; layers >= 65520: [9, 10, 11, 12, 13, 14]... (53)
+      pre_ff_norm: max 304 (layer 12, pos 3, ch 3977); later positions max 304; layers >= 65520: [] (0)
+             gate: max 200 (layer 41, pos 1, ch 6027); later positions max 200; layers >= 65520: [] (0)
+               up: max 174 (layer 40, pos 1, ch 5257); later positions max 174; layers >= 65520: [] (0)
+         act_x_up: max 9024 (layer 0, pos 0, ch 14490); later positions max 1768; layers >= 65520: [] (0)
+             down: max 356 (layer 0, pos 0, ch 104); later positions max 170; layers >= 65520: [] (0)
+     post_ff_norm: max 6.605e+04 (layer 18, pos 0, ch 104); later positions max 4.813e+04; layers >= 65520: [18, 30] (2)
+              out: max 8.847e+05 (layer 58, pos 0, ch 104); later positions max 1.372e+05; layers >= 65520: [8, 9, 10, 11, 12, 13]... (54)
+   layer outputs max|x|@position: 0:2.278e+04@0 1:2.189e+04@0 2:2.176e+04@0 3:2.112e+04@0 4:2.125e+04@0 5:2.112e+04@0 6:2.112e+04@0 7:4.224e+04@0 8:8.346e+04@0 9:1.208e+05@0 10:1.183e+05@0 11:1.172e+05@0 12:1.172e+05@0 13:1.183e+05@0 14:1.434e+05@0 15:1.71e+05@0 16:2.191e+05@0 17:2.499e+05@0 18:3.133e+05@0 19:3.625e+05@0 20:4.014e+05@0 21:4.362e+05@0 22:4.874e+05@0 23:5.1e+05@0 24:5.407e+05@0 25:5.775e+05@0 26:6.267e+05@0 27:6.431e+05@0 28:6.554e+05@0 29:6.84e+05@0 30:7.496e+05@0 31:7.987e+05@0 32:8.233e+05@0 33:8.233e+05@0 34:8.233e+05@0 35:8.233e+05@0 36:8.438e+05@0 37:8.438e+05@0 38:8.479e+05@0 39:8.479e+05@0 40:8.602e+05@0 41:8.602e+05@0 42:8.643e+05@0 43:8.643e+05@0 44:8.643e+05@0 45:8.643e+05@0 46:8.724e+05@0 47:8.724e+05@0 48:8.724e+05@0 49:8.724e+05@0 50:8.724e+05@0 51:8.724e+05@0 52:8.724e+05@0 53:8.724e+05@0 54:8.724e+05@0 55:8.724e+05@0 56:8.724e+05@0 57:8.765e+05@0 58:8.847e+05@0 59:8.765e+05@0 60:8.52e+05@0 61:7.864e+05@0
+prompt 1 (19 tokens, first id 2, 4.1 s): logits finite=True; first point >= 65520: (8, 'out', 83456.0, 0, 104); first non-finite: None
+               in: max 8.847e+05 (layer 59, pos 0, ch 104); later positions max 1.71e+05; layers >= 65520: [9, 10, 11, 12, 13, 14]... (53)
+       input_norm: max 3344 (layer 25, pos 1, ch 1278); later positions max 3344; layers >= 65520: [] (0)
+                q: max 328 (layer 0, pos 5, ch 747); later positions max 328; layers >= 65520: [] (0)
+                k: max 2800 (layer 54, pos 1, ch 1889); later positions max 2800; layers >= 65520: [] (0)
+                v: max 1160 (layer 54, pos 1, ch 198); later positions max 1160; layers >= 65520: [] (0)
+         attn_ctx: max 664 (layer 0, pos 0, ch 77); later positions max 664; layers >= 65520: [] (0)
+           o_proj: max 3744 (layer 0, pos 0, ch 2130); later positions max 3040; layers >= 65520: [] (0)
+   post_attn_norm: max 4.531e+04 (layer 61, pos 0, ch 104); later positions max 2.112e+04; layers >= 65520: [] (0)
+        resid_mid: max 8.847e+05 (layer 59, pos 0, ch 104); later positions max 1.802e+05; layers >= 65520: [9, 10, 11, 12, 13, 14]... (53)
+      pre_ff_norm: max 434 (layer 5, pos 3, ch 5336); later positions max 434; layers >= 65520: [] (0)
+             gate: max 201 (layer 41, pos 1, ch 6027); later positions max 201; layers >= 65520: [] (0)
+               up: max 174 (layer 40, pos 1, ch 5257); later positions max 174; layers >= 65520: [] (0)
+         act_x_up: max 9024 (layer 0, pos 0, ch 14490); later positions max 2992; layers >= 65520: [] (0)
+             down: max 374 (layer 0, pos 7, ch 2522); later positions max 374; layers >= 65520: [] (0)
+     post_ff_norm: max 6.605e+04 (layer 18, pos 0, ch 104); later positions max 4.838e+04; layers >= 65520: [18, 30] (2)
+              out: max 8.847e+05 (layer 58, pos 0, ch 104); later positions max 2.15e+05; layers >= 65520: [8, 9, 10, 11, 12, 13]... (54)
+   layer outputs max|x|@position: 0:2.278e+04@0 1:2.189e+04@0 2:2.176e+04@0 3:2.112e+04@0 4:2.125e+04@0 5:2.112e+04@0 6:2.112e+04@0 7:4.224e+04@0 8:8.346e+04@0 9:1.208e+05@0 10:1.183e+05@0 11:1.172e+05@0 12:1.172e+05@0 13:1.183e+05@0 14:1.434e+05@0 15:1.71e+05@0 16:2.191e+05@0 17:2.499e+05@0 18:3.133e+05@0 19:3.625e+05@0 20:4.014e+05@0 21:4.362e+05@0 22:4.874e+05@0 23:5.1e+05@0 24:5.407e+05@0 25:5.775e+05@0 26:6.267e+05@0 27:6.431e+05@0 28:6.554e+05@0 29:6.84e+05@0 30:7.496e+05@0 31:7.987e+05@0 32:8.233e+05@0 33:8.233e+05@0 34:8.233e+05@0 35:8.233e+05@0 36:8.438e+05@0 37:8.438e+05@0 38:8.479e+05@0 39:8.479e+05@0 40:8.602e+05@0 41:8.602e+05@0 42:8.643e+05@0 43:8.643e+05@0 44:8.643e+05@0 45:8.643e+05@0 46:8.724e+05@0 47:8.724e+05@0 48:8.724e+05@0 49:8.724e+05@0 50:8.724e+05@0 51:8.724e+05@0 52:8.724e+05@0 53:8.724e+05@0 54:8.724e+05@0 55:8.724e+05@0 56:8.724e+05@0 57:8.765e+05@0 58:8.847e+05@0 59:8.765e+05@0 60:8.52e+05@0 61:7.864e+05@0
+prompt 2 (9 tokens, first id 2, 2.2 s): logits finite=True; first point >= 65520: (8, 'out', 83456.0, 0, 104); first non-finite: None
+               in: max 8.847e+05 (layer 59, pos 0, ch 104); later positions max 1.331e+05; layers >= 65520: [9, 10, 11, 12, 13, 14]... (53)
+       input_norm: max 3344 (layer 25, pos 1, ch 1278); later positions max 3344; layers >= 65520: [] (0)
+                q: max 221 (layer 0, pos 8, ch 2923); later positions max 221; layers >= 65520: [] (0)
+                k: max 2800 (layer 54, pos 1, ch 1889); later positions max 2800; layers >= 65520: [] (0)
+                v: max 1160 (layer 54, pos 1, ch 198); later positions max 1160; layers >= 65520: [] (0)
+         attn_ctx: max 664 (layer 0, pos 0, ch 77); later positions max 664; layers >= 65520: [] (0)
+           o_proj: max 3744 (layer 0, pos 0, ch 2130); later positions max 3376; layers >= 65520: [] (0)
+   post_attn_norm: max 4.531e+04 (layer 61, pos 0, ch 104); later positions max 1.472e+04; layers >= 65520: [] (0)
+        resid_mid: max 8.847e+05 (layer 59, pos 0, ch 104); later positions max 1.403e+05; layers >= 65520: [9, 10, 11, 12, 13, 14]... (53)
+      pre_ff_norm: max 512 (layer 5, pos 2, ch 5336); later positions max 512; layers >= 65520: [] (0)
+             gate: max 201 (layer 41, pos 1, ch 6027); later positions max 201; layers >= 65520: [] (0)
+               up: max 173 (layer 40, pos 1, ch 5257); later positions max 173; layers >= 65520: [] (0)
+         act_x_up: max 9024 (layer 0, pos 0, ch 14490); later positions max 1760; layers >= 65520: [] (0)
+             down: max 356 (layer 0, pos 0, ch 104); later positions max 167; layers >= 65520: [] (0)
+     post_ff_norm: max 6.605e+04 (layer 18, pos 0, ch 104); later positions max 4.685e+04; layers >= 65520: [18, 30] (2)
+              out: max 8.847e+05 (layer 58, pos 0, ch 104); later positions max 1.505e+05; layers >= 65520: [8, 9, 10, 11, 12, 13]... (54)
+   layer outputs max|x|@position: 0:2.278e+04@0 1:2.189e+04@0 2:2.176e+04@0 3:2.112e+04@0 4:2.125e+04@0 5:2.112e+04@0 6:2.112e+04@0 7:4.224e+04@0 8:8.346e+04@0 9:1.208e+05@0 10:1.183e+05@0 11:1.172e+05@0 12:1.172e+05@0 13:1.183e+05@0 14:1.434e+05@0 15:1.71e+05@0 16:2.191e+05@0 17:2.499e+05@0 18:3.133e+05@0 19:3.625e+05@0 20:4.014e+05@0 21:4.362e+05@0 22:4.874e+05@0 23:5.1e+05@0 24:5.407e+05@0 25:5.775e+05@0 26:6.267e+05@0 27:6.431e+05@0 28:6.554e+05@0 29:6.84e+05@0 30:7.496e+05@0 31:7.987e+05@0 32:8.233e+05@0 33:8.233e+05@0 34:8.233e+05@0 35:8.233e+05@0 36:8.438e+05@0 37:8.438e+05@0 38:8.479e+05@0 39:8.479e+05@0 40:8.602e+05@0 41:8.602e+05@0 42:8.643e+05@0 43:8.643e+05@0 44:8.643e+05@0 45:8.643e+05@0 46:8.724e+05@0 47:8.724e+05@0 48:8.724e+05@0 49:8.724e+05@0 50:8.724e+05@0 51:8.724e+05@0 52:8.724e+05@0 53:8.724e+05@0 54:8.724e+05@0 55:8.724e+05@0 56:8.724e+05@0 57:8.765e+05@0 58:8.847e+05@0 59:8.765e+05@0 60:8.52e+05@0 61:7.864e+05@0
+prompt 0 without BOS 2 (5 tokens, first id 818, 1.2 s): logits finite=True; first point >= 65520: (54, 'out', 65536.0, 3, 104); first non-finite: None
+               in: max 1.362e+05 (layer 61, pos 0, ch 104); later positions max 1.28e+05; layers >= 65520: [55, 56, 57, 58, 59, 60]... (7)
+       input_norm: max 398 (layer 0, pos 4, ch 4854); later positions max 398; layers >= 65520: [] (0)
+                q: max 314 (layer 0, pos 2, ch 2923); later positions max 314; layers >= 65520: [] (0)
+                k: max 340 (layer 0, pos 0, ch 704); later positions max 272; layers >= 65520: [] (0)
+                v: max 336 (layer 0, pos 2, ch 910); later positions max 336; layers >= 65520: [] (0)
+         attn_ctx: max 222 (layer 0, pos 2, ch 840); later positions max 222; layers >= 65520: [] (0)
+           o_proj: max 2192 (layer 0, pos 3, ch 2130); later positions max 2192; layers >= 65520: [] (0)
+   post_attn_norm: max 1.293e+04 (layer 61, pos 0, ch 104); later positions max 1.158e+04; layers >= 65520: [] (0)
+        resid_mid: max 1.495e+05 (layer 61, pos 0, ch 104); later positions max 1.372e+05; layers >= 65520: [56, 57, 58, 59, 60, 61] (6)
+      pre_ff_norm: max 278 (layer 12, pos 0, ch 3977); later positions max 248; layers >= 65520: [] (0)
+             gate: max 63.5 (layer 12, pos 0, ch 19483); later positions max 54.25; layers >= 65520: [] (0)
+               up: max 104 (layer 0, pos 4, ch 6455); later positions max 104; layers >= 65520: [] (0)
+         act_x_up: max 900 (layer 0, pos 2, ch 8395); later positions max 900; layers >= 65520: [] (0)
+             down: max 109.5 (layer 0, pos 2, ch 5338); later positions max 109.5; layers >= 65520: [] (0)
+     post_ff_norm: max 2.893e+04 (layer 61, pos 0, ch 104); later positions max 2.496e+04; layers >= 65520: [] (0)
+              out: max 1.782e+05 (layer 61, pos 0, ch 104); later positions max 1.505e+05; layers >= 65520: [54, 55, 56, 57, 58, 59]... (8)
+   layer outputs max|x|@position: 0:520@0 1:700@0 2:688@0 3:936@0 4:896@0 5:844@0 6:976@0 7:1120@4 8:4352@1 9:1216@3 10:1096@3 11:980@2 12:880@2 13:1312@3 14:1992@1 15:2672@3 16:3936@3 17:5696@3 18:6336@3 19:7232@3 20:1.088e+04@0 21:1.101e+04@1 22:2.202e+04@2 23:1.728e+04@2 24:1.92e+04@3 25:2.022e+04@3 26:2.074e+04@3 27:2.816e+04@3 28:3.738e+04@3 29:3.328e+04@2 30:3.277e+04@2 31:3.149e+04@2 32:3.085e+04@2 33:3.226e+04@2 34:3.533e+04@2 35:3.277e+04@2 36:2.816e+04@2 37:2.982e+04@2 38:3.098e+04@2 39:2.982e+04@1 40:3.072e+04@1 41:3.174e+04@1 42:3.302e+04@1 43:3.43e+04@1 44:3.686e+04@0 45:3.994e+04@1 46:4.378e+04@1 47:4.429e+04@1 48:4.454e+04@1 49:4.634e+04@1 50:5.043e+04@2 51:5.555e+04@2 52:5.939e+04@3 53:6.144e+04@3 54:6.554e+04@3 55:6.861e+04@4 56:7.731e+04@2 57:1.019e+05@4 58:1.26e+05@4 59:1.244e+05@0 60:1.362e+05@0 61:1.782e+05@0
+prompt 1 without BOS 2 (18 tokens, first id 2063, 3.9 s): logits finite=True; first point >= 65520: (27, 'out', 82432.0, 12, 104); first non-finite: None
+               in: max 3.461e+05 (layer 52, pos 12, ch 104); later positions max 3.461e+05; layers >= 65520: [28, 29, 30, 31, 32, 33]... (34)
+       input_norm: max 484 (layer 0, pos 6, ch 5131); later positions max 484; layers >= 65520: [] (0)
+                q: max 328 (layer 0, pos 4, ch 747); later positions max 328; layers >= 65520: [] (0)
+                k: max 358 (layer 0, pos 6, ch 704); later positions max 358; layers >= 65520: [] (0)
+                v: max 380 (layer 0, pos 12, ch 480); later positions max 380; layers >= 65520: [] (0)
+         attn_ctx: max 378 (layer 0, pos 12, ch 864); later positions max 378; layers >= 65520: [] (0)
+           o_proj: max 2704 (layer 0, pos 16, ch 2130); later positions max 2704; layers >= 65520: [] (0)
+   post_attn_norm: max 1.606e+04 (layer 59, pos 6, ch 104); later positions max 1.606e+04; layers >= 65520: [] (0)
+        resid_mid: max 3.461e+05 (layer 51, pos 12, ch 104); later positions max 3.461e+05; layers >= 65520: [28, 29, 30, 31, 32, 33]... (34)
+      pre_ff_norm: max 346 (layer 5, pos 2, ch 5336); later positions max 346; layers >= 65520: [] (0)
+             gate: max 66 (layer 12, pos 1, ch 19483); later positions max 66; layers >= 65520: [] (0)
+               up: max 90 (layer 0, pos 10, ch 6455); later positions max 90; layers >= 65520: [] (0)
+         act_x_up: max 3136 (layer 0, pos 6, ch 19710); later positions max 3136; layers >= 65520: [] (0)
+             down: max 346 (layer 0, pos 6, ch 2522); later positions max 346; layers >= 65520: [] (0)
+     post_ff_norm: max 4.89e+04 (layer 31, pos 12, ch 104); later positions max 4.89e+04; layers >= 65520: [] (0)
+              out: max 3.461e+05 (layer 51, pos 12, ch 104); later positions max 3.461e+05; layers >= 65520: [27, 28, 29, 30, 31, 32]... (35)
+   layer outputs max|x|@position: 0:824@17 1:1008@17 2:1016@17 3:1264@17 4:1232@6 5:1248@6 6:1376@6 7:1528@8 8:4672@0 9:1464@8 10:1600@13 11:1328@15 12:1152@0 13:1656@14 14:2656@15 15:3536@14 16:4544@14 17:5376@8 18:5984@8 19:1.005e+04@2 20:1.03e+04@2 21:1.197e+04@14 22:2.509e+04@12 23:2.317e+04@12 24:3.072e+04@12 25:4.634e+04@12 26:6.016e+04@12 27:8.243e+04@12 28:9.114e+04@12 29:9.011e+04@12 30:1.229e+05@12 31:1.72e+05@12 32:1.987e+05@12 33:2.079e+05@12 34:2.232e+05@12 35:2.345e+05@12 36:2.765e+05@12 37:2.785e+05@12 38:2.847e+05@12 39:2.908e+05@12 40:3.195e+05@12 41:3.215e+05@12 42:3.236e+05@12 43:3.256e+05@12 44:3.297e+05@12 45:3.297e+05@12 46:3.359e+05@12 47:3.379e+05@12 48:3.359e+05@12 49:3.379e+05@12 50:3.441e+05@12 51:3.461e+05@12 52:3.297e+05@12 53:3.277e+05@12 54:3.277e+05@12 55:2.908e+05@12 56:2.58e+05@12 57:2.212e+05@12 58:1.833e+05@12 59:1.567e+05@12 60:1.495e+05@3 61:1.864e+05@17
+prompt 2 without BOS 2 (8 tokens, first id 21313, 2.1 s): logits finite=True; first point >= 65520: (30, 'out', 70656.0, 5, 104); first non-finite: None
+               in: max 1.352e+05 (layer 61, pos 0, ch 104); later positions max 1.27e+05; layers >= 65520: [31, 32, 33, 34, 35, 36]... (31)
+       input_norm: max 336 (layer 0, pos 3, ch 5131); later positions max 336; layers >= 65520: [] (0)
+                q: max 221 (layer 0, pos 7, ch 2923); later positions max 221; layers >= 65520: [] (0)
+                k: max 235 (layer 0, pos 0, ch 704); later positions max 223; layers >= 65520: [] (0)
+                v: max 196 (layer 0, pos 7, ch 1450); later positions max 196; layers >= 65520: [] (0)
+         attn_ctx: max 163 (layer 0, pos 3, ch 2681); later positions max 163; layers >= 65520: [] (0)
+           o_proj: max 2024 (layer 0, pos 3, ch 5236); later positions max 2024; layers >= 65520: [] (0)
+   post_attn_norm: max 9792 (layer 57, pos 2, ch 104); later positions max 9792; layers >= 65520: [] (0)
+        resid_mid: max 1.434e+05 (layer 61, pos 0, ch 104); later positions max 1.352e+05; layers >= 65520: [31, 32, 33, 34, 35, 36]... (31)
+      pre_ff_norm: max 334 (layer 5, pos 1, ch 5336); later positions max 334; layers >= 65520: [] (0)
+             gate: max 62.25 (layer 12, pos 2, ch 5017); later positions max 62.25; layers >= 65520: [] (0)
+               up: max 78.5 (layer 0, pos 7, ch 6455); later positions max 78.5; layers >= 65520: [] (0)
+         act_x_up: max 844 (layer 0, pos 7, ch 2202); later positions max 844; layers >= 65520: [] (0)
+             down: max 67.5 (layer 0, pos 7, ch 2522); later positions max 67.5; layers >= 65520: [] (0)
+     post_ff_norm: max 2.355e+04 (layer 61, pos 0, ch 104); later positions max 2.278e+04; layers >= 65520: [] (0)
+              out: max 1.669e+05 (layer 61, pos 0, ch 104); later positions max 1.577e+05; layers >= 65520: [30, 31, 32, 33, 34, 35]... (32)
+   layer outputs max|x|@position: 0:416@1 1:624@1 2:604@1 3:832@1 4:820@1 5:936@0 6:1128@0 7:1200@1 8:4512@0 9:1120@1 10:1336@1 11:1120@1 12:1016@3 13:1840@1 14:2432@1 15:3168@1 16:3728@1 17:5568@1 18:6528@1 19:7296@1 20:1.152e+04@0 21:1.19e+04@3 22:2.202e+04@0 23:1.843e+04@5 24:2.483e+04@5 25:3.123e+04@5 26:2.982e+04@5 27:4.122e+04@5 28:4.557e+04@5 29:5.069e+04@5 30:7.066e+04@5 31:7.936e+04@5 32:9.216e+04@5 33:9.267e+04@5 34:1.039e+05@5 35:1.024e+05@5 36:9.779e+04@5 37:9.779e+04@5 38:9.728e+04@5 39:9.421e+04@5 40:9.523e+04@5 41:9.523e+04@5 42:9.523e+04@5 43:9.574e+04@5 44:9.37e+04@5 45:9.574e+04@5 46:9.267e+04@5 47:9.216e+04@5 48:9.216e+04@5 49:9.37e+04@5 50:9.626e+04@5 51:9.984e+04@5 52:9.779e+04@5 53:9.523e+04@5 54:9.728e+04@5 55:8.96e+04@5 56:9.062e+04@5 57:1.05e+05@5 58:1.208e+05@4 59:1.229e+05@0 60:1.352e+05@0 61:1.669e+05@0
+torch 2.10.0 transformers 5.2.0; /Volumes/T9/models/google/gemma-3-27b-it bfloat16; load 1.1 s
+      224.74 real       104.75 user        89.49 sys
+         54474473472  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+               38825  page reclaims
+             3297350  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   3  voluntary context switches
+             3668949  involuntary context switches
+       2039503426477  instructions retired
+        658045970193  cycles elapsed
+           319037040  peak memory footprint
+
+== exit=0 wall=224.8s end 2026-10-17T23:04:51Z

@@ -9,8 +9,13 @@ path-safe ignored Burn-versus-official gate first ran on source `4f9502a`
 ([large-checkpoint replay](acceptance/measurements/large-checkpoint-replay-20261016.json))
 and failed two teacher-forced rows against a `0.999` floor that the official F16
 oracle itself cannot reach. Judged against the official class's F32 rows with
-floors set by the official F16 evaluations, it passes on source `9a9c730`
-([reference-precision follow-ups](acceptance/measurements/reference-precision-followups-20261016.json); see [the official comparison](#first-official-comparison)). Real-weight
+floors set by the official F16 evaluations, it passed on source `9a9c730`
+([reference-precision follow-ups](acceptance/measurements/reference-precision-followups-20261016.json); see [the official comparison](#first-official-comparison)),
+but it fails on source `f9f78b5`, and so at `8181605`, which compiles the same
+library code: the recurrent cached row at decision 22 is `0.998558` against the
+`0.998635` floor, attributed by two controls to the once-rounded Mamba-2
+convolution SiLU, pending review of the floor rule
+([half-precision envelope record](acceptance/measurements/half-precision-envelope-20261018.json)). Real-weight
 MTP parity and the remaining release gates are incomplete, so the model is not
 advertised as supported. The committed machine-readable state remains
 [`acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24bcc1d289a1950fa9d2b978c47cf903b9.json`](acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24bcc1d289a1950fa9d2b978c47cf903b9.json).
@@ -339,6 +344,18 @@ than the oracle is. Against the F16 oracle its rows stay at the earlier values
 and `1.4e-4`): both F16 implementations sit near the same distance from F32
 there.
 
+On source `f9f78b5` the gate fails
+([half-precision envelope record](acceptance/measurements/half-precision-envelope-20261018.json)):
+the once-rounded half-precision SiLU, which PyTorch's `F.silu` uses, lowers
+the recurrent cached row at decision 22 from `0.998777` to `0.998558`, below
+its `0.998635` floor. Two controls attribute the change to the Mamba-2
+convolution's SiLU: the base `7bd057e`, and `f9f78b5` with only that site
+composed as before, both pass with every statistic of the `9a9c730` run.
+`8181605` compiles the same library code, so the failure stands there
+([half-precision follow-ups record](acceptance/measurements/half-precision-followups-20261017.json)).
+No floor was changed; whether the per-path floor rule (each path's worst
+official F16 row) should be revised awaits review.
+
 The exact official cache has physical batch one while `DynamicCache.batch_size`
 reports its `-1` sentinel. Each of 23 Mamba layers stores an F16 convolution
 tail `[1, 6144, 4]` and FP32 recurrent state `[1, 64, 64, 128]`; each of six
@@ -482,7 +499,8 @@ contract. The stateless, cached-prefill, and one-token decode smoke was replayed
 on the integrated source after the Mamba-2 scan, `dt` softplus, batched cached
 execution, and MTP verification changes
 ([large-checkpoint replay](acceptance/measurements/large-checkpoint-replay-20261016.json)),
-and the official base gate passes against the official F32 rows
+and the official base gate passed against the official F32 rows at `9a9c730`
+but fails at `f9f78b5` with the once-rounded Mamba-2 convolution SiLU
 ([official comparison](#first-official-comparison)). Before this checkpoint can
 be advertised as supported:
 

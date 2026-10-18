@@ -109,7 +109,9 @@ same holds for families whose real-checkpoint parity has been measured but not
 recorded as accepted, such as the Llama, Gemma, and gpt-oss checkpoints listed
 on the [model status page](ARCHITECTURE_COMPATIBILITY.md#real-checkpoint-evidence):
 they are experimentally validated, not supported. That includes the
-half-precision runs of the Llama-family and Gemma gates. No real-checkpoint
+half-precision runs of the Llama-family and Gemma gates. The measured Gemma 3
+checkpoints (gemma-3-4b-it, 12b-it, and 27b-it) overflow F16 in Transformers
+as well, so their F16 logits are non-finite; use BF16 or F32 for them. No real-checkpoint
 gate has been recorded on CUDA, so no checkpoint is validated there.
 
 Version 0.1 promotes exactly three profiles on the validated Apple M3 Max host:

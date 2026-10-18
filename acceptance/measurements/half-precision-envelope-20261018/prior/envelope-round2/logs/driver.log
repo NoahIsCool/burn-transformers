@@ -1,0 +1,49 @@
+2026-10-17T20:31:36Z waiting for the lock (Qwen3-4B)
+2026-10-17T20:33:36Z lock acquired for Qwen3-4B
+2026-10-17T16:34:57 Qwen3-4B bf16-cpu-eager exit=0
+2026-10-17T16:35:17 Qwen3-4B bf16-cpu-sdpa exit=0
+2026-10-17T16:35:42 Qwen3-4B bf16-mps-eager exit=0
+2026-10-17T16:37:02 Qwen3-4B bf16-mps-sdpa exit=0
+2026-10-17T16:37:52 Qwen3-4B f32-cpu-eager exit=0
+2026-10-17T20:37:52Z lock released
+2026-10-17T20:37:52Z waiting for the lock (SmolLM3-3B)
+2026-10-17T20:37:52Z lock acquired for SmolLM3-3B
+2026-10-17T16:39:23 SmolLM3-3B bf16-cpu-eager exit=0
+2026-10-17T16:40:08 SmolLM3-3B bf16-cpu-sdpa exit=0
+2026-10-17T16:40:28 SmolLM3-3B bf16-mps-eager exit=0
+2026-10-17T16:40:43 SmolLM3-3B bf16-mps-sdpa exit=0
+2026-10-17T16:41:08 SmolLM3-3B f32-cpu-eager exit=0
+2026-10-17T20:41:08Z lock released
+2026-10-17T20:41:08Z waiting for the lock (gemma-3-4b-it)
+2026-10-17T20:41:08Z lock acquired for gemma-3-4b-it
+2026-10-17T16:41:53 gemma-3-4b-it bf16-cpu-eager exit=0
+2026-10-17T16:42:19 gemma-3-4b-it bf16-cpu-sdpa exit=0
+2026-10-17T16:43:34 gemma-3-4b-it bf16-mps-eager exit=0
+2026-10-17T16:44:09 gemma-3-4b-it bf16-mps-sdpa exit=0
+2026-10-17T16:44:39 gemma-3-4b-it f32-cpu-eager exit=0
+2026-10-17T20:44:39Z lock released
+2026-10-17T20:44:39Z waiting for the lock (gemma-long)
+2026-10-17T20:44:39Z lock acquired for gemma-long
+2026-10-17T16:52:56 gemma-long bf16-cpu-eager exit=0
+2026-10-17T16:56:32 gemma-long bf16-cpu-sdpa exit=0
+2026-10-17T16:57:02 gemma-long bf16-mps-eager exit=0
+2026-10-17T16:57:27 gemma-long bf16-mps-sdpa exit=0
+2026-10-17T16:58:17 gemma-long f32-cpu-eager exit=0
+2026-10-17T20:58:17Z lock released
+2026-10-17T20:58:17Z waiting for the lock (Qwen2-7B)
+2026-10-17T20:58:17Z lock acquired for Qwen2-7B
+2026-10-17T16:59:38 Qwen2-7B bf16-cpu-eager exit=0
+2026-10-17T17:00:08 Qwen2-7B bf16-cpu-sdpa exit=0
+2026-10-17T17:00:38 Qwen2-7B bf16-mps-eager exit=0
+2026-10-17T17:01:03 Qwen2-7B bf16-mps-sdpa exit=0
+2026-10-17T17:02:33 Qwen2-7B f32-cpu-eager exit=0
+2026-10-17T21:02:33Z lock released
+2026-10-17T21:02:33Z waiting for the lock (Llama-3.1-8B)
+2026-10-17T21:02:33Z lock acquired for Llama-3.1-8B
+2026-10-17T17:03:49 Llama-3.1-8B bf16-cpu-eager exit=0
+2026-10-17T17:04:49 Llama-3.1-8B bf16-cpu-sdpa exit=0
+2026-10-17T17:05:19 Llama-3.1-8B bf16-mps-eager exit=0
+2026-10-17T17:05:44 Llama-3.1-8B bf16-mps-sdpa exit=0
+2026-10-17T17:06:30 Llama-3.1-8B f32-cpu-eager exit=0
+2026-10-17T21:06:30Z lock released
+2026-10-17T21:06:30Z done

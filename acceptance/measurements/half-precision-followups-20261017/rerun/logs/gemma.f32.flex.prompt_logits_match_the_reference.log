@@ -1,0 +1,43 @@
+== source 818160545802c1374f7607d26ce20cc86d2d758d dirty=0
+== checkout /Users/nover/repos/transformers-worktrees/tfm-half-followups2 (branch claude/tfm-half-followups2)
+== binary /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/gemma_artifacts-7e9fb558e3797b0a sha256 533d5d9c242bcc783dea609917c57471e30f92fd01b010316e1dde57993b2e17
+== flex/F32 flex_prompt_logits_match_the_reference
+== env TRANSFORMERS_GEMMA_DECODE_TRUTH_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-f32-cpu-eager
+== env TRANSFORMERS_GEMMA_DIR=/Volumes/T9/models/google/gemma-3-4b-it
+== env TRANSFORMERS_GEMMA_LONG_DECODE_TRUTH_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long-f32-cpu-eager
+== env TRANSFORMERS_GEMMA_LONG_REFERENCE_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long
+== env TRANSFORMERS_GEMMA_REFERENCE_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38
+== cwd /Users/nover/repos/transformers-worktrees/tfm-half-followups2
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/gemma_artifacts-7e9fb558e3797b0a --ignored --exact --nocapture --test-threads 1 flex_prompt_logits_match_the_reference
+== start 2026-10-18T05:17:57+00:00 load 2.46 2.92 2.95 free 90%
+
+running 1 test
+test flex_prompt_logits_match_the_reference ... F32 matrix products use F32 inputs; tolerance 1e-3
+load: 439 vision-tower tensors intentionally ignored
+prompt 0: 6 tokens, max |Δ| = 7.247925e-5
+prompt 1: 19 tokens, max |Δ| = 1.296997e-4
+prompt 2: 9 tokens, max |Δ| = 1.6117096e-4
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 39 filtered out; finished in 15.10s
+
+       15.12 real        17.00 user         5.77 sys
+         19971063808  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             1225805  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                  32  voluntary context switches
+              197936  involuntary context switches
+        113064517294  instructions retired
+         75604939506  cycles elapsed
+         19970980504  peak memory footprint
+== exit=0 wall=15.3s min_free_pct=90 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+== source after run 818160545802c1374f7607d26ce20cc86d2d758d dirty=0

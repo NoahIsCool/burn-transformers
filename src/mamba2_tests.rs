@@ -1959,3 +1959,125 @@ fn scan_kernels_reject_inconsistent_operands() {
         );
     }
 }
+
+/// SiLU inputs whose once-rounded and composed half-precision values differ.
+///
+/// In BF16, `SiLU(2.8125)` is `2.65625` rounded once and `2.640625` as
+/// Burn's `x * sigmoid(x)`; `-5.125` separates the two graphs in both BF16
+/// and F16 (F16 `2.8125` does not). `0.75` agrees in both graphs.
+const SILU_PROBES: [f32; 4] = [2.8125, -5.125, -5.75, 0.75];
+
+/// A one-head mixer whose state after one token from zero is `1024 x'`, where `x'` is the post-convolution SiLU.
+///
+/// The hidden token is `[x_1, .., x_n, 32, 32]` with `n = SILU_PROBES.len()`.
+/// A 0/1 input projection routes `x_i` to the `n` value channels (one head,
+/// `head_dim = n`), one `32` to the single `B` channel and the other to `dt`,
+/// and zero to the gate and `C`; every projected value is a single exact
+/// term. The width-two convolution has taps `[0, 1]` and no bias, so with
+/// zero history it is the identity. After the convolution's SiLU,
+/// `B = SiLU(32) = 32` exactly in every dtype (`sigmoid(32)` rounds to one,
+/// even in F32), and with `dt_bias = 0` the thresholded softplus returns
+/// `dt = 32` exactly. The recurrent update from a zero state is then
+/// `(dt * B) * x' = 1024 x'`, exact in every dtype, held in the F32 state.
+fn silu_probe_mixer(dtype: DType) -> (Mamba2Config, Mamba2<TestBackend>) {
+    let device = Default::default();
+    let values = SILU_PROBES.len();
+    let config = Mamba2Config {
+        hidden_size: values + 2,
+        num_heads: 1,
+        head_dim: values,
+        state_size: 1,
+        groups: 1,
+        convolution_kernel: 2,
+        chunk_size: 4,
+        time_step_clamp: TimeStepClamp::unclamped(),
+        normalization_epsilon: 1e-5,
+        projection_bias: false,
+        convolution_bias: false,
+    };
+    let mut mixer = config.init::<TestBackend>(&device).unwrap();
+    // `[z (n) | x (n) | B (1) | C (1) | dt (1)]` from `[x_1..x_n, 32, 32]`.
+    let (hidden, projected) = (values + 2, 2 * values + 3);
+    let mut projection = vec![0.0_f32; hidden * projected];
+    for value in 0..values {
+        projection[value * projected + values + value] = 1.0;
+    }
+    projection[values * projected + 2 * values] = 1.0;
+    projection[(values + 1) * projected + 2 * values + 2] = 1.0;
+    let matrix = |data: Vec<f32>, shape: [usize; 2]| {
+        Param::from_tensor(
+            Tensor::<TestBackend, 2>::from_data(TensorData::new(data, shape), &device).cast(dtype),
+        )
+    };
+    mixer.in_proj.weight = matrix(projection, [hidden, projected]);
+    mixer.out_proj.weight = matrix(vec![0.0; values * hidden], [values, hidden]);
+    let channels = values + 2;
+    mixer.conv1d.weight = Param::from_tensor(
+        Tensor::<TestBackend, 3>::from_data(
+            TensorData::new([0.0_f32, 1.0].repeat(channels), [channels, 1, 2]),
+            &device,
+        )
+        .cast(dtype),
+    );
+    mixer.dt_bias = Param::from_tensor(Tensor::zeros([1], &device));
+    (config, mixer)
+}
+
+/// The convolution's SiLU is the F32 SiLU rounded once in BF16 and F16, and Burn's graph bit for bit in F32.
+///
+/// Reads the post-convolution activation through the recurrent state of
+/// [`silu_probe_mixer`] in both scan modes. In half precision it must equal
+/// `feed_forward::silu`, PyTorch's `F.silu` convention, and differ from
+/// Burn's composed `activation::silu` on the probes that separate them;
+/// reverting the call site in `Mamba2::run` to `activation::silu` fails it.
+#[test]
+fn convolution_silu_is_rounded_once_in_half_precision() {
+    let device = Default::default();
+    for dtype in [DType::BF16, DType::F16, DType::F32] {
+        let (config, mixer) = silu_probe_mixer(dtype);
+        let token = [SILU_PROBES.as_slice(), &[32.0, 32.0]].concat();
+        let hidden = Tensor::<TestBackend, 3>::from_data(
+            TensorData::new(token, [1, 1, SILU_PROBES.len() + 2]),
+            &device,
+        )
+        .cast(dtype);
+        let probes = Tensor::<TestBackend, 1>::from_floats(SILU_PROBES, &device).cast(dtype);
+        let widen = |tensor: Tensor<TestBackend, 1>| {
+            tensor.cast(DType::F32).into_data().to_vec::<f32>().unwrap()
+        };
+        let once = widen(crate::feed_forward::silu(probes.clone()));
+        let composed = widen(activation::silu(probes));
+        for mode in [Mamba2Mode::Recurrent, Mamba2Mode::ChunkedPrefill] {
+            let state =
+                Mamba2State::zeros_with_dtypes(&config, 1, DType::F32, dtype, &device).unwrap();
+            let (_, next) = mixer
+                .forward_with_state(hidden.clone(), None, &state, mode)
+                .unwrap();
+            let activation = (next.recurrent / 1024.0)
+                .into_data()
+                .to_vec::<f32>()
+                .unwrap();
+            assert_eq!(
+                activation
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                once.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+                "{dtype:?} {mode:?}: post-convolution SiLU {activation:?}, once-rounded {once:?}"
+            );
+        }
+        if dtype == DType::F32 {
+            assert_eq!(once, composed, "F32 SiLU is Burn's own graph");
+        } else {
+            assert!(
+                once.iter()
+                    .zip(&composed)
+                    .any(|(once, composed)| once != composed),
+                "{dtype:?}: the probes no longer separate the two graphs"
+            );
+        }
+        if dtype == DType::BF16 {
+            assert_eq!((once[0], composed[0]), (2.656_25, 2.640_625));
+        }
+    }
+}

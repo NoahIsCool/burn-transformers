@@ -1,0 +1,1547 @@
+[
+ {
+  "bundle": "/Volumes/T9/transformers-references/SmolLM-135M-1d461723-bf16-cpu-eager",
+  "checkpoint": "SmolLM-135M",
+  "truth": "SmolLM-135M-1d461723",
+  "variant": "bf16-cpu-eager",
+  "dtype": "bfloat16",
+  "device": "cpu",
+  "attention": "eager",
+  "script_sha256": "58ab9f55213720202941fc77de5c06c0a77626e40bc4aabc3c23122bb2e1358b",
+  "generated_at": "2026-10-17T15:22:05+00:00",
+  "reference_json_sha256": "10bf21012990bee177b9e6429a69f7462d139d7966d480ad9980f0e672ad820e",
+  "files": {
+   "decode-cached.f32le": {
+    "sha256": "80984bc1ab350976adef733e2c3a79e41d46083818df812217331c9c67c46dbe",
+    "bytes": 6291456
+   },
+   "decode-stateless.f32le": {
+    "sha256": "80984bc1ab350976adef733e2c3a79e41d46083818df812217331c9c67c46dbe",
+    "bytes": 6291456
+   },
+   "logits-0.f32le": {
+    "sha256": "17fa34d5d5a02f207ed1e94545e0f401675672e6b16ce8372d7c9b7e2894abf5",
+    "bytes": 983040
+   },
+   "logits-1.f32le": {
+    "sha256": "faf0395a3923b6b314f5bc0a4ae394e45f3c908114f7df179020d50a39e30611",
+    "bytes": 3538944
+   },
+   "logits-2.f32le": {
+    "sha256": "5cb5e532122a81f98505657fbb8416071d54b6a1b3669e09ce8cedf07f814c90",
+    "bytes": 1572864
+   },
+   "reference.json": {
+    "sha256": "10bf21012990bee177b9e6429a69f7462d139d7966d480ad9980f0e672ad820e",
+    "bytes": 6870
+   }
+  },
+  "decode_max_abs_gap": 0.0,
+  "decode_steps": 32,
+  "generation": "round 1 (tfm-half-followups at fd90c6c, same tool bytes); log under followups/envelope/logs"
+ },
+ {
+  "bundle": "/Volumes/T9/transformers-references/SmolLM-135M-1d461723-bf16-cpu-sdpa",
+  "checkpoint": "SmolLM-135M",
+  "truth": "SmolLM-135M-1d461723",
+  "variant": "bf16-cpu-sdpa",
+  "dtype": "bfloat16",
+  "device": "cpu",
+  "attention": "sdpa",
+  "script_sha256": "58ab9f55213720202941fc77de5c06c0a77626e40bc4aabc3c23122bb2e1358b",
+  "generated_at": "2026-10-17T15:22:22+00:00",
+  "reference_json_sha256": "57d69d6b13e2eaf4f02c8b938f894c04f4aec77340947164a9bb81406fdce47e",
+  "files": {
+   "decode-cached.f32le": {
+    "sha256": "d2e5c0923465d771de8229181bdb746f7ffdfac08e6cf43e5f46ef253010bca1",
+    "bytes": 6291456
+   },
+   "decode-stateless.f32le": {
+    "sha256": "d259a31733f754169a420367872bcc590a294e007c6b357ddbeed7526c38603b",
+    "bytes": 6291456
+   },
+   "logits-0.f32le": {
+    "sha256": "f2ef0505557a73b230afc5d51b92102e02a2de86835752b3eb10266987b79334",
+    "bytes": 983040
+   },
+   "logits-1.f32le": {
+    "sha256": "0e0429f873f1e37bf386f42fabd98cde3b45db59d628dc60d470459c44c9eff2",
+    "bytes": 3538944
+   },
+   "logits-2.f32le": {
+    "sha256": "2fb2e3075d623233ddec6777e7688ad331dc693a66f8ff2874dac1bdbc18e748",
+    "bytes": 1572864
+   },
+   "reference.json": {
+    "sha256": "57d69d6b13e2eaf4f02c8b938f894c04f4aec77340947164a9bb81406fdce47e",
+    "bytes": 6991
+   }
+  },
+  "decode_max_abs_gap": 0.5625,
+  "decode_steps": 32,
+  "generation": "round 1 (tfm-half-followups at fd90c6c, same tool bytes); log under followups/envelope/logs"
+ },
+ {
+  "bundle": "/Volumes/T9/transformers-references/SmolLM-135M-1d461723-bf16-mps-eager",
+  "checkpoint": "SmolLM-135M",
+  "truth": "SmolLM-135M-1d461723",
+  "variant": "bf16-mps-eager",
+  "dtype": "bfloat16",
+  "device": "mps",
+  "attention": "eager",
+  "script_sha256": "58ab9f55213720202941fc77de5c06c0a77626e40bc4aabc3c23122bb2e1358b",
+  "generated_at": "2026-10-17T15:22:44+00:00",
+  "reference_json_sha256": "fe5226dee27a29e326fb211aca6f0332a551730f94309efd373627528ae8c0b4",
+  "files": {
+   "decode-cached.f32le": {
+    "sha256": "1aa66871e88e83dd145534eff622aceb1db324d23676d86c74a772e000b3886a",
+    "bytes": 6291456
+   },
+   "decode-stateless.f32le": {
+    "sha256": "ebe99d5c7303cc33ab93bd0591fdca027d54c4d5ca2401667e61af875be76919",
+    "bytes": 6291456
+   },
+   "logits-0.f32le": {
+    "sha256": "578a7f9fc8498516f5581e21e6bf54602a96054ba6a92f6180daad8a3f8b12d1",
+    "bytes": 983040
+   },
+   "logits-1.f32le": {
+    "sha256": "e71777dd1c63bd32f0eed6bfe61b3d1ca0066c20184331aa186d00633f26fbb8",
+    "bytes": 3538944
+   },
+   "logits-2.f32le": {
+    "sha256": "3d14dc7daeed375372db47c12809b04c19ae21743998e4d942ccb5b76185db0d",
+    "bytes": 1572864
+   },
+   "reference.json": {
+    "sha256": "fe5226dee27a29e326fb211aca6f0332a551730f94309efd373627528ae8c0b4",
+    "bytes": 6989
+   }
+  },
+  "decode_max_abs_gap": 0.5625,
+  "decode_steps": 32,
+  "generation": "round 1 (tfm-half-followups at fd90c6c, same tool bytes); log under followups/envelope/logs"
+ },
+ {
+  "bundle": "/Volumes/T9/transformers-references/SmolLM-135M-1d461723-bf16-mps-sdpa",
+  "checkpoint": "SmolLM-135M",
+  "truth": "SmolLM-135M-1d461723",
+  "variant": "bf16-mps-sdpa",
+  "dtype": "bfloat16",
+  "device": "mps",
+  "attention": "sdpa",
+  "script_sha256": "58ab9f55213720202941fc77de5c06c0a77626e40bc4aabc3c23122bb2e1358b",
+  "generated_at": "2026-10-17T15:23:03+00:00",
+  "reference_json_sha256": "7edd99fd9fb6d6d2344cd453485735cbd3289b7e71f2a996aa1698695f146447",
+  "files": {
+   "decode-cached.f32le": {
+    "sha256": "25d88b3ccd8d0e736474e8a95d70b3eec5c20426c1f46cd3ae4f3d0e103a86a5",
+    "bytes": 6291456
+   },
+   "decode-stateless.f32le": {
+    "sha256": "94c19ad88d415b32136f2fcf74442da756207757bac488d11ee8b26ce8298d1f",
+    "bytes": 6291456
+   },
+   "logits-0.f32le": {
+    "sha256": "0219f91a4a4d893e7824a40f8f3574287a24d48647bc9f37b16dd134a6803262",
+    "bytes": 983040
+   },
+   "logits-1.f32le": {
+    "sha256": "dc9741c3241e973cf6fa1acd30fc138c2c2ad80ee2e5fdc5a9d8ccb01e427c3f",
+    "bytes": 3538944
+   },
+   "logits-2.f32le": {
+    "sha256": "0bbc21278087693b4c8ddbe9f309fcc0ff2221bdd6d677011a2be1055c07a8fa",
+    "bytes": 1572864
+   },
+   "reference.json": {
+    "sha256": "7edd99fd9fb6d6d2344cd453485735cbd3289b7e71f2a996aa1698695f146447",
+    "bytes": 7029
+   }
+  },
+  "decode_max_abs_gap": 0.494140625,
+  "decode_steps": 32,
+  "generation": "round 1 (tfm-half-followups at fd90c6c, same tool bytes); log under followups/envelope/logs"
+ },
+ {
+  "bundle": "/Volumes/T9/transformers-references/SmolLM-135M-1d461723-f32-cpu-eager",
+  "checkpoint": "SmolLM-135M",
+  "truth": "SmolLM-135M-1d461723",
+  "variant": "f32-cpu-eager",
+  "dtype": "float32",
+  "device": "cpu",
+  "attention": "eager",
+  "script_sha256": "58ab9f55213720202941fc77de5c06c0a77626e40bc4aabc3c23122bb2e1358b",
+  "generated_at": "2026-10-17T15:23:18+00:00",
+  "reference_json_sha256": "3e765467b7fb41699cf0a7191b8683265799acff219d2999c46165372519e01f",
+  "files": {
+   "decode-cached.f32le": {
+    "sha256": "4c2287a082724c06744935c2e7796125a4c0a06ddd6caca9b79da801beb80c73",
+    "bytes": 6291456
+   },
+   "decode-stateless.f32le": {
+    "sha256": "6f91d4fd72ba2de3808c8991b10d335356cf5f22433421a857b744d0f4e3c65e",
+    "bytes": 6291456
+   },
+   "logits-0.f32le": {
+    "sha256": "19df384f8613ce35f89ce94183ad1d3c21962ea72383f2ce00a19ee018be1993",
+    "bytes": 983040
+   },
+   "logits-1.f32le": {
+    "sha256": "106ce954aafa46e7a4c29036a875c44c3c5bd725cb21d8f58af4918c646ccca3",
+    "bytes": 3538944
+   },
+   "logits-2.f32le": {
+    "sha256": "1282ece836d69e5033ec1cace463a97f0f3ce31f66e82d790eb2ffa6709ca0a1",
+    "bytes": 1572864
+   },
+   "reference.json": {
+    "sha256": "3e765467b7fb41699cf0a7191b8683265799acff219d2999c46165372519e01f",
+    "bytes": 7903
+   }
+  },
+  "decode_max_abs_gap": 5.7220458984375e-05,
+  "decode_steps": 32,
+  "generation": "round 1 (tfm-half-followups at fd90c6c, same tool bytes); log under followups/envelope/logs"
+ },
+ {
+  "bundle": "/Volumes/T9/transformers-references/Qwen3-4B-531c80e2-bf16-cpu-eager",
+  "checkpoint": "Qwen3-4B",
+  "truth": "Qwen3-4B-531c80e2",
+  "variant": "bf16-cpu-eager",
+  "dtype": "bfloat16",
+  "device": "cpu",
+  "attention": "eager",
+  "script_sha256": "58ab9f55213720202941fc77de5c06c0a77626e40bc4aabc3c23122bb2e1358b",
+  "generated_at": "2026-10-17T20:34:37+00:00",
+  "reference_json_sha256": "7eb05f668f348b7a2335c705fdf81181d22cb45ab79a0ba1de27a3275810daf7",
+  "files": {
+   "decode-cached.f32le": {
+    "sha256": "31e692cebf8e750abe30f45852eb9f05084134c31a1f790ec72ca46b5bd95ab9",
+    "bytes": 19447808
+   },
+   "decode-stateless.f32le": {
+    "sha256": "0cd7821d9ace2d6e4d8d31f86f1aa979be4fafa2f74e91112aefe31e8997b536",
+    "bytes": 19447808
+   },
+   "logits-0.f32le": {
+    "sha256": "7f44b52d056ef98dcbbae57daf5039f717174f1d2a9ec5dd2b64961d800a310e",
+    "bytes": 3038720
+   },
+   "logits-1.f32le": {
+    "sha256": "8105ef5d6bfe78036fa34b59c665e8b68277a46a118b195580de1d77db5cba45",
+    "bytes": 7900672
+   },
+   "logits-2.f32le": {
+    "sha256": "13e12f9252f4352dcd825422203353a6a124c1a53fbefb31a32da090f3c3afa1",
+    "bytes": 4861952
+   },
+   "reference.json": {
+    "sha256": "7eb05f668f348b7a2335c705fdf81181d22cb45ab79a0ba1de27a3275810daf7",
+    "bytes": 7014
+   }
+  },
+  "decode_max_abs_gap": 0.0625,
+  "decode_steps": 32,
+  "source": "7bd057ecc56d60df2776639befd30058720d3c09",
+  "wall_seconds": 80.14,
+  "maximum_resident_set_bytes": 9062301696,
+  "peak_memory_footprint_bytes": 842358008,
+  "log": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/envelope/round2/logs/Qwen3-4B-531c80e2-bf16-cpu-eager.log",
+  "log_sha256": "b0bbcd00b7808a3a1154569d714190706d777ae4faccd140bcb325bac693c18b"
+ },
+ {
+  "bundle": "/Volumes/T9/transformers-references/Qwen3-4B-531c80e2-bf16-cpu-sdpa",
+  "checkpoint": "Qwen3-4B",
+  "truth": "Qwen3-4B-531c80e2",
+  "variant": "bf16-cpu-sdpa",
+  "dtype": "bfloat16",
+  "device": "cpu",
+  "attention": "sdpa",
+  "script_sha256": "58ab9f55213720202941fc77de5c06c0a77626e40bc4aabc3c23122bb2e1358b",
+  "generated_at": "2026-10-17T20:35:04+00:00",
+  "reference_json_sha256": "2d1d6e42c3191a217fc6256915ea12b69767b209c8d37d8149115736317a84a2",
+  "files": {
+   "decode-cached.f32le": {
+    "sha256": "00257f7438bcef4750961e8638ab079e6c54ed4268eef25a2c52d2feccd83a0d",
+    "bytes": 19447808
+   },
+   "decode-stateless.f32le": {
+    "sha256": "9f1e14de76e8eeb0e6376819d42e163821a996a0d229b9473e89bc8d6c79bcdc",
+    "bytes": 19447808
+   },
+   "logits-0.f32le": {
+    "sha256": "e8222976e76bddda6eda7bc588ea16f228d7c26b2b28bfd96847204480f51bdc",
+    "bytes": 3038720
+   },
+   "logits-1.f32le": {
+    "sha256": "cd77e7a99088b013f8d73c0916288a510f5e123dee4d9d3960cf72f37deaa9fc",
+    "bytes": 7900672
+   },
+   "logits-2.f32le": {
+    "sha256": "bc4fd9e3db99eb28541fd775d18189aea1e43ddd104fb77bad9395d450345de7",
+    "bytes": 4861952
+   },
+   "reference.json": {
+    "sha256": "2d1d6e42c3191a217fc6256915ea12b69767b209c8d37d8149115736317a84a2",
+    "bytes": 7079
+   }
+  },
+  "decode_max_abs_gap": 0.75,
+  "decode_steps": 32,
+  "source": "7bd057ecc56d60df2776639befd30058720d3c09",
+  "wall_seconds": 20.04,
+  "maximum_resident_set_bytes": 9071427584,
+  "peak_memory_footprint_bytes": 859839736,
+  "log": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/envelope/round2/logs/Qwen3-4B-531c80e2-bf16-cpu-sdpa.log",
+  "log_sha256": "3aa8d06286588640d0cd4e87e8b85529aed40efc6ba17e97aa15d9c3b9bebf8b"
+ },
+ {
+  "bundle": "/Volumes/T9/transformers-references/Qwen3-4B-531c80e2-bf16-mps-eager",
+  "checkpoint": "Qwen3-4B",
+  "truth": "Qwen3-4B-531c80e2",
+  "variant": "bf16-mps-eager",
+  "dtype": "bfloat16",
+  "device": "mps",
+  "attention": "eager",
+  "script_sha256": "58ab9f55213720202941fc77de5c06c0a77626e40bc4aabc3c23122bb2e1358b",
+  "generated_at": "2026-10-17T20:35:26+00:00",
+  "reference_json_sha256": "ec7c8294de4ad113447171839ab7f7da01f502b8c2f92afd0ffe49c58b5e1943",
+  "files": {
+   "decode-cached.f32le": {
+    "sha256": "1f21aaf17c4d731b2811dfe78004db0dd899c29b25ec68eef7f6a8ff92d43877",
+    "bytes": 19447808
+   },
+   "decode-stateless.f32le": {
+    "sha256": "c189bec7da2986b826278010368b45636029023cefd97934b5b8055eaf99a25f",
+    "bytes": 19447808
+   },
+   "logits-0.f32le": {
+    "sha256": "a92ff6f189b66ba3434484b7959252f8239632927e804d9dbadeaebd3379f6d5",
+    "bytes": 3038720
+   },
+   "logits-1.f32le": {
+    "sha256": "23faff63766b3b433779c6d7a12974198219ebbaafb0ebb7385b689b0c3b19a6",
+    "bytes": 7900672
+   },
+   "logits-2.f32le": {
+    "sha256": "46d5443a24c59b5f830da1885677602115d3188226bfed17be9f2da077f6a194",
+    "bytes": 4861952
+   },
+   "reference.json": {
+    "sha256": "ec7c8294de4ad113447171839ab7f7da01f502b8c2f92afd0ffe49c58b5e1943",
+    "bytes": 7111
+   }
+  },
+  "decode_max_abs_gap": 0.875,
+  "decode_steps": 32,
+  "source": "7bd057ecc56d60df2776639befd30058720d3c09",
+  "wall_seconds": 25.05,
+  "maximum_resident_set_bytes": 1514405888,
+  "peak_memory_footprint_bytes": 9809726320,
+  "log": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/envelope/round2/logs/Qwen3-4B-531c80e2-bf16-mps-eager.log",
+  "log_sha256": "f6b105289a5017b75df980f1a74ecec33718929e78c0a6eb68e87c51c80a7772"
+ },
+ {
+  "bundle": "/Volumes/T9/transformers-references/Qwen3-4B-531c80e2-bf16-mps-sdpa",
+  "checkpoint": "Qwen3-4B",
+  "truth": "Qwen3-4B-531c80e2",
+  "variant": "bf16-mps-sdpa",
+  "dtype": "bfloat16",
+  "device": "mps",
+  "attention": "sdpa",
+  "script_sha256": "58ab9f55213720202941fc77de5c06c0a77626e40bc4aabc3c23122bb2e1358b",
+  "generated_at": "2026-10-17T20:36:41+00:00",
+  "reference_json_sha256": "aa525c3de7b8e102737366ff8faa77fafdf99b9144728529e1dfc1834450cc77",
+  "files": {
+   "decode-cached.f32le": {
+    "sha256": "08ab78133ca191e4d9753c81abe66b61f62d011cbd8cad98afdee72671009b01",
+    "bytes": 19447808
+   },
+   "decode-stateless.f32le": {
+    "sha256": "bac2c6b96568303bb4885e5484fb7e92141390b326d795da1a372833f0369aa5",
+    "bytes": 19447808
+   },
+   "logits-0.f32le": {
+    "sha256": "22c0c71d1cd79d10755530e67fb1b3fde6ec6acb54344c49ae9c5a8b9b2e4427",
+    "bytes": 3038720
+   },
+   "logits-1.f32le": {
+    "sha256": "6948f0089d12d9dd2a8ced05d06b2cbd2a65d6df4cb5bc24c804217e9189ee50",
+    "bytes": 7900672
+   },
+   "logits-2.f32le": {
+    "sha256": "61174cfeac99c4951950f1e15504fbbe652712a929ed1bbcc186427493762186",
+    "bytes": 4861952
+   },
+   "reference.json": {
+    "sha256": "aa525c3de7b8e102737366ff8faa77fafdf99b9144728529e1dfc1834450cc77",
+    "bytes": 7130
+   }
+  },
+  "decode_max_abs_gap": 0.59375,
+  "decode_steps": 32,
+  "source": "7bd057ecc56d60df2776639befd30058720d3c09",
+  "wall_seconds": 80.24,
+  "maximum_resident_set_bytes": 1302806528,
+  "peak_memory_footprint_bytes": 9604646976,
+  "log": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/envelope/round2/logs/Qwen3-4B-531c80e2-bf16-mps-sdpa.log",
+  "log_sha256": "790a984c03b218287a40a81c943226bbe659303b1b91151f9d6aedc7f4d349d0"
+ },
+ {
+  "bundle": "/Volumes/T9/transformers-references/Qwen3-4B-531c80e2-f32-cpu-eager",
+  "checkpoint": "Qwen3-4B",
+  "truth": "Qwen3-4B-531c80e2",
+  "variant": "f32-cpu-eager",
+  "dtype": "float32",
+  "device": "cpu",
+  "attention": "eager",
+  "script_sha256": "58ab9f55213720202941fc77de5c06c0a77626e40bc4aabc3c23122bb2e1358b",
+  "generated_at": "2026-10-17T20:37:30+00:00",
+  "reference_json_sha256": "32bc3c6ac11c521f768097eff37d210b711731156d1a04ad6464e45ffcbb5bb4",
+  "files": {
+   "decode-cached.f32le": {
+    "sha256": "0b0d11d08a7bf7332493f9f29541bb6a01f9f6708165504f87d2a1b4ee19dffc",
+    "bytes": 19447808
+   },
+   "decode-stateless.f32le": {
+    "sha256": "b7ec0759e3e6bcf0834a2fbe1925b7cb14383fbfef972f3e8c324fc1a2c69f76",
+    "bytes": 19447808
+   },
+   "logits-0.f32le": {
+    "sha256": "1de0a244493de790c6bb0b5fa0c4e75a089881e57f943ccf6b6fa620fe886e51",
+    "bytes": 3038720
+   },
+   "logits-1.f32le": {
+    "sha256": "858c7e9b91f790854a86cf0fe953620e5543b1938a158a9d4640b7497ef59f17",
+    "bytes": 7900672
+   },
+   "logits-2.f32le": {
+    "sha256": "c446f60d40837f480f8ee8c4147b83bf0cb3be7bfb8cf9cafa4408ce8570a2f7",
+    "bytes": 4861952
+   },
+   "reference.json": {
+    "sha256": "32bc3c6ac11c521f768097eff37d210b711731156d1a04ad6464e45ffcbb5bb4",
+    "bytes": 8056
+   }
+  },
+  "decode_max_abs_gap": 0.00016069412231445312,
+  "decode_steps": 32,
+  "source": "7bd057ecc56d60df2776639befd30058720d3c09",
+  "wall_seconds": 50.15,
+  "maximum_resident_set_bytes": 24682856448,
+  "peak_memory_footprint_bytes": 16927732888,
+  "log": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/envelope/round2/logs/Qwen3-4B-531c80e2-f32-cpu-eager.log",
+  "log_sha256": "c14427f93785ba31a310cb782806ed396d1fc0af013e33197424039c8e67f8e9"
+ },
+ {
+  "bundle": "/Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28-bf16-cpu-eager",
+  "checkpoint": "SmolLM3-3B",
+  "truth": "SmolLM3-3B-1fa6fa28",
+  "variant": "bf16-cpu-eager",
+  "dtype": "bfloat16",
+  "device": "cpu",
+  "attention": "eager",
+  "script_sha256": "58ab9f55213720202941fc77de5c06c0a77626e40bc4aabc3c23122bb2e1358b",
+  "generated_at": "2026-10-17T20:38:58+00:00",
+  "reference_json_sha256": "d68440354aeaf3a9b381711ef9a2ee8de733e8417150e802c2d1d15a86379056",
+  "files": {
+   "decode-cached.f32le": {
+    "sha256": "db117eb16c81a6c5d010f411cfddaf676346f18a2dfcaa6fd6359fccabeb18f5",
+    "bytes": 16416768
+   },
+   "decode-stateless.f32le": {
+    "sha256": "27c696fa04dac6f66cd422c0ff88b9161a32ae1e21eac3357ce518b480d67860",
+    "bytes": 16416768
+   },
+   "logits-0.f32le": {
+    "sha256": "aead6c7715a397ea661b74e7acdb6a221cc212fd34f18ff81457a65b2c533aef",
+    "bytes": 2565120
+   },
+   "logits-1.f32le": {
+    "sha256": "2482bc62bf72464f45b6317a808bffb24851ea2c90cc4f0704642dbdcecca66f",
+    "bytes": 6669312
+   },
+   "logits-2.f32le": {
+    "sha256": "01a540724ff475aca9761db357b385fe097ab9d60cda68a59cd8ad35e1d09c21",
+    "bytes": 4104192
+   },
+   "reference.json": {
+    "sha256": "d68440354aeaf3a9b381711ef9a2ee8de733e8417150e802c2d1d15a86379056",
+    "bytes": 7009
+   }
+  },
+  "decode_max_abs_gap": 0.875,
+  "decode_steps": 32,
+  "source": "7bd057ecc56d60df2776639befd30058720d3c09",
+  "wall_seconds": 90.23,
+  "maximum_resident_set_bytes": 7126056960,
+  "peak_memory_footprint_bytes": 756635528,
+  "log": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/envelope/round2/logs/SmolLM3-3B-1fa6fa28-bf16-cpu-eager.log",
+  "log_sha256": "0265297f0d738727096de401f5214e2f0f9ecc40db88ba77a9ae60810c97419f"
+ },
+ {
+  "bundle": "/Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28-bf16-cpu-sdpa",
+  "checkpoint": "SmolLM3-3B",
+  "truth": "SmolLM3-3B-1fa6fa28",
+  "variant": "bf16-cpu-sdpa",
+  "dtype": "bfloat16",
+  "device": "cpu",
+  "attention": "sdpa",
+  "script_sha256": "58ab9f55213720202941fc77de5c06c0a77626e40bc4aabc3c23122bb2e1358b",
+  "generated_at": "2026-10-17T20:39:42+00:00",
+  "reference_json_sha256": "a920754e0538f90bf4f550c0b64411bf9e5334cacbf738be4bdb6027c70b6135",
+  "files": {
+   "decode-cached.f32le": {
+    "sha256": "6b486c53aa09bd9b82f7db9ec68fc51735b0909bef3767be2756ce680161620b",
+    "bytes": 16416768
+   },
+   "decode-stateless.f32le": {
+    "sha256": "24803198d48eae180c76c1fea92d6286dd06c7c7efc05c469013daf01fb58253",
+    "bytes": 16416768
+   },
+   "logits-0.f32le": {
+    "sha256": "749b0db2df776b1545f134751f25e8e5cd4539907bd4e17d38165daf9a60f369",
+    "bytes": 2565120
+   },
+   "logits-1.f32le": {
+    "sha256": "1d1356eeedeafef1229a0206a55f36a4b442048b20068fe6ec7608694c8eac63",
+    "bytes": 6669312
+   },
+   "logits-2.f32le": {
+    "sha256": "baeda3bd3d75cebfe543dfa8e65d4ec19fa3e8084fb0eebef5572b8cb419bcab",
+    "bytes": 4104192
+   },
+   "reference.json": {
+    "sha256": "a920754e0538f90bf4f550c0b64411bf9e5334cacbf738be4bdb6027c70b6135",
+    "bytes": 7014
+   }
+  },
+  "decode_max_abs_gap": 0.8125,
+  "decode_steps": 32,
+  "source": "7bd057ecc56d60df2776639befd30058720d3c09",
+  "wall_seconds": 45.11,
+  "maximum_resident_set_bytes": 7134117888,
+  "peak_memory_footprint_bytes": 769693576,
+  "log": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/envelope/round2/logs/SmolLM3-3B-1fa6fa28-bf16-cpu-sdpa.log",
+  "log_sha256": "f4b9f9294ee4022a46258afafebe2a3487ef389f67afa5f07f52d39b2b6362cc"
+ },
+ {
+  "bundle": "/Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28-bf16-mps-eager",
+  "checkpoint": "SmolLM3-3B",
+  "truth": "SmolLM3-3B-1fa6fa28",
+  "variant": "bf16-mps-eager",
+  "dtype": "bfloat16",
+  "device": "mps",
+  "attention": "eager",
+  "script_sha256": "58ab9f55213720202941fc77de5c06c0a77626e40bc4aabc3c23122bb2e1358b",
+  "generated_at": "2026-10-17T20:40:16+00:00",
+  "reference_json_sha256": "e2f7f04138adbef783308d1ba99bcbb059e1c14f9f6896bcca82fd0f34e16abd",
+  "files": {
+   "decode-cached.f32le": {
+    "sha256": "bc0edfd7e9cc77f8f149d6a7ed670d53b4af3c1be2896c0577c62f4536c2663c",
+    "bytes": 16416768
+   },
+   "decode-stateless.f32le": {
+    "sha256": "166c9fa0a0e18ac3fcaf85f5fb41502f3893e3aa1dcf0625ba15d7c747a5ab28",
+    "bytes": 16416768
+   },
+   "logits-0.f32le": {
+    "sha256": "8bc977f979a42710cb5482a18b5942e8a634c6d777fe9f7df81024e5dc788209",
+    "bytes": 2565120
+   },
+   "logits-1.f32le": {
+    "sha256": "c897d25962b5412dc6fb17da00f490d8e486f1ef73e69bf672c1bb09c89cffed",
+    "bytes": 6669312
+   },
+   "logits-2.f32le": {
+    "sha256": "cd8945a50db7bb26a68481838b4f72fb55125f84a2e1a5de612fe15c8de89a5f",
+    "bytes": 4104192
+   },
+   "reference.json": {
+    "sha256": "e2f7f04138adbef783308d1ba99bcbb059e1c14f9f6896bcca82fd0f34e16abd",
+    "bytes": 7044
+   }
+  },
+  "decode_max_abs_gap": 0.75,
+  "decode_steps": 32,
+  "source": "7bd057ecc56d60df2776639befd30058720d3c09",
+  "wall_seconds": 20.04,
+  "maximum_resident_set_bytes": 1370357760,
+  "peak_memory_footprint_bytes": 7813073608,
+  "log": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/envelope/round2/logs/SmolLM3-3B-1fa6fa28-bf16-mps-eager.log",
+  "log_sha256": "a64d7e1c73706fd6f513967daee20cbf86c233b1b9f90f9ff90dcc0e333b7444"
+ },
+ {
+  "bundle": "/Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28-bf16-mps-sdpa",
+  "checkpoint": "SmolLM3-3B",
+  "truth": "SmolLM3-3B-1fa6fa28",
+  "variant": "bf16-mps-sdpa",
+  "dtype": "bfloat16",
+  "device": "mps",
+  "attention": "sdpa",
+  "script_sha256": "58ab9f55213720202941fc77de5c06c0a77626e40bc4aabc3c23122bb2e1358b",
+  "generated_at": "2026-10-17T20:40:35+00:00",
+  "reference_json_sha256": "94753b5e0ee7f59a4b97100c04bb1cd0ed09b099fc3b20fb7cdb71475975d002",
+  "files": {
+   "decode-cached.f32le": {
+    "sha256": "f0fae25a58695af7951c4d8ba6024982da55555e29208528b17bd4658d1259d4",
+    "bytes": 16416768
+   },
+   "decode-stateless.f32le": {
+    "sha256": "ced7a99e704173945343d34aa89ace4f149f930507c3408baea2e34034d52ca9",
+    "bytes": 16416768
+   },
+   "logits-0.f32le": {
+    "sha256": "369371b85231986494f2c2818f7dc9ef5785806f4e927cb2381cb6c498ffe9a0",
+    "bytes": 2565120
+   },
+   "logits-1.f32le": {
+    "sha256": "45ce3c1c6c30de194ed9968e747bf8cf4e805edb3cde0117f64772690d872df6",
+    "bytes": 6669312
+   },
+   "logits-2.f32le": {
+    "sha256": "91af3ab5afa65ed19e830b326f122b6db4bedfc9080ac75805a0e496a379d620",
+    "bytes": 4104192
+   },
+   "reference.json": {
+    "sha256": "94753b5e0ee7f59a4b97100c04bb1cd0ed09b099fc3b20fb7cdb71475975d002",
+    "bytes": 7011
+   }
+  },
+  "decode_max_abs_gap": 0.75,
+  "decode_steps": 32,
+  "source": "7bd057ecc56d60df2776639befd30058720d3c09",
+  "wall_seconds": 15.03,
+  "maximum_resident_set_bytes": 1154793472,
+  "peak_memory_footprint_bytes": 7588054936,
+  "log": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/envelope/round2/logs/SmolLM3-3B-1fa6fa28-bf16-mps-sdpa.log",
+  "log_sha256": "10a4b5adc1e10364a61551c2cababfefc52a6eeea6639749f2edb39c9d17034e"
+ },
+ {
+  "bundle": "/Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28-f32-cpu-eager",
+  "checkpoint": "SmolLM3-3B",
+  "truth": "SmolLM3-3B-1fa6fa28",
+  "variant": "f32-cpu-eager",
+  "dtype": "float32",
+  "device": "cpu",
+  "attention": "eager",
+  "script_sha256": "58ab9f55213720202941fc77de5c06c0a77626e40bc4aabc3c23122bb2e1358b",
+  "generated_at": "2026-10-17T20:40:54+00:00",
+  "reference_json_sha256": "62309448594bb87c9bfc55e95624e43a0078326e60107ccd19c7c8382528909c",
+  "files": {
+   "decode-cached.f32le": {
+    "sha256": "e98f595745ca4124ac19b44ac93f32226d987c7a628856893529da63e05df5bd",
+    "bytes": 16416768
+   },
+   "decode-stateless.f32le": {
+    "sha256": "0803b3e1f23ea03fbd850cfb9c51749e7dc69d748ac903a199d39d642d0a52bf",
+    "bytes": 16416768
+   },
+   "logits-0.f32le": {
+    "sha256": "dd6705b5014b3eebbaacad1d95d8816eef060003660eb2a3c4d02d40c6a56379",
+    "bytes": 2565120
+   },
+   "logits-1.f32le": {
+    "sha256": "0ce0bd6d8f2453f7d3639f74924d725145fe971e40f9ea596841b68db9de11c0",
+    "bytes": 6669312
+   },
+   "logits-2.f32le": {
+    "sha256": "bc872e8aab5eda83848e357d935941f52729c29cac2a1de765c2d3089184c11a",
+    "bytes": 4104192
+   },
+   "reference.json": {
+    "sha256": "62309448594bb87c9bfc55e95624e43a0078326e60107ccd19c7c8382528909c",
+    "bytes": 7995
+   }
+  },
+  "decode_max_abs_gap": 0.00023937225341796875,
+  "decode_steps": 32,
+  "source": "7bd057ecc56d60df2776639befd30058720d3c09",
+  "wall_seconds": 25.05,
+  "maximum_resident_set_bytes": 18929500160,
+  "peak_memory_footprint_bytes": 12979759544,
+  "log": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/envelope/round2/logs/SmolLM3-3B-1fa6fa28-f32-cpu-eager.log",
+  "log_sha256": "c7d0554fa57794225c8cde8592bd0a07c6f5b9f3602d498bad2d92677fc9785a"
+ },
+ {
+  "bundle": "/Volumes/T9/transformers-references/Qwen2-7B-453ed157-f64-bf16-cpu-eager",
+  "checkpoint": "Qwen2-7B",
+  "truth": "Qwen2-7B-453ed157-f64",
+  "variant": "bf16-cpu-eager",
+  "dtype": "bfloat16",
+  "device": "cpu",
+  "attention": "eager",
+  "script_sha256": "58ab9f55213720202941fc77de5c06c0a77626e40bc4aabc3c23122bb2e1358b",
+  "generated_at": "2026-10-17T20:59:15+00:00",
+  "reference_json_sha256": "b0d06987996a8629a744e0006d70debddcd90bf314b6a600c372ed207e9fd32a",
+  "files": {
+   "decode-cached.f32le": {
+    "sha256": "bafdc5cb36e41c83b0d3ce11cc1c95bbc344582e53e08cd64ef0fc90952d1e08",
+    "bytes": 19464192
+   },
+   "decode-stateless.f32le": {
+    "sha256": "320538ace720b5c84ab4c09308a6e8493fb5eb2c1bf23015a62a3af925291960",
+    "bytes": 19464192
+   },
+   "logits-0.f32le": {
+    "sha256": "5ca87ba025eccef1313033bc5f4b5297928852fb21dd253c996acf068956bae8",
+    "bytes": 3041280
+   },
+   "logits-1.f32le": {
+    "sha256": "418ab47cb60d3e476562fcec86ab5132c1df551ee58634cf3f3633ea9d313de9",
+    "bytes": 7907328
+   },
+   "logits-2.f32le": {
+    "sha256": "395355b3237d7654201c7a5c23e691c6a5b4be99c85e0c4ad21d957ea8825a4c",
+    "bytes": 4866048
+   },
+   "reference.json": {
+    "sha256": "b0d06987996a8629a744e0006d70debddcd90bf314b6a600c372ed207e9fd32a",
+    "bytes": 7191
+   }
+  },
+  "decode_max_abs_gap": 1.75,
+  "decode_steps": 32,
+  "source": "7bd057ecc56d60df2776639befd30058720d3c09",
+  "wall_seconds": 80.18,
+  "maximum_resident_set_bytes": 15177465856,
+  "peak_memory_footprint_bytes": 848637832,
+  "log": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/envelope/round2/logs/Qwen2-7B-453ed157-f64-bf16-cpu-eager.log",
+  "log_sha256": "f73c193d8e70c193e2ced5626f2e8fb2af9fc12f6a6b716c5a1361a905d76e27"
+ },
+ {
+  "bundle": "/Volumes/T9/transformers-references/Qwen2-7B-453ed157-f64-bf16-cpu-sdpa",
+  "checkpoint": "Qwen2-7B",
+  "truth": "Qwen2-7B-453ed157-f64",
+  "variant": "bf16-cpu-sdpa",
+  "dtype": "bfloat16",
+  "device": "cpu",
+  "attention": "sdpa",
+  "script_sha256": "58ab9f55213720202941fc77de5c06c0a77626e40bc4aabc3c23122bb2e1358b",
+  "generated_at": "2026-10-17T20:59:47+00:00",
+  "reference_json_sha256": "7bb1eeec9c0dd7e2528c4543ceef3c080bfc1c377c05ffb3eb023deb53729d42",
+  "files": {
+   "decode-cached.f32le": {
+    "sha256": "67578928ec904b897ac971e688d0888e43cc09ec0f23caf7b9724c9b66613264",
+    "bytes": 19464192
+   },
+   "decode-stateless.f32le": {
+    "sha256": "bd34e9d5a49b89a516cd57c5af5a6c10494b13d7440e069cf6bbc3f9fd01cac2",
+    "bytes": 19464192
+   },
+   "logits-0.f32le": {
+    "sha256": "445983fa2f122c03b8c523353c06a7cf2088ed29c826fb102afc422b17368317",
+    "bytes": 3041280
+   },
+   "logits-1.f32le": {
+    "sha256": "6ee65dcafd0f8f9eda390d5210f9d673582e11c633e60ae3df513519376a1a57",
+    "bytes": 7907328
+   },
+   "logits-2.f32le": {
+    "sha256": "c8c022b3af95345bf2d92b783e32342cb7424749762fe669a8dba6419918c072",
+    "bytes": 4866048
+   },
+   "reference.json": {
+    "sha256": "7bb1eeec9c0dd7e2528c4543ceef3c080bfc1c377c05ffb3eb023deb53729d42",
+    "bytes": 7204
+   }
+  },
+  "decode_max_abs_gap": 0.2578125,
+  "decode_steps": 32,
+  "source": "7bd057ecc56d60df2776639befd30058720d3c09",
+  "wall_seconds": 30.07,
+  "maximum_resident_set_bytes": 15132573696,
+  "peak_memory_footprint_bytes": 809021080,
+  "log": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/envelope/round2/logs/Qwen2-7B-453ed157-f64-bf16-cpu-sdpa.log",
+  "log_sha256": "cac4a54c74e7f08854c8f5382c77293186987465623ed223c3038b24e49bfd18"
+ },
+ {
+  "bundle": "/Volumes/T9/transformers-references/Qwen2-7B-453ed157-f64-bf16-mps-eager",
+  "checkpoint": "Qwen2-7B",
+  "truth": "Qwen2-7B-453ed157-f64",
+  "variant": "bf16-mps-eager",
+  "dtype": "bfloat16",
+  "device": "mps",
+  "attention": "eager",
+  "script_sha256": "58ab9f55213720202941fc77de5c06c0a77626e40bc4aabc3c23122bb2e1358b",
+  "generated_at": "2026-10-17T21:00:21+00:00",
+  "reference_json_sha256": "98bbf26626f46bfb2cfafa95ce45a591f52df5cf74ae18a25dbd36dfdf97033c",
+  "files": {
+   "decode-cached.f32le": {
+    "sha256": "d34de4b71a4aedccbb495c5b17e46a2fa9c322412cac5c2aa19f8694cc07d974",
+    "bytes": 19464192
+   },
+   "decode-stateless.f32le": {
+    "sha256": "06e44710c6c35d3529bbf799fea2e27158c76221c990387b816223d22b34b608",
+    "bytes": 19464192
+   },
+   "logits-0.f32le": {
+    "sha256": "f650f76b521c9d205ff7920f0346abb9c5f887daf775c11e1b2af80b7fe57d60",
+    "bytes": 3041280
+   },
+   "logits-1.f32le": {
+    "sha256": "a474b104bbc86dbcfb7c943cb69847e3f30f5dbde0107a4ecd3a5c8236b580d3",
+    "bytes": 7907328
+   },
+   "logits-2.f32le": {
+    "sha256": "a55c187faa586455fe38233eb686e3dda09206ba019c78417db97dc61029dfec",
+    "bytes": 4866048
+   },
+   "reference.json": {
+    "sha256": "98bbf26626f46bfb2cfafa95ce45a591f52df5cf74ae18a25dbd36dfdf97033c",
+    "bytes": 7258
+   }
+  },
+  "decode_max_abs_gap": 1.578125,
+  "decode_steps": 32,
+  "source": "7bd057ecc56d60df2776639befd30058720d3c09",
+  "wall_seconds": 30.09,
+  "maximum_resident_set_bytes": 1467924480,
+  "peak_memory_footprint_bytes": 17639000896,
+  "log": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/envelope/round2/logs/Qwen2-7B-453ed157-f64-bf16-mps-eager.log",
+  "log_sha256": "a3eab5e3d955c548233fa492b01d3405a2af7f23e197cc8ac58e77855f970476"
+ },
+ {
+  "bundle": "/Volumes/T9/transformers-references/Qwen2-7B-453ed157-f64-bf16-mps-sdpa",
+  "checkpoint": "Qwen2-7B",
+  "truth": "Qwen2-7B-453ed157-f64",
+  "variant": "bf16-mps-sdpa",
+  "dtype": "bfloat16",
+  "device": "mps",
+  "attention": "sdpa",
+  "script_sha256": "58ab9f55213720202941fc77de5c06c0a77626e40bc4aabc3c23122bb2e1358b",
+  "generated_at": "2026-10-17T21:00:47+00:00",
+  "reference_json_sha256": "0527b2f8dcb33966a3300e77396aab90297e7ebb569cfaa3fd1a92b253ebb10d",
+  "files": {
+   "decode-cached.f32le": {
+    "sha256": "a6e2224e4de3009aa2ea1c8bdf6f2ef858b210ee002d835fb871eeee13109a62",
+    "bytes": 19464192
+   },
+   "decode-stateless.f32le": {
+    "sha256": "ac75a5a791695f89ae7a12d3d5145eba2cc262d86f0b88965e7f2f1f47c4c1ad",
+    "bytes": 19464192
+   },
+   "logits-0.f32le": {
+    "sha256": "83e2221d76e93d83da2af61601576f83a7c062bd950cbd14fdfb7fe282b13cf6",
+    "bytes": 3041280
+   },
+   "logits-1.f32le": {
+    "sha256": "f5e59838c3f3c6f6ff16a89bac891335941f7f5c02e71185d2d065157712cbed",
+    "bytes": 7907328
+   },
+   "logits-2.f32le": {
+    "sha256": "68c663b9bef5b7a02d758b0c8e1b539487c20f47dde23a3ffe2762693401d6bf",
+    "bytes": 4866048
+   },
+   "reference.json": {
+    "sha256": "0527b2f8dcb33966a3300e77396aab90297e7ebb569cfaa3fd1a92b253ebb10d",
+    "bytes": 7236
+   }
+  },
+  "decode_max_abs_gap": 0.375,
+  "decode_steps": 32,
+  "source": "7bd057ecc56d60df2776639befd30058720d3c09",
+  "wall_seconds": 25.07,
+  "maximum_resident_set_bytes": 1247002624,
+  "peak_memory_footprint_bytes": 17417586680,
+  "log": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/envelope/round2/logs/Qwen2-7B-453ed157-f64-bf16-mps-sdpa.log",
+  "log_sha256": "375032a9b58306015edd9d9121b7bb519bdab5ee1e9d7b7448ac0dea5d10c165"
+ },
+ {
+  "bundle": "/Volumes/T9/transformers-references/Qwen2-7B-453ed157-f64-f32-cpu-eager",
+  "checkpoint": "Qwen2-7B",
+  "truth": "Qwen2-7B-453ed157-f64",
+  "variant": "f32-cpu-eager",
+  "dtype": "float32",
+  "device": "cpu",
+  "attention": "eager",
+  "script_sha256": "58ab9f55213720202941fc77de5c06c0a77626e40bc4aabc3c23122bb2e1358b",
+  "generated_at": "2026-10-17T21:01:27+00:00",
+  "reference_json_sha256": "a616bb1d9c7125f376f49712a2ed015c57aa812b7d567d0997130b23020908c2",
+  "files": {
+   "decode-cached.f32le": {
+    "sha256": "7617036cd6f147ddd96d130f982bf0de2394fe3986f06844aa0bb7b696134945",
+    "bytes": 19464192
+   },
+   "decode-stateless.f32le": {
+    "sha256": "c1b77f57988386405bc765a397a2f52471e16a052b90bc800a9e76251e1410da",
+    "bytes": 19464192
+   },
+   "logits-0.f32le": {
+    "sha256": "6d239f32c6fc82ae2b4c903c657d49a9a599a5e936d5bab98b69a24e5c57dc56",
+    "bytes": 3041280
+   },
+   "logits-1.f32le": {
+    "sha256": "89959e5228a04caba6c692b951bc4a1f0c3a7dd3c9a7d035ba4f45a11d137c0c",
+    "bytes": 7907328
+   },
+   "logits-2.f32le": {
+    "sha256": "6b66cc13d90282ff1ec84ef32c8804d7e7b60add33bcedc548d090bc705cf759",
+    "bytes": 4866048
+   },
+   "reference.json": {
+    "sha256": "a616bb1d9c7125f376f49712a2ed015c57aa812b7d567d0997130b23020908c2",
+    "bytes": 8173
+   }
+  },
+  "decode_max_abs_gap": 0.00014472007751464844,
+  "decode_steps": 32,
+  "source": "7bd057ecc56d60df2776639befd30058720d3c09",
+  "wall_seconds": 90.36,
+  "maximum_resident_set_bytes": 46168342528,
+  "peak_memory_footprint_bytes": 31286238320,
+  "log": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/envelope/round2/logs/Qwen2-7B-453ed157-f64-f32-cpu-eager.log",
+  "log_sha256": "fba25414828197c1ebebfd750682c28e9512a738af247f3dc9990e57dc050dad"
+ },
+ {
+  "bundle": "/Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b-bf16-cpu-eager",
+  "checkpoint": "Llama-3.1-8B",
+  "truth": "Llama-3.1-8B-d04e592b",
+  "variant": "bf16-cpu-eager",
+  "dtype": "bfloat16",
+  "device": "cpu",
+  "attention": "eager",
+  "script_sha256": "58ab9f55213720202941fc77de5c06c0a77626e40bc4aabc3c23122bb2e1358b",
+  "generated_at": "2026-10-17T21:03:26+00:00",
+  "reference_json_sha256": "6a6823cb067efd877e9e34c38ee87ba556bdf3f4fe26a7cd6c7f15ceb821585f",
+  "files": {
+   "decode-cached.f32le": {
+    "sha256": "5fe93c71cbeb643f81cf6e45a54c175354673d89d33a1238c7e4c4cb43d17c16",
+    "bytes": 16416768
+   },
+   "decode-stateless.f32le": {
+    "sha256": "7f932f8a6e4cde62f10ba0d9a8b570690dbe6bb498123a79c5401be1eec5b3f8",
+    "bytes": 16416768
+   },
+   "logits-0.f32le": {
+    "sha256": "538dde61a4c6644d3f6e6006af2e2fc170e85e31b31fa0229c534aedc08b3b87",
+    "bytes": 3078144
+   },
+   "logits-1.f32le": {
+    "sha256": "a1bd014ed4ad47738d98cbf2430b699c3c67082f73cf70c4313a05dda4ca6840",
+    "bytes": 7182336
+   },
+   "logits-2.f32le": {
+    "sha256": "934f703072d99f2829d3006a99f7bb10f7d89343519e18d615a9657a78e5197f",
+    "bytes": 4617216
+   },
+   "reference.json": {
+    "sha256": "6a6823cb067efd877e9e34c38ee87ba556bdf3f4fe26a7cd6c7f15ceb821585f",
+    "bytes": 7237
+   }
+  },
+  "decode_max_abs_gap": 0.25,
+  "decode_steps": 32,
+  "source": "7bd057ecc56d60df2776639befd30058720d3c09",
+  "wall_seconds": 75.24,
+  "maximum_resident_set_bytes": 15991308288,
+  "peak_memory_footprint_bytes": 750399824,
+  "log": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/envelope/round2/logs/Llama-3.1-8B-d04e592b-bf16-cpu-eager.log",
+  "log_sha256": "345c0c7885771e60f3dba3590a761b778122c793cf497e2e11f41448f4308c36"
+ },
+ {
+  "bundle": "/Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b-bf16-cpu-sdpa",
+  "checkpoint": "Llama-3.1-8B",
+  "truth": "Llama-3.1-8B-d04e592b",
+  "variant": "bf16-cpu-sdpa",
+  "dtype": "bfloat16",
+  "device": "cpu",
+  "attention": "sdpa",
+  "script_sha256": "58ab9f55213720202941fc77de5c06c0a77626e40bc4aabc3c23122bb2e1358b",
+  "generated_at": "2026-10-17T21:04:27+00:00",
+  "reference_json_sha256": "da4b2c7cfb7a8ebde6bf48af7b56e53454753159bc3859fab6f2cc5547efb6a3",
+  "files": {
+   "decode-cached.f32le": {
+    "sha256": "633e752ba9afc9479951b3e145a83e0210cc3553bdd186965d86b56daa5c6010",
+    "bytes": 16416768
+   },
+   "decode-stateless.f32le": {
+    "sha256": "4106cc5f042aa85ec8c1782ab59ce933b844ddbba96658bf8ac52e488db635cd",
+    "bytes": 16416768
+   },
+   "logits-0.f32le": {
+    "sha256": "120b38cbcd1a6090a4fe840c4ef4d196d73947ca9227f43c8c0964ec9c9cdbf2",
+    "bytes": 3078144
+   },
+   "logits-1.f32le": {
+    "sha256": "8cdf9ba21eea34fc8d6e015c46c611b60b175321a52d12a70e5270665741c86e",
+    "bytes": 7182336
+   },
+   "logits-2.f32le": {
+    "sha256": "520b15eb3415c4b6c73caf4621605965b239b0de51a91e4b5e4f8b7111e684af",
+    "bytes": 4617216
+   },
+   "reference.json": {
+    "sha256": "da4b2c7cfb7a8ebde6bf48af7b56e53454753159bc3859fab6f2cc5547efb6a3",
+    "bytes": 7242
+   }
+  },
+  "decode_max_abs_gap": 0.21875,
+  "decode_steps": 32,
+  "source": "7bd057ecc56d60df2776639befd30058720d3c09",
+  "wall_seconds": 60.21,
+  "maximum_resident_set_bytes": 15995437056,
+  "peak_memory_footprint_bytes": 759574888,
+  "log": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/envelope/round2/logs/Llama-3.1-8B-d04e592b-bf16-cpu-sdpa.log",
+  "log_sha256": "b67df32ff1e3e5fc52fa428e539cac6c67b473142be94a7fdc1641617a3fd606"
+ },
+ {
+  "bundle": "/Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b-bf16-mps-eager",
+  "checkpoint": "Llama-3.1-8B",
+  "truth": "Llama-3.1-8B-d04e592b",
+  "variant": "bf16-mps-eager",
+  "dtype": "bfloat16",
+  "device": "mps",
+  "attention": "eager",
+  "script_sha256": "58ab9f55213720202941fc77de5c06c0a77626e40bc4aabc3c23122bb2e1358b",
+  "generated_at": "2026-10-17T21:05:01+00:00",
+  "reference_json_sha256": "d3995196ec8f4e8ba8a4e9d11f35fe7ea44dcc769aee6b019ed15c69fe76fa8b",
+  "files": {
+   "decode-cached.f32le": {
+    "sha256": "50a55ffe39bf9b9067799bae6d38fa510e960b53a41fe74aa118013593eb7a3a",
+    "bytes": 16416768
+   },
+   "decode-stateless.f32le": {
+    "sha256": "dd8cd171d4328cee2d64d0924c2938a2fe061f1da62ed30a1922ed34a1b16a8e",
+    "bytes": 16416768
+   },
+   "logits-0.f32le": {
+    "sha256": "80923122481309222626da5315257dda3d63fb0fdad9e6ade5bf1867e683ebed",
+    "bytes": 3078144
+   },
+   "logits-1.f32le": {
+    "sha256": "4369bd1de1645a0adb34b5fb924568b5e61fc0395d476704086e0b3fbc536de7",
+    "bytes": 7182336
+   },
+   "logits-2.f32le": {
+    "sha256": "6dff2d30c6c1a22ac438a35bf730793886457ec64c80bf4d22ab7a13d47b2f2a",
+    "bytes": 4617216
+   },
+   "reference.json": {
+    "sha256": "d3995196ec8f4e8ba8a4e9d11f35fe7ea44dcc769aee6b019ed15c69fe76fa8b",
+    "bytes": 7266
+   }
+  },
+  "decode_max_abs_gap": 0.25,
+  "decode_steps": 32,
+  "source": "7bd057ecc56d60df2776639befd30058720d3c09",
+  "wall_seconds": 30.1,
+  "maximum_resident_set_bytes": 1388806144,
+  "peak_memory_footprint_bytes": 18548706088,
+  "log": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/envelope/round2/logs/Llama-3.1-8B-d04e592b-bf16-mps-eager.log",
+  "log_sha256": "5102b3060e185d9694364200f1aee66501bbd9f70e4f0dad5adce006eb3e94b2"
+ },
+ {
+  "bundle": "/Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b-bf16-mps-sdpa",
+  "checkpoint": "Llama-3.1-8B",
+  "truth": "Llama-3.1-8B-d04e592b",
+  "variant": "bf16-mps-sdpa",
+  "dtype": "bfloat16",
+  "device": "mps",
+  "attention": "sdpa",
+  "script_sha256": "58ab9f55213720202941fc77de5c06c0a77626e40bc4aabc3c23122bb2e1358b",
+  "generated_at": "2026-10-17T21:05:31+00:00",
+  "reference_json_sha256": "f2e443c0f53b4ea26890a84542032d50ad29694e8e15de2733faf8ce157ac587",
+  "files": {
+   "decode-cached.f32le": {
+    "sha256": "c768ec683543c432e4a4f69f8b547b06688cec2740097f66034fec902fdf8189",
+    "bytes": 16416768
+   },
+   "decode-stateless.f32le": {
+    "sha256": "1188db1e0841c4f8f058c87d1529f7a26aff736dcdda8e78a60678391827d7b0",
+    "bytes": 16416768
+   },
+   "logits-0.f32le": {
+    "sha256": "7f51493df33715fb18a0a32bf84ceadfad7311dca3368292277db02f6569165e",
+    "bytes": 3078144
+   },
+   "logits-1.f32le": {
+    "sha256": "2431c8a5db86570bab433047b365a31c6012a190d55ce127fd0364714490edaf",
+    "bytes": 7182336
+   },
+   "logits-2.f32le": {
+    "sha256": "c916aa7f23fae45bb6b444b89558aa84d7db7b18c5fc94bab7de7e0b7cfdcf96",
+    "bytes": 4617216
+   },
+   "reference.json": {
+    "sha256": "f2e443c0f53b4ea26890a84542032d50ad29694e8e15de2733faf8ce157ac587",
+    "bytes": 7248
+   }
+  },
+  "decode_max_abs_gap": 0.1875,
+  "decode_steps": 32,
+  "source": "7bd057ecc56d60df2776639befd30058720d3c09",
+  "wall_seconds": 25.09,
+  "maximum_resident_set_bytes": 1163395072,
+  "peak_memory_footprint_bytes": 18320099344,
+  "log": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/envelope/round2/logs/Llama-3.1-8B-d04e592b-bf16-mps-sdpa.log",
+  "log_sha256": "348bc9cf8cc3ed60d25b66faa6c59d17fc5a0dcbd3ece720738a9a05e397612c"
+ },
+ {
+  "bundle": "/Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b-f32-cpu-eager",
+  "checkpoint": "Llama-3.1-8B",
+  "truth": "Llama-3.1-8B-d04e592b",
+  "variant": "f32-cpu-eager",
+  "dtype": "float32",
+  "device": "cpu",
+  "attention": "eager",
+  "script_sha256": "58ab9f55213720202941fc77de5c06c0a77626e40bc4aabc3c23122bb2e1358b",
+  "generated_at": "2026-10-17T21:06:04+00:00",
+  "reference_json_sha256": "80ad3b22de3138c9bbdd605130859fbe191be0da10e55ff9da814e3dac395a6a",
+  "files": {
+   "decode-cached.f32le": {
+    "sha256": "e1a22325fda8666828ea3652272d33e62d7924e94d19e12176be6a7a441b1ef1",
+    "bytes": 16416768
+   },
+   "decode-stateless.f32le": {
+    "sha256": "cb7a424c0c5007e59f5891885bd832e3c2f03b5c828e77b5d8ca21fcc2b2a577",
+    "bytes": 16416768
+   },
+   "logits-0.f32le": {
+    "sha256": "6448d9bafbfd92c0ca790f0c919527a9fb688278803e84aa4ceb427ad44bcad9",
+    "bytes": 3078144
+   },
+   "logits-1.f32le": {
+    "sha256": "1e5aad551645f6b498a3ea0ea30f235148e84c523eac6018624d303da5c048ad",
+    "bytes": 7182336
+   },
+   "logits-2.f32le": {
+    "sha256": "80fa7ec4a41a989e6fab652180e7a8cc083e56d69040de47b8e0390b35175ecb",
+    "bytes": 4617216
+   },
+   "reference.json": {
+    "sha256": "80ad3b22de3138c9bbdd605130859fbe191be0da10e55ff9da814e3dac395a6a",
+    "bytes": 8207
+   }
+  },
+  "decode_max_abs_gap": 7.176399230957031e-05,
+  "decode_steps": 32,
+  "source": "7bd057ecc56d60df2776639befd30058720d3c09",
+  "wall_seconds": 45.15,
+  "maximum_resident_set_bytes": 48659267584,
+  "peak_memory_footprint_bytes": 32845668640,
+  "log": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/envelope/round2/logs/Llama-3.1-8B-d04e592b-f32-cpu-eager.log",
+  "log_sha256": "e1f11add882e2cc7421b572854b8bf929ba5136957c6adb1e51da320c16eae8e"
+ },
+ {
+  "bundle": "/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-bf16-cpu-eager",
+  "checkpoint": "gemma-3-4b-it",
+  "truth": "gemma-3-4b-it-093f9f38",
+  "variant": "bf16-cpu-eager",
+  "dtype": "bfloat16",
+  "device": "cpu",
+  "attention": "eager",
+  "script_sha256": "58ab9f55213720202941fc77de5c06c0a77626e40bc4aabc3c23122bb2e1358b",
+  "generated_at": "2026-10-17T20:41:35+00:00",
+  "reference_json_sha256": "af9b90084b54b4086df38bf94db8148dd9a9538ae3faf1b58ac445e2c9a59fdf",
+  "files": {
+   "decode-cached.f32le": {
+    "sha256": "dda86bb32d2bfba6cf733e8cba79c8887eccabdc8e715937c18365cf1c01c3d4",
+    "bytes": 33562624
+   },
+   "decode-stateless.f32le": {
+    "sha256": "1ddc17014b5b98459f34387751232b844d3158ea876a9d32c3225d6bee475d4c",
+    "bytes": 33562624
+   },
+   "logits-0.f32le": {
+    "sha256": "0cee0b6b2524139c8ef7f5615039ee48f5970f0dad8e6c05e62fc429df0f6486",
+    "bytes": 6292992
+   },
+   "logits-1.f32le": {
+    "sha256": "89e243ffa0ad8b39bb523d92ab89a5fdf9c2ddc1ddb169d11066aeb68f57ae7f",
+    "bytes": 19927808
+   },
+   "logits-2.f32le": {
+    "sha256": "7075662454cf147a8882b73755d6b3e95943bff560cdd2557bcec50c22bc2691",
+    "bytes": 9439488
+   },
+   "reference.json": {
+    "sha256": "af9b90084b54b4086df38bf94db8148dd9a9538ae3faf1b58ac445e2c9a59fdf",
+    "bytes": 7067
+   }
+  },
+  "decode_max_abs_gap": 0.375,
+  "decode_steps": 32,
+  "source": "7bd057ecc56d60df2776639befd30058720d3c09",
+  "wall_seconds": 45.07,
+  "maximum_resident_set_bytes": 9594388480,
+  "peak_memory_footprint_bytes": 1274405096,
+  "log": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/envelope/round2/logs/gemma-3-4b-it-093f9f38-bf16-cpu-eager.log",
+  "log_sha256": "ed41d6afdf74dfab1a2afe1e70c3023f727d71a04fd2302482357c8dc3d88316"
+ },
+ {
+  "bundle": "/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-bf16-cpu-sdpa",
+  "checkpoint": "gemma-3-4b-it",
+  "truth": "gemma-3-4b-it-093f9f38",
+  "variant": "bf16-cpu-sdpa",
+  "dtype": "bfloat16",
+  "device": "cpu",
+  "attention": "sdpa",
+  "script_sha256": "58ab9f55213720202941fc77de5c06c0a77626e40bc4aabc3c23122bb2e1358b",
+  "generated_at": "2026-10-17T20:42:04+00:00",
+  "reference_json_sha256": "aec3076f69c54fbb8330d99fd9eadbdf611130b43f251a5fffcda1812bf781cb",
+  "files": {
+   "decode-cached.f32le": {
+    "sha256": "21bf31ec1ff88ff8772f513979c9cc8cecab5d36aa7fe7dafea44138c8b1a2f8",
+    "bytes": 33562624
+   },
+   "decode-stateless.f32le": {
+    "sha256": "b6635e237e7e9c287b635ec62e5662abf2eaf4f1b003055876e8f7792b0fa15f",
+    "bytes": 33562624
+   },
+   "logits-0.f32le": {
+    "sha256": "8679ecf136ef2458ece809372c1bd5ccc7e0a75522e2c061033253cc836461bf",
+    "bytes": 6292992
+   },
+   "logits-1.f32le": {
+    "sha256": "2449404d9635d8f2dda465cee21a4e5ad743a920b407943488fc6d45794ef9f0",
+    "bytes": 19927808
+   },
+   "logits-2.f32le": {
+    "sha256": "ed7fa80620ff61c33ed10859b9e5fbebceadeb18e74843d78206613ee47f5a4a",
+    "bytes": 9439488
+   },
+   "reference.json": {
+    "sha256": "aec3076f69c54fbb8330d99fd9eadbdf611130b43f251a5fffcda1812bf781cb",
+    "bytes": 7145
+   }
+  },
+  "decode_max_abs_gap": 1.0,
+  "decode_steps": 32,
+  "source": "7bd057ecc56d60df2776639befd30058720d3c09",
+  "wall_seconds": 25.05,
+  "maximum_resident_set_bytes": 9599860736,
+  "peak_memory_footprint_bytes": 1282515176,
+  "log": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/envelope/round2/logs/gemma-3-4b-it-093f9f38-bf16-cpu-sdpa.log",
+  "log_sha256": "5260264c52dbae1c7f31550aae5e1cb5c37cdca765b46cffac84f64bf8364c42"
+ },
+ {
+  "bundle": "/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-bf16-mps-eager",
+  "checkpoint": "gemma-3-4b-it",
+  "truth": "gemma-3-4b-it-093f9f38",
+  "variant": "bf16-mps-eager",
+  "dtype": "bfloat16",
+  "device": "mps",
+  "attention": "eager",
+  "script_sha256": "58ab9f55213720202941fc77de5c06c0a77626e40bc4aabc3c23122bb2e1358b",
+  "generated_at": "2026-10-17T20:43:04+00:00",
+  "reference_json_sha256": "d47b14d03568645c9f06fff2cdeb7790e6c9dca858f7a680981d041fadbd2541",
+  "files": {
+   "decode-cached.f32le": {
+    "sha256": "fad3c2b44964c07f1df8321cd38d499baffe1ac384776cefa02015ee0d32a8ab",
+    "bytes": 33562624
+   },
+   "decode-stateless.f32le": {
+    "sha256": "118bb5acf247a06cb2348a008274a6b6833e484cd6871099a1584f2c0308af5d",
+    "bytes": 33562624
+   },
+   "logits-0.f32le": {
+    "sha256": "81bb14c203c5a395b05e7a83386415fb8b3d468ccae0850fec68e4aa122a826e",
+    "bytes": 6292992
+   },
+   "logits-1.f32le": {
+    "sha256": "501dcb84727c9a05a136604e3cb41306e9013934f1912f55a0a5852f3134ce58",
+    "bytes": 19927808
+   },
+   "logits-2.f32le": {
+    "sha256": "ad796e078c303314e1d20ba5400dabd3526eab3bf51119c8455656863447291e",
+    "bytes": 9439488
+   },
+   "reference.json": {
+    "sha256": "d47b14d03568645c9f06fff2cdeb7790e6c9dca858f7a680981d041fadbd2541",
+    "bytes": 7174
+   }
+  },
+  "decode_max_abs_gap": 1.5625,
+  "decode_steps": 32,
+  "source": "7bd057ecc56d60df2776639befd30058720d3c09",
+  "wall_seconds": 75.22,
+  "maximum_resident_set_bytes": 2374828032,
+  "peak_memory_footprint_bytes": 11757751776,
+  "log": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/envelope/round2/logs/gemma-3-4b-it-093f9f38-bf16-mps-eager.log",
+  "log_sha256": "891cbeada37add83dfc5156b3d05d7d330fcb63bbb42e078c42297098f696891"
+ },
+ {
+  "bundle": "/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-bf16-mps-sdpa",
+  "checkpoint": "gemma-3-4b-it",
+  "truth": "gemma-3-4b-it-093f9f38",
+  "variant": "bf16-mps-sdpa",
+  "dtype": "bfloat16",
+  "device": "mps",
+  "attention": "sdpa",
+  "script_sha256": "58ab9f55213720202941fc77de5c06c0a77626e40bc4aabc3c23122bb2e1358b",
+  "generated_at": "2026-10-17T20:43:56+00:00",
+  "reference_json_sha256": "a4cf0d7e0e675ced8004567d118ca998e8de306d0f4c62589642a017db76f04e",
+  "files": {
+   "decode-cached.f32le": {
+    "sha256": "705f5251b617498c7a7c46477e6e400c916ecdfe552e1b6630bb41d7d718d922",
+    "bytes": 33562624
+   },
+   "decode-stateless.f32le": {
+    "sha256": "930637408ebcbf006b9cacbdc5cb901657ee823ef8f3649a2e8bb92fa75a117e",
+    "bytes": 33562624
+   },
+   "logits-0.f32le": {
+    "sha256": "7d95e168952f37055cfd530a713460d7b40c62af252c10e7ed6f4e6eea3b9b9e",
+    "bytes": 6292992
+   },
+   "logits-1.f32le": {
+    "sha256": "359f10c501b33237067e3baaec30455830b13cdeb707e0995acd05adb93c462b",
+    "bytes": 19927808
+   },
+   "logits-2.f32le": {
+    "sha256": "85b817f4b3223d4630371f3b120fa427e4f3fc75915e7e76e15dd24b084e2ba3",
+    "bytes": 9439488
+   },
+   "reference.json": {
+    "sha256": "a4cf0d7e0e675ced8004567d118ca998e8de306d0f4c62589642a017db76f04e",
+    "bytes": 7176
+   }
+  },
+  "decode_max_abs_gap": 1.25,
+  "decode_steps": 32,
+  "source": "7bd057ecc56d60df2776639befd30058720d3c09",
+  "wall_seconds": 35.07,
+  "maximum_resident_set_bytes": 2160951296,
+  "peak_memory_footprint_bytes": 11548428976,
+  "log": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/envelope/round2/logs/gemma-3-4b-it-093f9f38-bf16-mps-sdpa.log",
+  "log_sha256": "a8140e87bad8365ce87415fbe1af04fd1b8be35814b0244bfcbc0705640f5e00"
+ },
+ {
+  "bundle": "/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-f32-cpu-eager",
+  "checkpoint": "gemma-3-4b-it",
+  "truth": "gemma-3-4b-it-093f9f38",
+  "variant": "f32-cpu-eager",
+  "dtype": "float32",
+  "device": "cpu",
+  "attention": "eager",
+  "script_sha256": "58ab9f55213720202941fc77de5c06c0a77626e40bc4aabc3c23122bb2e1358b",
+  "generated_at": "2026-10-17T20:44:23+00:00",
+  "reference_json_sha256": "c044b0e00262df5cec60c4993a2c11ce6f78995f01e6eb6807bf4a286ed42273",
+  "files": {
+   "decode-cached.f32le": {
+    "sha256": "5780db9de59926dd5272f19d5ede43e25db13fb4698d321173884823cab5d041",
+    "bytes": 33562624
+   },
+   "decode-stateless.f32le": {
+    "sha256": "0c310c510bf6c46f250454b49843b4cc6207637c4d3539a82e4627fefa7a5c0a",
+    "bytes": 33562624
+   },
+   "logits-0.f32le": {
+    "sha256": "18dc9dea730597a89ce2516f2aa64da5b69e21a1b6e6574dd3f546f62d49d993",
+    "bytes": 6292992
+   },
+   "logits-1.f32le": {
+    "sha256": "592e74a7496a0f50307354c98e3889e9739116ba52ff9448394b89ca9525ab85",
+    "bytes": 19927808
+   },
+   "logits-2.f32le": {
+    "sha256": "4da45735e16efec7e5bd0849145b915fdb349fb329b5e1e3b51792f31a0f251a",
+    "bytes": 9439488
+   },
+   "reference.json": {
+    "sha256": "c044b0e00262df5cec60c4993a2c11ce6f78995f01e6eb6807bf4a286ed42273",
+    "bytes": 8073
+   }
+  },
+  "decode_max_abs_gap": 0.0002593994140625,
+  "decode_steps": 32,
+  "source": "7bd057ecc56d60df2776639befd30058720d3c09",
+  "wall_seconds": 30.05,
+  "maximum_resident_set_bytes": 26521010176,
+  "peak_memory_footprint_bytes": 18228885856,
+  "log": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/envelope/round2/logs/gemma-3-4b-it-093f9f38-f32-cpu-eager.log",
+  "log_sha256": "02d7e050fd0cc8c2e3203d8983e0dc8b0ece831ba60daf06439fa17a998e90e7"
+ },
+ {
+  "bundle": "/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long-bf16-cpu-eager",
+  "checkpoint": "gemma-long",
+  "truth": "gemma-3-4b-it-093f9f38-long",
+  "variant": "bf16-cpu-eager",
+  "dtype": "bfloat16",
+  "device": "cpu",
+  "attention": "eager",
+  "script_sha256": "58ab9f55213720202941fc77de5c06c0a77626e40bc4aabc3c23122bb2e1358b",
+  "generated_at": "2026-10-17T20:49:30+00:00",
+  "reference_json_sha256": "c3290c813745e0b1716834608eff78cb4357d7a1650d02987f0df2c97376c996",
+  "files": {
+   "decode-cached.f32le": {
+    "sha256": "341748cb5ec36df60d7ac2ef47a83a0ae27ec74055b91efd0fea30135cfb8499",
+    "bytes": 8390656
+   },
+   "decode-stateless.f32le": {
+    "sha256": "cba74ef577ff81db67e68e0dcda1955c05b4519985bcf74e086a704db8a66498",
+    "bytes": 8390656
+   },
+   "logits-0.f32le": {
+    "sha256": "dd26607c81b6850e838d205f79f88b7a0098ee41e78df9f1f9b7dda8e7ef44b3",
+    "bytes": 1297405184
+   },
+   "reference.json": {
+    "sha256": "c3290c813745e0b1716834608eff78cb4357d7a1650d02987f0df2c97376c996",
+    "bytes": 20839
+   }
+  },
+  "decode_max_abs_gap": 0.3125,
+  "decode_steps": 8,
+  "source": "7bd057ecc56d60df2776639befd30058720d3c09",
+  "wall_seconds": 496.46,
+  "maximum_resident_set_bytes": 11766169600,
+  "peak_memory_footprint_bytes": 3155060480,
+  "log": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/envelope/round2/logs/gemma-3-4b-it-093f9f38-long-bf16-cpu-eager.log",
+  "log_sha256": "611495b04a3cffcdad9acbc60da75e30ac3855ffdb92c3fb842b6c78601be55a"
+ },
+ {
+  "bundle": "/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long-bf16-cpu-sdpa",
+  "checkpoint": "gemma-long",
+  "truth": "gemma-3-4b-it-093f9f38-long",
+  "variant": "bf16-cpu-sdpa",
+  "dtype": "bfloat16",
+  "device": "cpu",
+  "attention": "sdpa",
+  "script_sha256": "58ab9f55213720202941fc77de5c06c0a77626e40bc4aabc3c23122bb2e1358b",
+  "generated_at": "2026-10-17T20:54:28+00:00",
+  "reference_json_sha256": "ba054b37a03861448f3e2fb21f4f672a844cec82f4a72f2d469d4a9338472f40",
+  "files": {
+   "decode-cached.f32le": {
+    "sha256": "44f8fda0c675d0720cf216df0a5921061908c7aa951136af0929dc6a6a6830b7",
+    "bytes": 8390656
+   },
+   "decode-stateless.f32le": {
+    "sha256": "5c25df393191a7966c79367e9a12ce04744b8b04938758e1cd12905ab3c4d4e2",
+    "bytes": 8390656
+   },
+   "logits-0.f32le": {
+    "sha256": "149c505d8112fea07714311822e02ac4ac1bea7cdcd97cdc68c7f00f7417b0b0",
+    "bytes": 1297405184
+   },
+   "reference.json": {
+    "sha256": "ba054b37a03861448f3e2fb21f4f672a844cec82f4a72f2d469d4a9338472f40",
+    "bytes": 20845
+   }
+  },
+  "decode_max_abs_gap": 0.3125,
+  "decode_steps": 8,
+  "source": "7bd057ecc56d60df2776639befd30058720d3c09",
+  "wall_seconds": 215.93,
+  "maximum_resident_set_bytes": 11693768704,
+  "peak_memory_footprint_bytes": 3157534464,
+  "log": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/envelope/round2/logs/gemma-3-4b-it-093f9f38-long-bf16-cpu-sdpa.log",
+  "log_sha256": "b11d2216e5620b386f280a94f3aa85aad3677049b24b40d35cda53865b391b03"
+ },
+ {
+  "bundle": "/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long-bf16-mps-eager",
+  "checkpoint": "gemma-long",
+  "truth": "gemma-3-4b-it-093f9f38-long",
+  "variant": "bf16-mps-eager",
+  "dtype": "bfloat16",
+  "device": "mps",
+  "attention": "eager",
+  "script_sha256": "58ab9f55213720202941fc77de5c06c0a77626e40bc4aabc3c23122bb2e1358b",
+  "generated_at": "2026-10-17T20:56:48+00:00",
+  "reference_json_sha256": "a877c732bc635ed6dfb4c395a68115250c5857458f86a7096153df42bde7bc53",
+  "files": {
+   "decode-cached.f32le": {
+    "sha256": "83830f3b5a4164850dfbc0304d6c72fbfd8d02456f8b132050bf1272bdd49d14",
+    "bytes": 8390656
+   },
+   "decode-stateless.f32le": {
+    "sha256": "480efacaec69582b67c5946e4f158ed0e4208ae085bf430b3fb1062f2d22eec1",
+    "bytes": 8390656
+   },
+   "logits-0.f32le": {
+    "sha256": "ff4a859b3c32c353e67059aed3f56bacc7953d3230cd12a88f9eed12b8bf80c0",
+    "bytes": 1297405184
+   },
+   "reference.json": {
+    "sha256": "a877c732bc635ed6dfb4c395a68115250c5857458f86a7096153df42bde7bc53",
+    "bytes": 20841
+   }
+  },
+  "decode_max_abs_gap": 0.3125,
+  "decode_steps": 8,
+  "source": "7bd057ecc56d60df2776639befd30058720d3c09",
+  "wall_seconds": 30.08,
+  "maximum_resident_set_bytes": 3758129152,
+  "peak_memory_footprint_bytes": 14547275616,
+  "log": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/envelope/round2/logs/gemma-3-4b-it-093f9f38-long-bf16-mps-eager.log",
+  "log_sha256": "af6e3763dbabc5f521d09dc91a2de00be63716f5234e29d58d0719ac0709fe43"
+ },
+ {
+  "bundle": "/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long-bf16-mps-sdpa",
+  "checkpoint": "gemma-long",
+  "truth": "gemma-3-4b-it-093f9f38-long",
+  "variant": "bf16-mps-sdpa",
+  "dtype": "bfloat16",
+  "device": "mps",
+  "attention": "sdpa",
+  "script_sha256": "58ab9f55213720202941fc77de5c06c0a77626e40bc4aabc3c23122bb2e1358b",
+  "generated_at": "2026-10-17T20:57:15+00:00",
+  "reference_json_sha256": "715ddca0ea379919c2048a6413fc8d0d40d16c955c6066ca677f8094cb11592a",
+  "files": {
+   "decode-cached.f32le": {
+    "sha256": "809d30affa5515e8fc3952123f171db6cb4f90ffabf619f0add7ee64cb997523",
+    "bytes": 8390656
+   },
+   "decode-stateless.f32le": {
+    "sha256": "131b00c9a5ca5d54f174a23c4239fb33e7c1ce1b693797f80801df69242407fe",
+    "bytes": 8390656
+   },
+   "logits-0.f32le": {
+    "sha256": "5c22552eb96d3695d0f32bfabddae2e8c46fb3094a3c713d0843702a9bec928b",
+    "bytes": 1297405184
+   },
+   "reference.json": {
+    "sha256": "715ddca0ea379919c2048a6413fc8d0d40d16c955c6066ca677f8094cb11592a",
+    "bytes": 20826
+   }
+  },
+  "decode_max_abs_gap": 0.25,
+  "decode_steps": 8,
+  "source": "7bd057ecc56d60df2776639befd30058720d3c09",
+  "wall_seconds": 25.03,
+  "maximum_resident_set_bytes": 3747954688,
+  "peak_memory_footprint_bytes": 14758416152,
+  "log": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/envelope/round2/logs/gemma-3-4b-it-093f9f38-long-bf16-mps-sdpa.log",
+  "log_sha256": "e1d7b66a57dbd6072e39a6aaa70953c9bcca4a2279ab0170607792850a2bd2f5"
+ },
+ {
+  "bundle": "/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long-f32-cpu-eager",
+  "checkpoint": "gemma-long",
+  "truth": "gemma-3-4b-it-093f9f38-long",
+  "variant": "f32-cpu-eager",
+  "dtype": "float32",
+  "device": "cpu",
+  "attention": "eager",
+  "script_sha256": "58ab9f55213720202941fc77de5c06c0a77626e40bc4aabc3c23122bb2e1358b",
+  "generated_at": "2026-10-17T20:57:48+00:00",
+  "reference_json_sha256": "2d406b41c80dff78ce4ac62312bcedde29f2b9cb3f1b6d276527291cae814503",
+  "files": {
+   "decode-cached.f32le": {
+    "sha256": "d66c1d2c59580e44d655653dab28b0f277af02e2e48567898dbac50c4707aeb2",
+    "bytes": 8390656
+   },
+   "decode-stateless.f32le": {
+    "sha256": "9af8fe2d6e58dfd62477517e0a121a5c9db34ac2bb228f263f08379d8745bfa4",
+    "bytes": 8390656
+   },
+   "logits-0.f32le": {
+    "sha256": "16d961fe03e8e7fbb75c6be0e005ba903d0cad8e3b847c22b2232826346a9330",
+    "bytes": 1297405184
+   },
+   "reference.json": {
+    "sha256": "2d406b41c80dff78ce4ac62312bcedde29f2b9cb3f1b6d276527291cae814503",
+    "bytes": 21083
+   }
+  },
+  "decode_max_abs_gap": 5.14984130859375e-05,
+  "decode_steps": 8,
+  "source": "7bd057ecc56d60df2776639befd30058720d3c09",
+  "wall_seconds": 50.14,
+  "maximum_resident_set_bytes": 26512424960,
+  "peak_memory_footprint_bytes": 20217922360,
+  "log": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/envelope/round2/logs/gemma-3-4b-it-093f9f38-long-f32-cpu-eager.log",
+  "log_sha256": "0cf0e3a63f46c2bff3d4daf552851313301c626b2ec07de4eda1895eb271bdc2"
+ }
+]

@@ -1,0 +1,29 @@
+== source f9f78b5fc7cca9d1a8afaf29f8f9df04fe7c3008 (transformers path dependency on the gate export /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/diag/../gates/src)
+== binary /Volumes/bag of holding/cargo-targets/tfm-half-followups2-diag/release/block-dump sha256 52e4d7bf6b39b19495e5b2dd29d91819b51cbec1d684220539428d1ccbf0c35e (diag/burn-tool, src/main.rs sha256 9b2111a72c9c01476cc4ee81b462a3f5cb70716f0613108b044c3b9908f40efe)
+== Qwen2-7B per-block diagnosis: Burn Metal f32, the truth's three prompts
+== cwd /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/diag
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-half-followups2-diag/release/block-dump f32 /Volumes/T9/models/Qwen/Qwen2-7B /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/diag/qwen2-7b-prompts.txt /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/diag/data/burn-metal-f32
+== start 2026-10-18T03:25:35+00:00 load 1.80 2.14 2.98
+
+thread 'main' (41274618) panicked at src/main.rs:106:14:
+called `Result::unwrap()` on an `Err` value: Configuration { field: "decoder.layers.0.attention.scores", reason: "activation point is unavailable on this execution path; inspect activation_points()" }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+       38.35 real         3.26 user        12.56 sys
+         18114183168  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             2402103  page reclaims
+                  49  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                 198  voluntary context switches
+              188616  involuntary context switches
+        188781046174  instructions retired
+         56279614897  cycles elapsed
+         39205281304  peak memory footprint
+== exit=101 wall=38.5s end=2026-10-18T03:26:13+00:00 load_end 1.59 min_free_pct=68 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0

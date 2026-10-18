@@ -1,0 +1,37 @@
+== source patched: export /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/silu/repo of 7bd057ecc56d60df2776639befd30058720d3c09 (now commit=7bd057ecc56d60df2776639befd30058720d3c09 files=2733 dirty=6)
+== binary built from patch /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/silu/silu.patch sha256 b3139061f9666f99c0f6b196e2d759fd35ebac4da19f1f32515c9e646a8f4964
+== binary /Volumes/bag of holding/cargo-targets/followups-silu/patched-qwen35/release/deps/local_artifacts-2ce2a5ca8495b149 sha256 6d5c6e032856a7a6929ec8a53a29b44616097c054d19ffd4c215ba3d101ad209
+== features std,metal,tokenizers,chat-templates (--no-default-features)
+== env TRANSFORMERS_QWEN35_DIR=/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17
+== env TRANSFORMERS_QWEN35_REFERENCE_DIR=/Volumes/bag of holding/models/transformers-acceptance
+== cwd /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/silu/repo
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/followups-silu/patched-qwen35/release/deps/local_artifacts-2ce2a5ca8495b149 --ignored --exact --nocapture --test-threads 1 loads_pinned_qwen35_weights_and_runs_metal_inference
+== start 2026-10-17T21:28:43+00:00 load 14.49 23.26 28.86
+
+running 1 test
+test loads_pinned_qwen35_weights_and_runs_metal_inference ... official full-vocabulary prompt-logit cosine similarity: 0.999998486
+minimum cached/official full-vocabulary cosine similarity: 0.999995622
+minimum teacher-forced/official full-vocabulary cosine similarity: 0.999997690
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 25 filtered out; finished in 23.42s
+
+       24.10 real        13.54 user         2.02 sys
+          2420539392  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              220162  page reclaims
+                 151  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   8  voluntary context switches
+               76906  involuntary context switches
+        143201887422  instructions retired
+         50270934323  cycles elapsed
+          3496266032  peak memory footprint
+== exit=0 wall=24.9s end=2026-10-17T21:29:08+00:00 load_end 43.87 min_free_pct=88 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0

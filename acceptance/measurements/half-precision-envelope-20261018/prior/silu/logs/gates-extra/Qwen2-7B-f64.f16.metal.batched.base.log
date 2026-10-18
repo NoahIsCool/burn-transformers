@@ -1,0 +1,46 @@
+== source base: export /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/silu/base of 7bd057ecc56d60df2776639befd30058720d3c09 (now commit=7bd057ecc56d60df2776639befd30058720d3c09 files=2733 dirty=0)
+== binary /Volumes/bag of holding/cargo-targets/followups-silu/base/release/deps/llama_family_artifacts-693e11c29d0eb894 sha256 48b39504ecde9466d766834ee38675950aea7498d71fb418191ee92c2086fa89
+== metal/f16 metal::metal_batched_prefill_matches_the_reference
+== env TRANSFORMERS_LLAMA_FAMILY_BF16_REFERENCE_DIR=/Volumes/T9/transformers-references/Qwen2-7B-453ed157-f64-bf16
+== env TRANSFORMERS_LLAMA_FAMILY_DIR=/Volumes/T9/models/Qwen/Qwen2-7B
+== env TRANSFORMERS_LLAMA_FAMILY_DTYPE=f16
+== env TRANSFORMERS_LLAMA_FAMILY_MIN_GREEDY=0
+== env TRANSFORMERS_LLAMA_FAMILY_REFERENCE_DIR=/Volumes/T9/transformers-references/Qwen2-7B-453ed157-f64
+== cwd /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/silu/base
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/followups-silu/base/release/deps/llama_family_artifacts-693e11c29d0eb894 --ignored --exact --nocapture --test-threads 1 metal::metal_batched_prefill_matches_the_reference
+== start 2026-10-17T22:29:24+00:00 load 3.77 4.85 6.36
+
+running 1 test
+test metal::metal_batched_prefill_matches_the_reference ... F16 bounds of prompt 0: max 1.0186697816848755e1, mean 5.052116817270026e-1 (1.2 × official BF16 8.488914847373962e0, 4.210097347725022e-1; /Volumes/T9/transformers-references/Qwen2-7B-453ed157-f64-bf16)
+F16 bounds of prompt 1: max 8.214763927459716e0, mean 3.7447859357650626e-1 (1.2 × official BF16 6.845636606216431e0, 3.1206549464708855e-1; /Volumes/T9/transformers-references/Qwen2-7B-453ed157-f64-bf16)
+F16 bounds of prompt 2: max 1.2866773796081542e1, mean 8.100082570225497e-1 (1.2 × official BF16 1.072231149673462e1, 6.750068808521248e-1; /Volumes/T9/transformers-references/Qwen2-7B-453ed157-f64-bf16)
+F32 matrix products use F32 inputs; the F16 run is judged by the official calibration, greedy steps at 1.0186697e1
+batched row 0: max |Δ| = 0e0 to the stateless pass (tolerance 5e-1)
+batched row 0: max |Δ| = 1.4990839958190918e0 to the reference (bound 1.0186697816848755e1)
+batched row 1: max |Δ| = 0e0 to the stateless pass (tolerance 5e-1)
+batched row 1: max |Δ| = 1.7922477722167969e0 to the reference (bound 8.214763927459716e0)
+batched row 2: max |Δ| = 0e0 to the stateless pass (tolerance 5e-1)
+batched row 2: max |Δ| = 2.003965377807617e0 to the reference (bound 1.2866773796081542e1)
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 22 filtered out; finished in 8.84s
+
+        8.88 real         4.73 user         3.98 sys
+          8487698432  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             1167910  page reclaims
+                  30  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   0  voluntary context switches
+               39602  involuntary context switches
+        121349235240  instructions retired
+         31288070562  cycles elapsed
+         21286294808  peak memory footprint
+== exit=0 wall=9.1s end=2026-10-17T22:29:34+00:00 load_end 4.38 min_free_pct=84 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0

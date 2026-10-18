@@ -740,6 +740,18 @@ capability restrictions. Inside a Nemotron-H transaction, multi-token steps
 follow token-by-token decode semantics, which can differ from a multi-token
 prefill outside one where the reference clamps prefill time steps.
 
+Half-precision runs follow the references' numerics, including their range.
+gemma-3-4b-it (and its 12B and 27B siblings) overflows F16 in Transformers
+too: the residual addition after block 5's MLP at the BOS position exceeds
+F16's `65,504`, and every logit after it is NaN. The crate evaluates that
+faithful graph if asked to load Gemma 3 in F16; use BF16 or F32 instead. No
+hook point exposes the residual between a block's attention and MLP
+additions, which itself exceeds F16's range in 28 of gemma-3-4b-it's 34
+blocks, so a clamped F16 variant cannot be built from hooks alone; the
+T5-style clamp, applied at the points that do exist, gives finite logits but
+moves positions after BOS by up to `19.7` (official BF16: `0.75`), a
+different model.
+
 The v0.2 interfaces passed their [recorded validation](acceptance/measurements/v0_2-interface-validation-20260910-retry/README.md).
 The v0.3 [training contract](TRAINING.md) identifies gradient, mode, record,
 and precision boundaries. The package version and advertised checkpoint support

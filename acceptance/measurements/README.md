@@ -61,6 +61,57 @@ lists its failing gates, the gates it did not run, and its open findings;
 status, and identity to the committed logs and to the earlier records it
 repeats. It promotes no checkpoint.
 
+The [October 18 official-envelope round](half-precision-envelope-20261018.json)
+records the 57 official half-precision bundles that the envelope rule reads
+(four BF16 and four F16 graphs per truth, from the generator at `7a50e44`,
+by file digest), the leave-one-out derivation of its slacks, and the Burn
+runs at `f9f78b5` after the once-rounded SiLU and eager-scale fixes: the
+Llama-family and Gemma gates in F32 and half precision, the Qwen3.5-0.8B
+parity, benchmark, controlled benchmark rerun, and memory gates, the larger
+checkpoints' official gates, smokes, and audits, the Qwen3.8-27B Q8/Q4
+conversions, probes, diagnoses, and the source checks at `1816d73`. Each test
+process has its own log, named by source commit and binary digest, beside
+the copied harness in its campaign directory. It lists its failing gate, the
+gates it did not run, the decisions that await the maintainer, and its open
+findings, and leaves the October 17 records byte-identical;
+`scripts/tests/test_half_precision_envelope_record.py` ties every quoted
+figure, status, and identity to the committed logs. It promotes no checkpoint.
+
+The [half-precision follow-ups record](half-precision-followups-20261017.json),
+named for the round that began on October 17 with the decision measurements,
+completes that round. It repeats the decisions with their rationale,
+rejected alternatives, and review flags, verbatim from the decision stage's
+report, and states what each led to. It also records the October 18 rerun of
+every Llama-family and Gemma gate at the integrated head `8181605`: 106
+processes in the worktree itself, from release binaries rebuilt there that
+are byte-identical to the `f9f78b5` gate binaries. 94 pass; the 12 expected
+failures are Qwen2-7B's uncalibrated F16 runs and the Gemma Metal/F16 and
+Metal BF16 refusals. The 99 runs with an `f9f78b5` counterpart reproduce its
+output exactly, and all 40 F32 gates repeat every printed statistic of the
+last pre-SiLU round. The round still fails, because the Nemotron-H
+official-precision failure at `f9f78b5` stands. The campaign directory holds
+the rerun's logs and harness, the digests of every bundle, checkpoint
+configuration, and binary the runs read, the final head checks, and the
+stage reports. The envelope and October 17 records stay byte-identical, and
+`scripts/tests/test_half_precision_followups_record.py` recomputes every
+status, comparison, and identity from the committed logs. The record promotes
+no checkpoint.
+
+The [half-precision review record](half-precision-review-20261018.json)
+answers a review of the envelope and follow-ups records at the code head
+`1e38eec`. It records the eager-attention rounding-point test that exposed
+Flex's F16 partial sums in the eager graph (fixed), the convolution SiLU
+call-site tests, seven mutations that each fail their test, a torch 2.10.0
+probe of PyTorch's scalar multiply and matrix products, and 33 single-process
+runs: every gemma-3-4b-it gate, whose 17 runs with an `8181605` counterpart
+reproduce it exactly, the Gemma Metal/F16 runs now failing as uncalibrated,
+and the new operation-level tests on Flex and Metal. It also records that
+Qwen3.5-0.8B's cold first token breaches the approved September 10 baseline
+in the base binary as well, which awaits the maintainer, and corrects two
+statements of the envelope record, which stays byte-identical with the other
+earlier records. `scripts/tests/test_half_precision_review_record.py`
+recomputes its statuses, figures, and identities. It promotes no checkpoint.
+
 ## Published and repository-only records
 
 The crates.io package carries only part of this directory, because the

@@ -1,0 +1,11 @@
+== approved baseline: September 10 controlled summaries (single cold samples); thresholds 5% alert, 10% confirmed failure
+== baseline benchmark: approved cold first token 0.167520 s; 1.05x 0.175896 s, 1.10x 0.184272 s
+   gate run (f9f78b5): 0.432347 s (+158.1%) ABOVE-10%
+   controlled rerun base (7bd057e): 0.7597 (+353.5%), 0.3676 (+119.4%), 0.3225 (+92.5%); 3 of 3 above 1.10x; median 0.3676 s (+119.4%) ABOVE-10%
+   controlled rerun head (f9f78b5): 0.5278 (+215.1%), 0.2988 (+78.4%), 0.2282 (+36.2%); 3 of 3 above 1.10x; median 0.2988 s (+78.4%) ABOVE-10%
+   controlled rerun, both binaries: 6 of 6 samples above 1.10x (range 0.2282 to 0.7597 s); head/base median ratio 0.813
+== public benchmark: approved cold first token 0.365949 s; 1.05x 0.384246 s, 1.10x 0.402544 s
+   gate run (f9f78b5): 0.410578 s (+12.2%) ABOVE-10%
+   controlled rerun base (7bd057e): 0.4446 (+21.5%), 0.4064 (+11.0%), 0.2941 (-19.6%); 2 of 3 above 1.10x; median 0.4064 s (+11.0%) ABOVE-10%
+   controlled rerun head (f9f78b5): 0.3021 (-17.4%), 0.3071 (-16.1%), 0.2336 (-36.2%); 0 of 3 above 1.10x; median 0.3021 s (-17.4%) ok
+   controlled rerun, both binaries: 2 of 6 samples above 1.10x (range 0.2336 to 0.4446 s); head/base median ratio 0.743

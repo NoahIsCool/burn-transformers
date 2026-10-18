@@ -324,7 +324,7 @@ pub(crate) fn assert_weights_ignore_burn_seed<M: Module<TestBackend>>(
 
 /// [`ModuleVisitor`] collecting every float parameter's F32 bit patterns in visit order.
 struct ParameterBits(
-    /// One entry per float parameter: its elements' F32 bit patterns, row-major.
+    /// One entry per visited float parameter: its values' F32 bit patterns in row-major order.
     Vec<Vec<u32>>,
 );
 

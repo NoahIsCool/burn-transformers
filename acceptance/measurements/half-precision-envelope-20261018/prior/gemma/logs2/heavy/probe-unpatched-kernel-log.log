@@ -1,0 +1,167 @@
+== step probe-unpatched-kernel-log
+== start 2026-10-17T22:40:49Z load (47.630859375, 24.0771484375, 13.412109375)
+== env {'CUBECL_DEBUG_LOG': '/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/gemma/logs2/heavy/cubecl-kernels-unpatched.log'}
+== cmd ['/Volumes/bag of holding/cargo-targets/followups-gemma/release/deps/metal_bf16_probe-5c2b593db1bdc288', '--ignored', '--exact', '--nocapture', '--test-threads', '1', 'metal_bf16_capabilities']
+
+running 1 test
+test metal_bf16_capabilities ... PROBE declared BF16: supports_dtype=false dtype_usage=EnumSet(Accelerated)
+PROBE declared F16: supports_dtype=true dtype_usage=EnumSet(Storage | Arithmetic | Accelerated)
+PROBE declared F32: supports_dtype=true dtype_usage=EnumSet(Storage | Arithmetic | Accelerated)
+PROBE F16 create+readback: tensor.dtype()=F16 readback dtype F16; max |diff| 0.000e0
+PROBE F16 cast from F32 (RNE ties, extremes): out dtype F16; mismatches vs host RNE: []
+PROBE F16 cast to F32 (exact widening): out dtype F32; max |diff| 0.000e0
+PROBE F16 cast to the other half type: out dtype BF16; max |diff| 0.000e0
+PROBE F16 add: out dtype F16; max |err| vs once-rounded sum 0.000e0
+PROBE F16 mul: out dtype F16; max |err| vs once-rounded product 0.000e0
+PROBE F16 exp: out dtype F16; max |err| 1.550e-2; worst err/(u*|exact|) 0.98
+PROBE F16 tanh: out dtype F16; max |err| 2.440e-4; worst err/(u*|exact|) 0.97
+PROBE F16 sigmoid: out dtype F16; max |err| 2.440e-4; worst err/(u*|exact|) 0.99
+PROBE F16 sqrt: out dtype F16; max |err| 4.882e-4; worst err/(u*|exact|) 1.00
+PROBE F16 cos: out dtype F16; max |err| 2.440e-4; worst err/(u*|exact|) 0.98
+PROBE F16 softmax [8,1031] dim 1: out dtype F16; max |err| 1.075e-5 (largest prob 1.698e-2); worst |row sum - 1| 4.396e-4
+PROBE F16 reductions sum/max/argmax: row0: sum err/(u*sum|x|) 0.007 max exact true argmax true; row1: sum err/(u*sum|x|) 0.055 max exact true argmax true; row2: sum err/(u*sum|x|) 0.021 max exact true argmax true; row3: sum err/(u*sum|x|) 0.011 max exact true argmax true
+PROBE F16 select rows (embedding gather): out dtype F16; max |diff| 0.000e0
+PROBE F16 swap_dims+reshape copy, cat, mask_fill: out dtype F16; swap max |diff| 0.000e0; cat exact true; mask_fill exact true
+PROBE F16 matmul [1,64]x[64,32]: out dtype F16; max |err| 9.355e-4; worst err/(u*sum|a||b|) 0.118; non-finite 0
+PROBE F16 matmul [7,2560]x[2560,257]: out dtype F16; max |err| 1.562e-2; worst err/(u*sum|a||b|) 0.050; non-finite 0
+PROBE F16 matmul [6,10240]x[10240,256]: out dtype F16; max |err| 3.124e-2; worst err/(u*sum|a||b|) 0.025; non-finite 0
+PROBE F16 batched matmul [2,3,128,96]x[2,3,96,80]: out dtype F16; max |err| 3.900e-3
+PROBE Bf16 create+readback: tensor.dtype()=BF16 readback dtype BF16; max |diff| 0.000e0
+PROBE Bf16 cast from F32 (RNE ties, extremes): out dtype BF16; mismatches vs host RNE: []
+PROBE Bf16 cast to F32 (exact widening): out dtype F32; max |diff| 0.000e0
+PROBE Bf16 cast to the other half type: out dtype F16; max |diff| 0.000e0
+PROBE Bf16 add: out dtype BF16; max |err| vs once-rounded sum 0.000e0
+PROBE Bf16 mul: out dtype BF16; max |err| vs once-rounded product 0.000e0
+
+thread 'DSD-4-0' (40074044) panicked at /Users/nover/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-29.0.4/src/backend/wgpu_core.rs:1113:30:
+wgpu error: Validation Error
+
+Caused by:
+  In Device::create_shader_module_passthrough, label = 'unary_float_f_bf16_n_4'
+    Failed to generate the backend-specific code
+
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'DSD-4-0' (40074044) panicked at /Users/nover/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cubecl-runtime-0.10.0/src/client.rs:726:34:
+called `Result::unwrap()` on an `Err` value: CallError
+
+thread 'metal_bf16_capabilities' (40074043) panicked at /Users/nover/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/burn-cubecl-0.21.0/src/kernel/unary_float.rs:22:1:
+called `Result::unwrap()` on an `Err` value: CallError
+PROBE Bf16 exp: PANIC called `Result::unwrap()` on an `Err` value: CallError
+
+thread 'DSD-4-0' (40074044) panicked at /Users/nover/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-29.0.4/src/backend/wgpu_core.rs:1113:30:
+wgpu error: Validation Error
+
+Caused by:
+  In Device::create_shader_module_passthrough, label = 'unary_float_f_bf16_n_4'
+    Failed to generate the backend-specific code
+
+
+
+thread 'DSD-4-0' (40074044) panicked at /Users/nover/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cubecl-runtime-0.10.0/src/client.rs:726:34:
+called `Result::unwrap()` on an `Err` value: CallError
+
+thread 'metal_bf16_capabilities' (40074043) panicked at /Users/nover/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/burn-cubecl-0.21.0/src/kernel/unary_float.rs:22:1:
+called `Result::unwrap()` on an `Err` value: CallError
+PROBE Bf16 tanh: PANIC called `Result::unwrap()` on an `Err` value: CallError
+PROBE Bf16 sigmoid: out dtype BF16; max |err| 1.943e-3; worst err/(u*|exact|) 0.97
+
+thread 'DSD-4-0' (40074044) panicked at /Users/nover/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-29.0.4/src/backend/wgpu_core.rs:1113:30:
+wgpu error: Validation Error
+
+Caused by:
+  In Device::create_shader_module_passthrough, label = 'unary_float_f_bf16_n_4'
+    Failed to generate the backend-specific code
+
+
+
+thread 'DSD-4-0' (40074044) panicked at /Users/nover/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cubecl-runtime-0.10.0/src/client.rs:726:34:
+called `Result::unwrap()` on an `Err` value: CallError
+
+thread 'metal_bf16_capabilities' (40074043) panicked at /Users/nover/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/burn-cubecl-0.21.0/src/kernel/unary_float.rs:22:1:
+called `Result::unwrap()` on an `Err` value: CallError
+PROBE Bf16 sqrt: PANIC called `Result::unwrap()` on an `Err` value: CallError
+
+thread 'DSD-4-0' (40074044) panicked at /Users/nover/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-29.0.4/src/backend/wgpu_core.rs:1113:30:
+wgpu error: Validation Error
+
+Caused by:
+  In Device::create_shader_module_passthrough, label = 'unary_float_f_bf16_n_4'
+    Failed to generate the backend-specific code
+
+
+
+thread 'DSD-4-0' (40074044) panicked at /Users/nover/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cubecl-runtime-0.10.0/src/client.rs:726:34:
+called `Result::unwrap()` on an `Err` value: CallError
+
+thread 'metal_bf16_capabilities' (40074043) panicked at /Users/nover/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/burn-cubecl-0.21.0/src/kernel/unary_float.rs:22:1:
+called `Result::unwrap()` on an `Err` value: CallError
+PROBE Bf16 cos: PANIC called `Result::unwrap()` on an `Err` value: CallError
+
+thread 'DSD-4-0' (40074044) panicked at /Users/nover/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-29.0.4/src/backend/wgpu_core.rs:1113:30:
+wgpu error: Validation Error
+
+Caused by:
+  In Device::create_shader_module_passthrough, label = 'unary_float_f_bf16_n_1'
+    Failed to generate the backend-specific code
+
+
+
+thread 'DSD-4-0' (40074044) panicked at /Users/nover/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cubecl-runtime-0.10.0/src/client.rs:726:34:
+called `Result::unwrap()` on an `Err` value: CallError
+
+thread 'metal_bf16_capabilities' (40074043) panicked at /Users/nover/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/burn-cubecl-0.21.0/src/kernel/unary_float.rs:22:1:
+called `Result::unwrap()` on an `Err` value: CallError
+PROBE Bf16 softmax [8,1031] dim 1: PANIC called `Result::unwrap()` on an `Err` value: CallError
+PROBE Bf16 reductions sum/max/argmax: row0: sum err/(u*sum|x|) 0.010 max exact true argmax true; row1: sum err/(u*sum|x|) 0.006 max exact true argmax true; row2: sum err/(u*sum|x|) 0.001 max exact true argmax true; row3: sum err/(u*sum|x|) 0.010 max exact true argmax true
+PROBE Bf16 select rows (embedding gather): out dtype BF16; max |diff| 0.000e0
+PROBE Bf16 swap_dims+reshape copy, cat, mask_fill: out dtype BF16; swap max |diff| 0.000e0; cat exact true; mask_fill exact true
+
+thread 'metal_bf16_capabilities' (40074043) panicked at /Users/nover/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cubek-matmul-0.2.0/src/launch/strategy.rs:567:22:
+called `Result::unwrap()` on an `Err` value: Unable to launch matmul because a required feature is unavailable: Types lhs=Scalar(Float(BF16)), rhs=Scalar(Float(BF16)) and/or output=Scalar(Float(BF16)) not supported.
+
+
+PROBE Bf16 matmul [1,64]x[64,32]: PANIC called `Result::unwrap()` on an `Err` value: Unable to launch matmul because a required feature is unavailable: Types lhs=Scalar(Float(BF16)), rhs=Scalar(Float(BF16)) and/or output=Scalar(Float(BF16)) not supported. |  | 
+
+thread 'metal_bf16_capabilities' (40074043) panicked at /Users/nover/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cubek-matmul-0.2.0/src/launch/strategy.rs:567:22:
+called `Result::unwrap()` on an `Err` value: Unable to launch matmul because a required feature is unavailable: Types lhs=Scalar(Float(BF16)), rhs=Scalar(Float(BF16)) and/or output=Scalar(Float(BF16)) not supported.
+
+
+PROBE Bf16 matmul [7,2560]x[2560,257]: PANIC called `Result::unwrap()` on an `Err` value: Unable to launch matmul because a required feature is unavailable: Types lhs=Scalar(Float(BF16)), rhs=Scalar(Float(BF16)) and/or output=Scalar(Float(BF16)) not supported. |  | 
+
+thread 'metal_bf16_capabilities' (40074043) panicked at /Users/nover/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cubek-matmul-0.2.0/src/launch/strategy.rs:567:22:
+called `Result::unwrap()` on an `Err` value: Unable to launch matmul because a required feature is unavailable: Types lhs=Scalar(Float(BF16)), rhs=Scalar(Float(BF16)) and/or output=Scalar(Float(BF16)) not supported.
+
+
+PROBE Bf16 matmul [6,10240]x[10240,256]: PANIC called `Result::unwrap()` on an `Err` value: Unable to launch matmul because a required feature is unavailable: Types lhs=Scalar(Float(BF16)), rhs=Scalar(Float(BF16)) and/or output=Scalar(Float(BF16)) not supported. |  | 
+
+thread 'metal_bf16_capabilities' (40074043) panicked at /Users/nover/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/cubek-matmul-0.2.0/src/launch/strategy.rs:567:22:
+called `Result::unwrap()` on an `Err` value: Unable to launch matmul because a required feature is unavailable: Types lhs=Scalar(Float(BF16)), rhs=Scalar(Float(BF16)) and/or output=Scalar(Float(BF16)) not supported.
+
+
+PROBE Bf16 batched matmul [2,3,128,96]x[2,3,96,80]: PANIC called `Result::unwrap()` on an `Err` value: Unable to launch matmul because a required feature is unavailable: Types lhs=Scalar(Float(BF16)), rhs=Scalar(Float(BF16)) and/or output=Scalar(Float(BF16)) not supported. |  | 
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.87s
+
+        6.46 real         0.40 user         0.46 sys
+           106708992  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                7111  page reclaims
+                  11  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   6  voluntary context switches
+                4016  involuntary context switches
+          1001119142  instructions retired
+           865390273  cycles elapsed
+           309379936  peak memory footprint
+
+== exit=0 wall=6.7s end 2026-10-17T22:40:55Z

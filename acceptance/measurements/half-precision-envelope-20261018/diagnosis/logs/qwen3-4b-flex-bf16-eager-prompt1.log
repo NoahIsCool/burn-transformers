@@ -1,0 +1,26 @@
+== source f9f78b5fc7cca9d1a8afaf29f8f9df04fe7c3008 (transformers path dependency on the gate export /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/diag/../gates/src)
+== binary /Volumes/bag of holding/cargo-targets/tfm-half-followups2-diag/release/burn-dump sha256 2752e8150c7cb7e81078f8223abee4b9d218048c33b4247d560d31f1699d5ad8
+== Qwen3-4B Flex/BF16 eager attention: prompt 1, stateless
+== cwd /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/diag
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-half-followups2-diag/release/burn-dump flex bf16 /Volumes/T9/models/Qwen/Qwen3-4B 750,75698,1445,982,262,4210,5598,279,308,7563,79683,1372,14442 /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/diag/data/qwen3-4b-flex-bf16-eager-prompt1 eager
+== start 2026-10-18T03:28:38+00:00 load 1.75 1.93 2.73
+wrote 38 points for 13 tokens (eager=true, prefill=0) to /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/diag/data/qwen3-4b-flex-bf16-eager-prompt1
+       12.48 real        14.64 user        11.79 sys
+         10680270848  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              659124  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                  61  voluntary context switches
+              140831  involuntary context switches
+        235417955212  instructions retired
+         92357482768  cycles elapsed
+         10676527360  peak memory footprint
+== exit=0 wall=13.2s end=2026-10-18T03:28:51+00:00 load_end 1.58 min_free_pct=90 max_swap_growth_mib=0 swapin_mib=4 pressured_swapin_mib=0

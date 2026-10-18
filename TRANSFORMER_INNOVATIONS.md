@@ -509,7 +509,14 @@ dtype, promotes only softmax to FP32, casts the probabilities back, and then
 multiplies by V. Burn 0.21 flash attention instead keeps QK accumulation in
 strict FP32; an adversarial Metal F16 gate confirms that omitting the score
 rounding changes output bits. Muse therefore opts into the shared explicit
-eager mode for F16, while F32 retains backend-native arithmetic.
+eager mode for F16, while F32 retains backend-native arithmetic. In F16 and
+BF16 that mode rounds where Transformers' `eager_attention_forward` does:
+$QK^\top$ and the probability-value product are F32 sums rounded once (on
+Flex, whose F16 GEMM keeps F16 partial sums, formed from F32 operands), the
+unrounded score scale multiplies in F32, and the mask and bias are added in
+the dtype; [`attention/dispatch.rs`](src/attention/dispatch.rs) pins all
+five rounding points against an emulation and Transformers' own eager
+function, on Flex and (ignored) on Metal; CUDA and ROCm are unmeasured.
 
 The production Muse path does not advertise flash attention. Burn 0.21's
 ordinary `metal` feature does not enable its attention autotuner, and the
@@ -957,6 +964,15 @@ variant.
 **Implementation:** [`GatedFeedForward`](src/feed_forward.rs), instantiated by
 the relevant family model files. **Reference:**
 [GLU Variants Improve Transformer](https://arxiv.org/abs/2002.05202).
+
+**Precision:** Transformers' `silu` activation is PyTorch's fused `silu`,
+which evaluates F16 and BF16 inputs in F32 and rounds once; the crate's SiLU
+does the same (`apply_activation`, and the Gated DeltaNet and Mamba-2
+convolutions). Burn's composed `x * sigmoid(x)` would round the sigmoid to the
+activation dtype first, which on Flex misses the once-rounded value for 27% of
+BF16 and F16 inputs with `2^-8 <= |x| < 16`. gpt-oss's clamped unit is the
+exception: its reference composes `gate * torch.sigmoid(gate * alpha)` per
+operation, and so does the crate.
 
 <a id="innovation-clamped-swiglu"></a>
 ### Clamped SwiGLU

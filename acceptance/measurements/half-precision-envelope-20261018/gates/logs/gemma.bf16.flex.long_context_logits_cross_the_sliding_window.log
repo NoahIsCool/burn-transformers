@@ -1,0 +1,56 @@
+== source f9f78b5fc7cca9d1a8afaf29f8f9df04fe7c3008 (git archive export /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src)
+== binary /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/gemma_artifacts-7e9fb558e3797b0a sha256 533d5d9c242bcc783dea609917c57471e30f92fd01b010316e1dde57993b2e17 build A
+== flex/BF16 flex_long_context_logits_cross_the_sliding_window
+== env TRANSFORMERS_GEMMA_DECODE_TRUTH_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-f32-cpu-eager
+== env TRANSFORMERS_GEMMA_DIR=/Volumes/T9/models/google/gemma-3-4b-it
+== env TRANSFORMERS_GEMMA_DTYPE=bf16
+== env TRANSFORMERS_GEMMA_LONG_DECODE_TRUTH_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long-f32-cpu-eager
+== env TRANSFORMERS_GEMMA_LONG_OFFICIAL_DIRS=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long-bf16-cpu-eager-7a50e44:/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long-bf16-cpu-sdpa-7a50e44:/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long-bf16-mps-eager-7a50e44:/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long-bf16-mps-sdpa-7a50e44
+== env TRANSFORMERS_GEMMA_LONG_REFERENCE_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long
+== env TRANSFORMERS_GEMMA_OFFICIAL_DIRS=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-bf16-cpu-eager-7a50e44:/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-bf16-cpu-sdpa-7a50e44:/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-bf16-mps-eager-7a50e44:/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-bf16-mps-sdpa-7a50e44
+== env TRANSFORMERS_GEMMA_REFERENCE_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38
+== cwd /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/gemma_artifacts-7e9fb558e3797b0a --ignored --exact --nocapture --test-threads 1 flex_long_context_logits_cross_the_sliding_window
+== start 2026-10-18T01:12:52+00:00 load 2.89 8.53 16.79 free 90%
+
+running 1 test
+test flex_long_context_logits_cross_the_sliding_window ... BF16 bounds of prompt 0: max 1.5275605201721191e1, mean 8.601647198456078e-2 (1.5 and 1.3 times the official envelope 1.0183736801147461e1, 6.61665169112006e-2)
+BF16 bounds of decode rows: max 8.604469299316406e-1, mean 6.04370647072127e-2 (1.5 and 1.3 times the official envelope 5.736312866210938e-1, 4.6490049774778996e-2)
+F32 matrix products use F32 inputs; the BF16 run is judged by the official envelope, greedy steps at 1.5275605e1
+load: 439 vision-tower tensors intentionally ignored
+windowed: positions 0..4: max |Δ| = 7.429142e-1
+windowed: positions 1016..1024: max |Δ| = 4.9777985e-1
+windowed: positions 1024..1032: max |Δ| = 5.0349617e-1
+windowed: positions 1032..1088: max |Δ| = 3.1893172e0
+windowed: positions 1088..1237: max |Δ| = 1.1913462e0
+long prompt (1237 tokens, window 1024): max |Δ| = 8.858282e0 before the window, 3.1893172e0 at or beyond it
+long prompt: 1237 tokens, max |Δ| = 8.858282566070557e0 at position 733 (bound 1.5275605201721191e1), mean |Δ| = 5.796337071908378e-2 (bound 8.601647198456078e-2)
+unwindowed: positions 0..4: max |Δ| = 7.429142e-1
+unwindowed: positions 1016..1024: max |Δ| = 4.9777985e-1
+unwindowed: positions 1024..1032: max |Δ| = 1.6141014e0
+unwindowed: positions 1032..1088: max |Δ| = 1.1886862e1
+unwindowed: positions 1088..1237: max |Δ| = 3.684514e1
+unwindowed: max |Δ| = 3.684513854980469e1 (bound 1.5275605201721191e1), mean |Δ| = 2.537080889561706e-1 (bound 8.601647198456078e-2)
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 39 filtered out; finished in 76.66s
+
+       76.68 real       261.04 user         6.43 sys
+         18057674752  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             1393073  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                  12  voluntary context switches
+              280639  involuntary context switches
+       3789540555923  instructions retired
+        913442523073  cycles elapsed
+         18056033960  peak memory footprint
+== exit=0 wall=77.3s min_free_pct=89 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0

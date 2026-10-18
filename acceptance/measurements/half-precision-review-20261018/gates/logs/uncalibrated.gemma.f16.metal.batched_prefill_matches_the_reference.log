@@ -1,0 +1,50 @@
+== source 1e38eecf989a1ae568b67b2e9fcdd9b2ebdbadb8 dirty=0
+== checkout /Users/nover/repos/transformers-worktrees/tfm-half-followups2 (branch claude/tfm-half-followups2)
+== binary /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/gemma_artifacts-7e9fb558e3797b0a sha256 fe057e7a1b3accafa001d43aeb2f4288304493dcc19665cab747ace2b727e45d
+== metal/F16 (uncalibrated) metal::metal_batched_prefill_matches_the_reference
+== env TRANSFORMERS_GEMMA_DECODE_TRUTH_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-f32-cpu-eager
+== env TRANSFORMERS_GEMMA_DIR=/Volumes/T9/models/google/gemma-3-4b-it
+== env TRANSFORMERS_GEMMA_DTYPE=f16
+== env TRANSFORMERS_GEMMA_F16_OFFICIAL_DIRS=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-f16-cpu-eager-7a50e44:/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-f16-cpu-sdpa-7a50e44:/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-f16-mps-eager-7a50e44:/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-f16-mps-sdpa-7a50e44
+== env TRANSFORMERS_GEMMA_LONG_DECODE_TRUTH_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long-f32-cpu-eager
+== env TRANSFORMERS_GEMMA_LONG_F16_OFFICIAL_DIRS=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long-f16-cpu-eager-7a50e44:/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long-f16-cpu-sdpa-7a50e44:/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long-f16-mps-eager-7a50e44:/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long-f16-mps-sdpa-7a50e44
+== env TRANSFORMERS_GEMMA_LONG_REFERENCE_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long
+== env TRANSFORMERS_GEMMA_REFERENCE_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38
+== cwd /Users/nover/repos/transformers-worktrees/tfm-half-followups2
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/gemma_artifacts-7e9fb558e3797b0a --ignored --exact --nocapture --test-threads 1 metal::metal_batched_prefill_matches_the_reference
+== start 2026-10-18T06:48:10+00:00 load 8.35 8.65 6.09 free 91%
+
+running 1 test
+test metal::metal_batched_prefill_matches_the_reference ... 
+thread 'metal::metal_batched_prefill_matches_the_reference' (41862530) panicked at tests/support/half_precision_calibration.rs:1642:5:
+uncalibrated: official cpu-eager float16 non-finite at prompt 0 position 0; a checkpoint whose official evaluation overflows in this dtype has no envelope, so the run fails
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    metal::metal_batched_prefill_matches_the_reference
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 39 filtered out; finished in 0.03s
+
+        0.03 real         0.01 user         0.01 sys
+            41254912  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                2853  page reclaims
+                   2  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   0  voluntary context switches
+                 134  involuntary context switches
+           274555016  instructions retired
+            96336856  cycles elapsed
+           175801136  peak memory footprint
+== exit=101 wall=1.0s min_free_pct=91 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+== source after run 1e38eecf989a1ae568b67b2e9fcdd9b2ebdbadb8 dirty=0

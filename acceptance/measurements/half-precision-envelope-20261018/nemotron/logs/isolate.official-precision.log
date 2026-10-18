@@ -1,0 +1,35 @@
+== source f9f78b5fc7cca9d1a8afaf29f8f9df04fe7c3008 plus isolate.diff sha256 b65944517c508e605de30771177aa4dced5adfa9f9591c50613dd406d9e555c3 (the Mamba-2 convolution SiLU composed as before c10974e; nothing else changed)
+== binary /Volumes/bag of holding/cargo-targets/tfm-half-followups2-nemotron-isolate/release/deps/nemotron_h_artifacts-4cd54efee0f15525 sha256 dbb45277cd3f5e8fbe341173456e928a325191d3134b931c097be75480be8bed
+== Nemotron-H official-precision gate, isolate: attribution of the f9f78b5 failure (cached row 22 below its official F16 floor)
+== env TRANSFORMERS_NEMOTRON_H_DIR=/Volumes/bag of holding/models/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16-a9904d24bcc1d289a1950fa9d2b978c47cf903b9
+== env TRANSFORMERS_NEMOTRON_H_PRECISION_DIR=/Volumes/bag of holding/models/transformers-acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24-precision.bundle
+== env TRANSFORMERS_NEMOTRON_H_REFERENCE_DIR=/Volumes/bag of holding/models/transformers-acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24-reference.bundle
+== cwd /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/nemotron/isolate/src
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-half-followups2-nemotron-isolate/release/deps/nemotron_h_artifacts-4cd54efee0f15525 --ignored --exact --nocapture --test-threads 1 compares_pinned_nemotron_f16_with_official_base_reference
+== start 2026-10-18T04:36:51+00:00 load 2.72 2.34 2.28
+
+running 1 test
+test compares_pinned_nemotron_f16_with_official_base_reference ... Nemotron 3.5 official corresponding-path parity: load_seconds=86.953, stateless_prompt_seconds=1.797, teacher_seconds=1.115, cached_seconds=4.563, f16_floors[prompt,teacher,cached]=[0.999194145, 0.994466421, 0.998635047], f32_truth_prompt_cosine=0.999223815858, f32_truth_teacher_minimum=0.997611898218@30, f32_truth_cached_minimum=0.998776735807@22, f16_oracle_prompt_cosine=0.999985150326, f16_oracle_teacher_minimum=0.994340101181, f16_oracle_cached_minimum=0.999299206381, stateless_hidden_minimum_cosine=0.999967369503@24, cached_prefill_hidden_minimum_cosine=0.999967369503@24, cached_decode_hidden_minimum_cosine=0.999802135405@35, stateless_hidden_sha256=056852a13912c094f2d701d7551c1f6f6ab140555d7210226b810eff6a09d73d, cached_prefill_hidden_sha256=056852a13912c094f2d701d7551c1f6f6ab140555d7210226b810eff6a09d73d, cached_decode_hidden_sha256=6622235da52e1865e6b479f4063ce80432cf78f9907570459c5d092a1da0d7f9, official_crossed_path_minimum_diagnostic=0.921504794757, decisions_per_path=32, total_seconds=288.650
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 41 filtered out; finished in 288.66s
+
+      289.35 real       164.47 user        44.58 sys
+          4118118400  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             4203492  page reclaims
+                 138  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                 163  voluntary context switches
+             1758183  involuntary context switches
+       2629915513849  instructions retired
+        758579397149  cycles elapsed
+         69189372712  peak memory footprint
+== exit=0 wall=290.2s end=2026-10-18T04:41:42+00:00 load_end 1.89 min_free_pct=50 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0

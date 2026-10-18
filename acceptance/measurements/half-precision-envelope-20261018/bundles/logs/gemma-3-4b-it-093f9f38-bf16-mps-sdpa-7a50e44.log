@@ -1,0 +1,24 @@
+== source 7a50e44 (git archive export) tool /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/bundles/tool/scripts/generate_causal_lm_reference.py sha256 a4ed0db48e9b4e6c816bf23c25f56cf39498d06165af49a0655c841d1b56a602
+== start 2026-10-18T00:04:12+00:00 free 322.7 GiB free-memory 92%
+== cmd ["/usr/bin/time", "-l", "/Library/Frameworks/Python.framework/Versions/3.11/bin/python3", "-I", "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/bundles/tool/scripts/generate_causal_lm_reference.py", "--model-dir", "/Volumes/T9/models/google/gemma-3-4b-it", "--output", "/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-bf16-mps-sdpa-7a50e44", "--repository", "google/gemma-3-4b-it", "--revision", "093f9f388b31de276ce2de164bdc2081324b9767", "--dtype", "bfloat16", "--device", "mps", "--attn-implementation", "sdpa", "--greedy-tokens", "32", "--decode-tokens-from", "/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38", "--prompt-decode", "--prompt", "The capital of France is", "--prompt", "def fibonacci(n):\n    \"\"\"Return the n-th Fibonacci number.\"\"\"\n", "--prompt", "Rotary position embeddings encode relative distance because"]
+{"bundle": "/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-bf16-mps-sdpa-7a50e44", "prompts": 3}
+       25.02 real        16.47 user         3.42 sys
+          2180235264  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              211330  page reclaims
+                  44  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                 216  voluntary context switches
+               35113  involuntary context switches
+        202316660719  instructions retired
+         70513500617  cycles elapsed
+         11594566368  peak memory footprint
+== exit=0 wall=25s lowest-free-memory=84%
+== reference.json sha256 8b5cbefc9fe4674dd5473d26d1dbedcfa5f2e1533017c05571980c3ecde28d5d

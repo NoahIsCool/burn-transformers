@@ -1,0 +1,8 @@
+cubecl<wgpu<msl>> F16 source128 prefill_median_s             base [0.062, 0.062, 0.063] median 0.062 | patched [0.062, 0.061, 0.063] median 0.062 | ratio 0.994
+cubecl<wgpu<msl>> F16 source128 decode_median_s              base [3.812, 3.756, 3.625] median 3.756 | patched [3.604, 3.37, 3.52] median 3.520 | ratio 0.937
+cubecl<wgpu<msl>> F16 source128 prefill_tok_per_s            base [2064.77, 2076.76, 2029.66] median 2064.770 | patched [2077.05, 2102.22, 2038.49] median 2077.050 | ratio 1.006
+cubecl<wgpu<msl>> F16 source128 decode_tok_per_s             base [33.576, 34.076, 35.313] median 34.076 | patched [35.514, 37.981, 36.367] median 36.367 | ratio 1.067
+cubecl<wgpu<msl>> F16 source512 prefill_median_s             base [0.16, 0.161, 0.168] median 0.161 | patched [0.163, 0.164, 0.172] median 0.164 | ratio 1.020
+cubecl<wgpu<msl>> F16 source512 decode_median_s              base [3.45, 3.703, 3.501] median 3.501 | patched [3.388, 3.649, 3.845] median 3.649 | ratio 1.042
+cubecl<wgpu<msl>> F16 source512 prefill_tok_per_s            base [3198.8, 3183.84, 3039.55] median 3183.840 | patched [3142.83, 3121.85, 2982.44] median 3121.850 | ratio 0.981
+cubecl<wgpu<msl>> F16 source512 decode_tok_per_s             base [37.106, 34.563, 36.566] median 36.566 | patched [37.785, 35.078, 33.29] median 35.078 | ratio 0.959

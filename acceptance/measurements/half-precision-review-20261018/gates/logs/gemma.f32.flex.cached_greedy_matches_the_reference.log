@@ -1,0 +1,43 @@
+== source 1e38eecf989a1ae568b67b2e9fcdd9b2ebdbadb8 dirty=0
+== checkout /Users/nover/repos/transformers-worktrees/tfm-half-followups2 (branch claude/tfm-half-followups2)
+== binary /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/gemma_artifacts-7e9fb558e3797b0a sha256 fe057e7a1b3accafa001d43aeb2f4288304493dcc19665cab747ace2b727e45d
+== flex/F32 flex_cached_greedy_matches_the_reference
+== env TRANSFORMERS_GEMMA_DECODE_TRUTH_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-f32-cpu-eager
+== env TRANSFORMERS_GEMMA_DIR=/Volumes/T9/models/google/gemma-3-4b-it
+== env TRANSFORMERS_GEMMA_LONG_DECODE_TRUTH_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long-f32-cpu-eager
+== env TRANSFORMERS_GEMMA_LONG_REFERENCE_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long
+== env TRANSFORMERS_GEMMA_REFERENCE_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38
+== cwd /Users/nover/repos/transformers-worktrees/tfm-half-followups2
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/gemma_artifacts-7e9fb558e3797b0a --ignored --exact --nocapture --test-threads 1 flex_cached_greedy_matches_the_reference
+== start 2026-10-18T06:48:45+00:00 load 6.68 8.21 6.01 free 91%
+
+running 1 test
+test flex_cached_greedy_matches_the_reference ... F32 matrix products use F32 inputs; tolerance 1e-3
+load: 439 vision-tower tensors intentionally ignored
+cached prefill: max |Δ| = 6.9618225e-5
+greedy: 32 of 32 greedy tokens decisive and matching (smallest decisive margin 2.3321152e-1), 0 ties skipped
+cached decode: 32 decode rows from position 6: max |Δ| = 1.9359588623046875e-4 to the decode truth, at step 12 (tolerance 1e-3)
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 39 filtered out; finished in 13.66s
+
+       13.68 real        18.37 user         3.00 sys
+         20042579968  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             1230181  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   0  voluntary context switches
+               81498  involuntary context switches
+        200436950878  instructions retired
+         77348509910  cycles elapsed
+         20042152624  peak memory footprint
+== exit=0 wall=14.2s min_free_pct=91 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+== source after run 1e38eecf989a1ae568b67b2e9fcdd9b2ebdbadb8 dirty=0

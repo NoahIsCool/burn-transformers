@@ -10,6 +10,11 @@
 //! explicit architecture choice. Tensor dtype follows the projections and chosen
 //! activation; no implicit masking, cache state, or training-mode dropout is added.
 //!
+//! In F16 and BF16, SiLU and tanh-GELU are evaluated in F32 and rounded once to
+//! the activation dtype, as PyTorch's fused `silu` and
+//! `gelu(approximate="tanh")` kernels are; F32 and F64 run Burn's operation
+//! graphs unchanged (see [`apply_activation`]).
+//!
 //! `forward_with_hooks` emits the two canonical MLP intervention points in one
 //! order shared by every family: `mlp_pre_activation` (the dense projection, or
 //! the gate branch of a gated MLP) and then `mlp_activation` (after the
@@ -334,6 +339,12 @@ impl ClampedSwiGlu {
     }
 
     /// Combines gate and up projections of equal shape into the gated activation.
+    ///
+    /// The unit is composed operation by operation in the activation dtype,
+    /// as gpt-oss's reference `gate * torch.sigmoid(gate * alpha)` is, so in
+    /// F16 and BF16 the scaled gate, the sigmoid and each product are rounded
+    /// separately. It deliberately does not use the once-rounded SiLU of
+    /// [`apply_activation`], which follows PyTorch's fused `silu` instead.
     pub fn combine<B: Backend, const D: usize>(
         &self,
         gate: Tensor<B, D>,
@@ -370,20 +381,62 @@ impl ClampedSwiGlu {
 /// unrounded constants, so neither graph reproduces its half-precision
 /// rounding exactly; the two agree in F32.
 ///
-/// The other activations use Burn's operations as they are: in F16 and BF16,
-/// `Silu` rounds `sigmoid(x)` before the product, unlike PyTorch's fused
-/// SiLU, which rounds once.
+/// `Silu` follows PyTorch's `silu` (Transformers' `SiLUActivation`, the gate
+/// of every SwiGLU family) the same way (the crate-private helper `silu`
+/// documents the convention and every call site). Burn's
+/// `activation::silu` composes a rounded `sigmoid(x)` with a rounded
+/// product; on Flex those two roundings miss the single one on 27% of the
+/// BF16 and of the F16 inputs with `2^-8 <= |x| < 16`, and an F16 sigmoid
+/// that underflows to zero below about `x = -17.3` erases SiLU values near
+/// `-5e-7`.
+///
+/// `Relu`, `ReluSquared` and the exact `Gelu` use Burn's operations as they
+/// are.
 pub fn apply_activation<B: Backend, const D: usize>(
     input: Tensor<B, D>,
     activation_kind: Activation,
 ) -> Tensor<B, D> {
     match activation_kind {
         Activation::Relu => activation::relu(input),
-        Activation::Silu => activation::silu(input),
+        Activation::Silu => silu(input),
         Activation::Gelu => activation::gelu(input),
         Activation::GeluTanh => evaluate_in_f32(input, activation::gelu_approximate),
         Activation::ReluSquared => activation::relu(input).square(),
     }
+}
+
+/// SiLU `x * sigmoid(x) = x / (1 + exp(-x))`, rounded once in F16 and BF16.
+///
+/// PyTorch's `silu` kernels evaluate an F16 or BF16 element in F32 and round
+/// the result once. PyTorch 2.10.0's CPU kernel equals the F32 value
+/// `x * sigmoid(x)` rounded to the dtype on every finite BF16 input and on
+/// all but one F16 input, a near-tie that F32 evaluation order decides; MPS
+/// also flushes BF16 subnormals to zero and decides a second F16 near-tie
+/// the other way. Burn's `activation::silu` is the two-operation graph
+/// `x * sigmoid(x)`: in half precision the sigmoid is rounded to the
+/// activation dtype before the product, whose rounding adds a second error.
+/// Near zero the rounded sigmoid loses the `x^2 / 4` term of
+/// `x / 2 + x^2 / 4`; elsewhere the two roundings often land one unit in the
+/// last place away from the correctly rounded value; and an F16 sigmoid
+/// underflows to zero below about `x = -17.3`. Gated MLPs feed every such
+/// difference into the residual stream of every block.
+///
+/// An F16 or BF16 input is therefore widened to F32, passed through Burn's
+/// graph there, and the result rounded once (the private helper
+/// `evaluate_in_f32`). F32 and F64 inputs run Burn's graph in their own
+/// dtype, unchanged, so full-precision numerics and gradients are
+/// bit-identical to `activation::silu`. Every crate SiLU on activations
+/// calls this: [`apply_activation`] (dense and gated MLPs, routed and shared
+/// experts), the SiLU attention output gate, and the depthwise-convolution
+/// SiLU of Gated DeltaNet and Mamba-2. The gated RMS norms of both mixers
+/// already evaluate their SiLU in F32, as their references do, and
+/// [`ClampedSwiGlu`] keeps gpt-oss's operation-by-operation graph.
+///
+/// Cost: the F32 evaluation materializes F32 copies of the input-sized
+/// tensor (four bytes per element instead of two) while the call runs, plus
+/// two casts; the result is returned in the input dtype.
+pub(crate) fn silu<B: Backend, const D: usize>(input: Tensor<B, D>) -> Tensor<B, D> {
+    evaluate_in_f32(input, activation::silu)
 }
 
 /// Evaluates an elementwise `function` in F32 for an F16 or BF16 `input` and rounds the result once to the input dtype.
@@ -394,7 +447,7 @@ pub fn apply_activation<B: Backend, const D: usize>(
 /// (within one rounding of F32 evaluation error). Any other dtype is passed
 /// to `function` unchanged. The F32 intermediate costs one tensor of the
 /// input's shape at four bytes per element, live only during the call.
-fn evaluate_in_f32<B: Backend, const D: usize>(
+pub(crate) fn evaluate_in_f32<B: Backend, const D: usize>(
     input: Tensor<B, D>,
     function: impl FnOnce(Tensor<B, D>) -> Tensor<B, D>,
 ) -> Tensor<B, D> {

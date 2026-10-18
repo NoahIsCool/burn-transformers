@@ -1,0 +1,22 @@
+== baseline benchmark
+   cold first token: base [0.7597, 0.3676, 0.3225] median 0.3676 s | head [0.5278, 0.2988, 0.2282] median 0.2988 s | head/base 0.813
+   strict load: base [0.969, 0.9627, 0.9695] median 0.9690 s | head [1.2127, 0.9835, 0.964] median 0.9835 s | head/base 1.015
+   natural greedy total (median): base [1.1079, 1.1012, 1.1079] median 1.1079 s | head [1.2362, 1.1065, 1.1133] median 1.1133 s | head/base 1.005
+   source 32 prefill (median): base [0.0534, 0.0469, 0.0471] median 0.0471 s | head [0.0486, 0.0489, 0.0474] median 0.0486 s | head/base 1.032
+   source 32 first_token_latency (median): base [0.0612, 0.0548, 0.055] median 0.0550 s | head [0.0565, 0.057, 0.0553] median 0.0565 s | head/base 1.028
+   source 32 decode_model_only (median): base [4.1081, 3.5147, 3.5508] median 3.5508 s | head [3.5726, 3.5505, 3.5409] median 3.5505 s | head/base 1.000
+   source 32 decode_including_greedy_readback (median): base [5.1498, 4.5271, 4.5621] median 4.5621 s | head [4.5862, 4.565, 4.5553] median 4.5650 s | head/base 1.001
+   source 128 prefill (median): base [0.0611, 0.0609, 0.0612] median 0.0611 s | head [0.0607, 0.0597, 0.061] median 0.0607 s | head/base 0.993
+   source 128 first_token_latency (median): base [0.069, 0.0688, 0.0691] median 0.0690 s | head [0.0686, 0.0678, 0.069] median 0.0686 s | head/base 0.994
+   source 128 decode_model_only (median): base [3.5503, 3.5098, 3.5373] median 3.5373 s | head [3.5518, 3.5863, 3.5471] median 3.5518 s | head/base 1.004
+   source 128 decode_including_greedy_readback (median): base [4.5615, 4.5236, 4.5477] median 4.5477 s | head [4.5642, 4.6008, 4.5601] median 4.5642 s | head/base 1.004
+   source 512 prefill (median): base [0.1582, 0.1575, 0.1586] median 0.1582 s | head [0.1616, 0.1607, 0.1614] median 0.1614 s | head/base 1.020
+   source 512 first_token_latency (median): base [0.1669, 0.1656, 0.1666] median 0.1666 s | head [0.1699, 0.1685, 0.1692] median 0.1692 s | head/base 1.016
+   source 512 decode_model_only (median): base [3.7712, 3.4935, 3.5285] median 3.5285 s | head [4.2431, 3.5668, 3.5342] median 3.5668 s | head/base 1.011
+   source 512 decode_including_greedy_readback (median): base [4.7931, 4.506, 4.5414] median 4.5414 s | head [5.3004, 4.582, 4.5464] median 4.5820 s | head/base 1.009
+   token and prediction hashes: identical across all six runs
+== public benchmark
+   cold first token: base [0.4446, 0.4064, 0.2941] median 0.4064 s | head [0.3021, 0.3071, 0.2336] median 0.3021 s | head/base 0.743
+   strict load: base [0.9755, 0.9665, 0.9973] median 0.9755 s | head [0.9786, 0.9691, 0.9724] median 0.9724 s | head/base 0.997
+   natural greedy total (median): base [1.4011, 1.3907, 1.3976] median 1.3976 s | head [1.4422, 1.3935, 1.3946] median 1.3946 s | head/base 0.998
+   token and prediction hashes: identical across all six runs

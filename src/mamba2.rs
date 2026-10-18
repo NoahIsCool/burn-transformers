@@ -20,9 +20,9 @@
 //! # Layer graph
 //!
 //! The fused input projection emits `[z, x, B, C, dt]`. A depthwise causal
-//! convolution of width `K` (with SiLU) mixes the `x/B/C` channels over the
-//! previous `K - 1` tokens; `dt = softplus(dt + dt_bias)` is optionally
-//! clamped; the scan produces `y`; and the output is
+//! convolution of width `K` (with SiLU; see Precision) mixes the `x/B/C`
+//! channels over the previous `K - 1` tokens; `dt = softplus(dt + dt_bias)`
+//! is optionally clamped; the scan produces `y`; and the output is
 //! `out_proj(RMSNorm_group(y * SiLU(z)))`. Decoding therefore carries two
 //! states per layer: the matrix `S` and the last `K - 1` convolution inputs.
 //!
@@ -61,6 +61,12 @@
 //! drafted tokens in one pass and commit any accepted prefix.
 //!
 //! # Precision
+//!
+//! The convolution's SiLU is evaluated in F32 and rounded once to the
+//! activation dtype, as the reference's PyTorch path (`ACT2FN["silu"]`, that
+//! is `F.silu`, of the rounded convolution) is; the optional fused CUDA
+//! kernel, which also keeps the convolution sum in F32, is not reproduced.
+//! The gated norm's `y * SiLU(z)` is F32 throughout.
 //!
 //! The chunked scan promotes `x`, `B`, `C`, `dt`, and all state arithmetic
 //! to F32 and returns F32 outputs, like the reference `chunk_scan` fallback.
@@ -851,7 +857,8 @@ impl<B: Backend> Mamba2<B> {
             self.conv1d.groups,
         );
         let convolved = zero_invalid(
-            activation::silu(convolved).swap_dims(1, 2),
+            // SiLU rounded once in F16/BF16, as the reference's `F.silu` is.
+            crate::feed_forward::silu(convolved).swap_dims(1, 2),
             invalid.as_ref(),
         );
         // Verified tiling of `[x | B | C]`: `0..I`, then two `G * N` slices.

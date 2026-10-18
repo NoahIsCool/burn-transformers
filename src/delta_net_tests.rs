@@ -2112,3 +2112,117 @@ fn cubecl_reshape_decisions_justify_the_trailing_unit_axis_workaround() {
         [batch * sequence * heads, strided[0], strided[1], strided[2]]
     );
 }
+
+/// SiLU inputs whose once-rounded and composed half-precision values differ.
+///
+/// In BF16, `SiLU(2.8125)` is `2.65625` rounded once and `2.640625` as
+/// Burn's `x * sigmoid(x)`; `-5.125` separates the two graphs in both BF16
+/// and F16 (F16 `2.8125` does not). `0.75` agrees in both graphs.
+const SILU_PROBES: [f32; 4] = [2.8125, -5.125, -5.75, 0.75];
+
+/// A one-head mixer whose state after one token from zero holds the post-convolution SiLU of every value channel.
+///
+/// The hidden token is `[32, x_1, .., x_n]` with `n = SILU_PROBES.len()`.
+/// Query and key heads are one channel wide, and the value head has `n + 1`
+/// channels. A 0/1 projection routes `32` to the query, the key, value
+/// channel 0, and the update gate `b`, and `x_i` to value channel `i`; `z`
+/// and `a` are zero, so every projected value is a single exact term. The
+/// width-one convolution's taps are one: the identity, with no history.
+/// After the convolution's SiLU the key is `SiLU(32) = 32` exactly in every
+/// dtype, which the L2 normalization maps to exactly one (`32^2 + 1e-6`
+/// rounds to `1024` in F32), and `beta = sigmoid(32)` rounds to one. The
+/// state after one token from zero is then `k^T (beta v) = v`, exact in the
+/// F32 state, with `v_0 = 32` as a check of both factors.
+fn silu_probe_mixer(dtype: DType) -> (GatedDeltaNetConfig, GatedDeltaNet<TestBackend>) {
+    use burn::module::Param;
+
+    let device = Default::default();
+    let values = SILU_PROBES.len() + 1;
+    let config = GatedDeltaNetConfig {
+        convolution_kernel: 1,
+        ..GatedDeltaNetConfig::new(values, 1, 1, 1, values)
+    };
+    let mut mixer = config.init::<TestBackend>(&device).unwrap();
+    let matrix = |data: Vec<f32>, shape: [usize; 2]| {
+        Param::from_tensor(
+            Tensor::<TestBackend, 2>::from_data(TensorData::new(data, shape), &device).cast(dtype),
+        )
+    };
+    // `[q | k | v_0..v_n]` from `[32, x_1..x_n]`.
+    let channels = values + 2;
+    let mut qkv = vec![0.0_f32; values * channels];
+    qkv[0] = 1.0;
+    qkv[1] = 1.0;
+    for value in 0..values {
+        qkv[value * channels + 2 + value] = 1.0;
+    }
+    mixer.in_proj_qkv.weight = matrix(qkv, [values, channels]);
+    mixer.in_proj_z.weight = matrix(vec![0.0; values * values], [values, values]);
+    let mut gate = vec![0.0_f32; values];
+    gate[0] = 1.0;
+    mixer.in_proj_b.weight = matrix(gate, [values, 1]);
+    mixer.in_proj_a.weight = matrix(vec![0.0; values], [values, 1]);
+    mixer.out_proj.weight = matrix(vec![0.0; values * values], [values, values]);
+    mixer.conv1d.weight =
+        Param::from_tensor(Tensor::<TestBackend, 3>::ones([channels, 1, 1], &device).cast(dtype));
+    mixer.a_log = Param::from_tensor(Tensor::zeros([1], &device));
+    (config, mixer)
+}
+
+/// The convolution's SiLU is the F32 SiLU rounded once in BF16 and F16, and Burn's graph bit for bit in F32.
+///
+/// Reads the post-convolution activation through the recurrent state of
+/// [`silu_probe_mixer`] in both modes. In half precision it must equal
+/// `feed_forward::silu`, PyTorch's `F.silu` convention, and differ from
+/// Burn's composed `activation::silu` on the probes that separate them;
+/// reverting the call site in `GatedDeltaNet::mix` to `activation::silu`
+/// fails it.
+#[test]
+fn convolution_silu_is_rounded_once_in_half_precision() {
+    let device = Default::default();
+    for dtype in [DType::BF16, DType::F16, DType::F32] {
+        let (config, mixer) = silu_probe_mixer(dtype);
+        let token = [[32.0_f32].as_slice(), &SILU_PROBES].concat();
+        let hidden = Tensor::<TestBackend, 3>::from_data(
+            TensorData::new(token.clone(), [1, 1, token.len()]),
+            &device,
+        )
+        .cast(dtype);
+        let probes =
+            Tensor::<TestBackend, 1>::from_data(TensorData::new(token, [5]), &device).cast(dtype);
+        let widen = |tensor: Tensor<TestBackend, 1>| {
+            tensor.cast(DType::F32).into_data().to_vec::<f32>().unwrap()
+        };
+        let once = widen(crate::feed_forward::silu(probes.clone()));
+        let composed = widen(burn::tensor::activation::silu(probes));
+        assert_eq!(once[0], 32.0);
+        for mode in [DeltaNetMode::Recurrent, DeltaNetMode::ChunkedPrefill] {
+            let mut state = GatedDeltaNetState::zeros(&config, 1, &device).unwrap();
+            mixer
+                .forward_with_state(hidden.clone(), None, &mut state, mode)
+                .unwrap();
+            let activation = state.recurrent.into_data().to_vec::<f32>().unwrap();
+            assert_eq!(
+                activation
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                once.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+                "{dtype:?} {mode:?}: post-convolution SiLU {activation:?}, once-rounded {once:?}"
+            );
+        }
+        if dtype == DType::F32 {
+            assert_eq!(once, composed, "F32 SiLU is Burn's own graph");
+        } else {
+            assert!(
+                once.iter()
+                    .zip(&composed)
+                    .any(|(once, composed)| once != composed),
+                "{dtype:?}: the probes no longer separate the two graphs"
+            );
+        }
+        if dtype == DType::BF16 {
+            assert_eq!((once[1], composed[1]), (2.656_25, 2.640_625));
+        }
+    }
+}

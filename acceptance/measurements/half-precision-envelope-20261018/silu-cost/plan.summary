@@ -1,0 +1,8 @@
+2026-10-18T03:51:18+00:00 lock acquired
+e2e-smollm-135m-flex-bf16.r1.base.half2.log: == exit=0 wall=398.0s end=2026-10-18T03:57:56+00:00 load_end 2.94 min_free_pct=88 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+e2e-smollm-135m-flex-bf16.r1.patched.half2.log: == exit=0 wall=404.1s end=2026-10-18T04:04:40+00:00 load_end 13.23 min_free_pct=88 max_swap_growth_mib=0 swapin_mib=1 pressured_swapin_mib=0
+e2e-smollm-135m-flex-bf16.r2.patched.half2.log: == exit=0 wall=411.0s end=2026-10-18T04:11:31+00:00 load_end 1.29 min_free_pct=88 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+e2e-smollm-135m-flex-bf16.r2.base.half2.log: == exit=0 wall=390.1s end=2026-10-18T04:18:02+00:00 load_end 1.43 min_free_pct=89 max_swap_growth_mib=0 swapin_mib=1 pressured_swapin_mib=0
+e2e-smollm-135m-flex-bf16.r3.base.half2.log: == exit=0 wall=391.2s end=2026-10-18T04:24:33+00:00 load_end 1.91 min_free_pct=89 max_swap_growth_mib=0 swapin_mib=3 pressured_swapin_mib=0
+e2e-smollm-135m-flex-bf16.r3.patched.half2.log: == exit=0 wall=391.2s end=2026-10-18T04:31:04+00:00 load_end 1.57 min_free_pct=89 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+2026-10-18T04:31:04+00:00 lock released

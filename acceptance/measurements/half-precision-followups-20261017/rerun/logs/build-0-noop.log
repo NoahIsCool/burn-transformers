@@ -1,0 +1,9 @@
+== source 818160545802c1374f7607d26ce20cc86d2d758d dirty=0
+== checkout /Users/nover/repos/transformers-worktrees/tfm-half-followups2 CARGO_TARGET_DIR=/Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates
+== start 2026-10-18T05:02:49+00:00
+== cmd cargo test --locked --release --features metal,tokenizers --test llama_family_artifacts --test gemma_artifacts --no-run
+    Finished `release` profile [optimized] target(s) in 0.64s
+  Executable tests/gemma_artifacts.rs (/Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/gemma_artifacts-7e9fb558e3797b0a)
+  Executable tests/llama_family_artifacts.rs (/Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/llama_family_artifacts-693e11c29d0eb894)
+== exit=0 end 2026-10-18T05:02:50+00:00
+== source after build 818160545802c1374f7607d26ce20cc86d2d758d dirty=0

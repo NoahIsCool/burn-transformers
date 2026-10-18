@@ -1,0 +1,46 @@
+== source patched: export /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/silu/repo of 7bd057ecc56d60df2776639befd30058720d3c09 (now commit=7bd057ecc56d60df2776639befd30058720d3c09 files=2733 dirty=6)
+== binary built from patch /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/silu/silu-measured-8ca626bf.patch sha256 8ca626bf919e334a38f195069628b60aedb585d453b6526257678c4bec13a1d4
+== binary /Volumes/bag of holding/cargo-targets/followups-silu/patched/release/deps/llama_family_artifacts-693e11c29d0eb894 sha256 97176ed9d2624ccfeaea4e41388491d6dc068bf623b170f94e7c50774e0df8bb
+== metal/f16 metal::metal_batched_prefill_matches_the_reference
+== env TRANSFORMERS_LLAMA_FAMILY_BF16_REFERENCE_DIR=/Volumes/T9/transformers-references/Qwen3-4B-531c80e2-bf16
+== env TRANSFORMERS_LLAMA_FAMILY_DIR=/Volumes/T9/models/Qwen/Qwen3-4B
+== env TRANSFORMERS_LLAMA_FAMILY_DTYPE=f16
+== env TRANSFORMERS_LLAMA_FAMILY_REFERENCE_DIR=/Volumes/T9/transformers-references/Qwen3-4B-531c80e2
+== cwd /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/silu/repo
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/followups-silu/patched/release/deps/llama_family_artifacts-693e11c29d0eb894 --ignored --exact --nocapture --test-threads 1 metal::metal_batched_prefill_matches_the_reference
+== start 2026-10-17T22:25:10+00:00 load 8.32 5.63 7.08
+
+running 1 test
+test metal::metal_batched_prefill_matches_the_reference ... F16 bounds of prompt 0: max 8.400341033935547e-1, mean 9.356504341905933e-2 (1.2 × official BF16 7.000284194946289e-1, 7.797086951588278e-2; /Volumes/T9/transformers-references/Qwen3-4B-531c80e2-bf16)
+F16 bounds of prompt 1: max 8.413138389587402e-1, mean 5.2039653755092376e-2 (1.2 × official BF16 7.010948657989502e-1, 4.336637812924365e-2; /Volumes/T9/transformers-references/Qwen3-4B-531c80e2-bf16)
+F16 bounds of prompt 2: max 1.0554290771484374e0, mean 6.461845336599158e-2 (1.2 × official BF16 8.795242309570313e-1, 5.3848711138326316e-2; /Volumes/T9/transformers-references/Qwen3-4B-531c80e2-bf16)
+F32 matrix products use F32 inputs; the F16 run is judged by the official calibration, greedy steps at 8.4003407e-1
+batched row 0: max |Δ| = 0e0 to the stateless pass (tolerance 5e-1)
+batched row 0: max |Δ| = 5.670738220214844e-2 to the reference (bound 8.400341033935547e-1)
+batched row 1: max |Δ| = 0e0 to the stateless pass (tolerance 5e-1)
+batched row 1: max |Δ| = 2.7817964553833008e-2 to the reference (bound 8.413138389587402e-1)
+batched row 2: max |Δ| = 0e0 to the stateless pass (tolerance 5e-1)
+batched row 2: max |Δ| = 1.77687406539917e-2 to the reference (bound 1.0554290771484374e0)
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 22 filtered out; finished in 4.94s
+
+        4.97 real         2.81 user         2.14 sys
+          4595662848  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              655048  page reclaims
+                  31  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   0  voluntary context switches
+               24262  involuntary context switches
+         66289469478  instructions retired
+         17802046458  cycles elapsed
+         11772792216  peak memory footprint
+== exit=0 wall=5.1s end=2026-10-17T22:25:15+00:00 load_end 7.73 min_free_pct=86 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0

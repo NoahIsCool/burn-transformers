@@ -1,0 +1,38 @@
+== source f9f78b5fc7cca9d1a8afaf29f8f9df04fe7c3008 (git archive export /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src)
+== binary /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/llama_family_artifacts-693e11c29d0eb894 sha256 72a204e1c37262448b47e772e980a72cba33fc8ae1618af1385ad521009db738 build A
+== flex/F32 flex_cached_greedy_matches_the_reference
+== env TRANSFORMERS_LLAMA_FAMILY_DECODE_TRUTH_DIR=/Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28-f32-cpu-eager
+== env TRANSFORMERS_LLAMA_FAMILY_DIR=/Volumes/T9/models/HuggingFaceTB/SmolLM3-3B
+== env TRANSFORMERS_LLAMA_FAMILY_REFERENCE_DIR=/Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28
+== env TRANSFORMERS_LLAMA_FAMILY_TOLERANCE=1e-3
+== cwd /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/llama_family_artifacts-693e11c29d0eb894 --ignored --exact --nocapture --test-threads 1 flex_cached_greedy_matches_the_reference
+== start 2026-10-18T01:00:27+00:00 load 13.02 34.17 30.82 free 88%
+
+running 1 test
+test flex_cached_greedy_matches_the_reference ... F32 matrix products use F32 inputs; tolerance 1e-3
+greedy: 32 of 32 greedy tokens decisive and matching (smallest decisive margin 1.0883331e-2), 0 ties skipped
+cached decode: 32 decode rows from position 5: max |Δ| = 2.231597900390625e-4 to the decode truth, at step 28 (tolerance 1e-3)
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 33 filtered out; finished in 10.62s
+
+       10.64 real        14.03 user         2.15 sys
+         14216265728  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              874586  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   0  voluntary context switches
+               57660  involuntary context switches
+        150335182790  instructions retired
+         56347075630  cycles elapsed
+         14213376656  peak memory footprint
+== exit=0 wall=11.2s min_free_pct=88 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0

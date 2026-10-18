@@ -1,0 +1,79 @@
+[
+ {
+  "name": "SmolLM-135M-1d461723",
+  "truth": "/Volumes/T9/transformers-references/SmolLM-135M-1d461723",
+  "decode_truth": "/Volumes/T9/transformers-references/SmolLM-135M-1d461723-f32-cpu-eager",
+  "graphs": [
+   "/Volumes/T9/transformers-references/SmolLM-135M-1d461723-bf16-cpu-eager-7a50e44",
+   "/Volumes/T9/transformers-references/SmolLM-135M-1d461723-bf16-cpu-sdpa-7a50e44",
+   "/Volumes/T9/transformers-references/SmolLM-135M-1d461723-bf16-mps-eager-7a50e44",
+   "/Volumes/T9/transformers-references/SmolLM-135M-1d461723-bf16-mps-sdpa-7a50e44"
+  ]
+ },
+ {
+  "name": "Qwen3-4B-531c80e2",
+  "truth": "/Volumes/T9/transformers-references/Qwen3-4B-531c80e2",
+  "decode_truth": "/Volumes/T9/transformers-references/Qwen3-4B-531c80e2-f32-cpu-eager",
+  "graphs": [
+   "/Volumes/T9/transformers-references/Qwen3-4B-531c80e2-bf16-cpu-eager-7a50e44",
+   "/Volumes/T9/transformers-references/Qwen3-4B-531c80e2-bf16-cpu-sdpa-7a50e44",
+   "/Volumes/T9/transformers-references/Qwen3-4B-531c80e2-bf16-mps-eager-7a50e44",
+   "/Volumes/T9/transformers-references/Qwen3-4B-531c80e2-bf16-mps-sdpa-7a50e44"
+  ]
+ },
+ {
+  "name": "SmolLM3-3B-1fa6fa28",
+  "truth": "/Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28",
+  "decode_truth": "/Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28-f32-cpu-eager",
+  "graphs": [
+   "/Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28-bf16-cpu-eager-7a50e44",
+   "/Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28-bf16-cpu-sdpa-7a50e44",
+   "/Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28-bf16-mps-eager-7a50e44",
+   "/Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28-bf16-mps-sdpa-7a50e44"
+  ]
+ },
+ {
+  "name": "Qwen2-7B-453ed157-f64",
+  "truth": "/Volumes/T9/transformers-references/Qwen2-7B-453ed157-f64",
+  "decode_truth": "/Volumes/T9/transformers-references/Qwen2-7B-453ed157-f64-cpu-eager",
+  "graphs": [
+   "/Volumes/T9/transformers-references/Qwen2-7B-453ed157-f64-bf16-cpu-eager-7a50e44",
+   "/Volumes/T9/transformers-references/Qwen2-7B-453ed157-f64-bf16-cpu-sdpa-7a50e44",
+   "/Volumes/T9/transformers-references/Qwen2-7B-453ed157-f64-bf16-mps-eager-7a50e44",
+   "/Volumes/T9/transformers-references/Qwen2-7B-453ed157-f64-bf16-mps-sdpa-7a50e44"
+  ]
+ },
+ {
+  "name": "Llama-3.1-8B-d04e592b",
+  "truth": "/Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b",
+  "decode_truth": "/Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b-f32-cpu-eager",
+  "graphs": [
+   "/Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b-bf16-cpu-eager-7a50e44",
+   "/Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b-bf16-cpu-sdpa-7a50e44",
+   "/Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b-bf16-mps-eager-7a50e44",
+   "/Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b-bf16-mps-sdpa-7a50e44"
+  ]
+ },
+ {
+  "name": "gemma-3-4b-it-093f9f38",
+  "truth": "/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38",
+  "decode_truth": "/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-f32-cpu-eager",
+  "graphs": [
+   "/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-bf16-cpu-eager-7a50e44",
+   "/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-bf16-cpu-sdpa-7a50e44",
+   "/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-bf16-mps-eager-7a50e44",
+   "/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-bf16-mps-sdpa-7a50e44"
+  ]
+ },
+ {
+  "name": "gemma-3-4b-it-093f9f38-long",
+  "truth": "/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long",
+  "decode_truth": "/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long-f32-cpu-eager",
+  "graphs": [
+   "/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long-bf16-cpu-eager-7a50e44",
+   "/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long-bf16-cpu-sdpa-7a50e44",
+   "/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long-bf16-mps-eager-7a50e44",
+   "/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long-bf16-mps-sdpa-7a50e44"
+  ]
+ }
+]

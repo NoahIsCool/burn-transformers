@@ -1,0 +1,27 @@
+== source 1e38eecf989a1ae568b67b2e9fcdd9b2ebdbadb8 with one mutation: scaled_scores multiplies by the dtype-rounded scale (Burn's tensor * scalar)
+== start 2026-10-18T06:58:51+00:00
+== cmd cargo test --locked --lib attention::dispatch::tests::half_precision_eager_attention_rounds_like_transformers_eager -- --exact
+== diff
+diff --git a/src/attention/dispatch.rs b/src/attention/dispatch.rs
+index 5820633..e28c6b3 100644
+--- a/src/attention/dispatch.rs
++++ b/src/attention/dispatch.rs
+@@ -359,7 +359,7 @@ pub(crate) fn scaled_scores<B: Backend>(
+     let [batch, query_heads, query_sequence, _] = query.dims();
+     let [_, key_value_heads, key_sequence, _] = key.dims();
+     let product = f32_accumulated_matmul(fold_groups(query, key_value_heads), key.swap_dims(2, 3));
+-    let scores = crate::feed_forward::evaluate_in_f32(product, |product| product * scale)
++    let scores = (product * scale)
+         .reshape([batch, query_heads, query_sequence, key_sequence]);
+     match softcap {
+         Some(softcap) => (scores / softcap).tanh() * softcap,
+== output
+running 1 test
+test attention::dispatch::tests::half_precision_eager_attention_rounds_like_transformers_eager ... FAILED
+thread 'attention::dispatch::tests::half_precision_eager_attention_rounds_like_transformers_eager' (41945824) panicked at src/attention/dispatch_tests.rs:1609:9:
+assertion `left == right` failed: F16 probabilities
+  left: 5
+ right: 0
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3530 filtered out; finished in 0.01s
+== exit=101 expected=failure
+== restored, git status: clean

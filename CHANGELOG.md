@@ -162,10 +162,17 @@ are collected in [MIGRATION.md](MIGRATION.md#upgrading-from-010).
   and `InvalidTensorName`, `QuantizedCheckpointOptions::unaligned`, and
   `BurnpackArtifactSummary::packed_execution`.
 - Tooling: `scripts/generate_causal_lm_reference.py` (local Transformers
-  references for any causal checkpoint, with `--dtype {float32,float64,bfloat16}`
-  and `--num-hidden-layers`; a `float64` reference measures this crate's
-  error alone when an F32 reference's own rounding is as large as the
-  tolerance, as for Qwen2-7B) and `scripts/generate_tiny_goldens.py`;
+  references for any causal checkpoint, with
+  `--dtype {float32,float64,bfloat16,float16}` and `--num-hidden-layers`; a
+  `float64` reference measures this crate's error alone when an F32
+  reference's own rounding is as large as the tolerance, as for Qwen2-7B;
+  `--device {cpu,mps}` and `--attn-implementation {eager,sdpa}` select the
+  official graph, `--decode-tokens-from` records cached and stateless decode
+  rows at a truth's greedy positions, `--prompt-decode` the official
+  quarter-prefill decode of the longest prompt, and non-finite results are
+  recorded as data), `scripts/derive_half_precision_envelope.py` (the
+  official-graph envelope and its leave-one-out slacks, from the bundles
+  alone), and `scripts/generate_tiny_goldens.py`;
   `scripts/generate_diffllama_reference.py` and
   `scripts/generate_tokenization_goldens.py` regenerate and check the pinned
   DiffLlama and tokenizer and chat-template goldens.
@@ -418,6 +425,34 @@ code written against unreleased sources.
   `gelu_pytorch_tanh`) does. Burn's composed graph rounded every operation and
   both constants to the activation dtype (BF16 `GeluTanh(-2)` was `-0.046875`
   instead of `-0.0454`). F32 and F64 evaluation is unchanged.
+- SiLU on F16 and BF16 inputs is evaluated in F32 and rounded once, as
+  PyTorch's `silu` (Transformers' `SiLUActivation`) does: in dense and gated
+  MLPs, routed and shared experts, the SiLU attention output gate, and the
+  Gated DeltaNet and Mamba-2 convolutions. Burn's `x * sigmoid(x)` rounded the
+  sigmoid to the activation dtype before the product (BF16 `SiLU(2.8125)` was
+  `2.640625` instead of `2.65625`). F32 and F64 evaluation is unchanged, and
+  the clamped SwiGLU keeps gpt-oss's operation-by-operation graph.
+- Attention: the eager graph (`AttentionPrecisionMode::EagerFp32Softmax`)
+  multiplies F16 and BF16 `Q K^T` by the unrounded score scale in F32 and
+  rounds once, as Transformers' eager `torch.matmul(query, key.T) * scaling`
+  does with a Python float. Burn's `tensor * scalar` rounded the scale to the
+  activation dtype first, which for `1 / sqrt(128)` moved 2.4% of BF16 and
+  15.5% of F16 scores by one unit in the last place. The eager graph is
+  Muse-Glimmer's default in F16 and BF16, whose 128-wide heads make this a
+  change of its default half-precision numerics; the default of GPT-2 and
+  GPT-NeoX, where it is a no-op wherever the head width makes the scale a
+  power of two (GPT-2's 64-wide heads give `1/8`); and the graph of every
+  score or pattern hook. F32 and F64 are unchanged, and so is the fused path,
+  which every other family uses by default.
+- Attention: on Flex, the eager graph's two F16 matrix products (`Q K^T` and
+  probabilities times values) are summed in F32 and rounded once, as
+  `torch.matmul` sums half-precision operands on the CPU and MPS. Burn Flex
+  0.21's F16 GEMM keeps F16 partial sums, so on the operation-level eager test
+  10 of 120 probabilities and 45 of 96 outputs differed from Transformers'
+  `eager_attention_forward`; the eager graph now matches it bit for bit there
+  in BF16 and F16 on every row with a visible key. Flex's BF16 products and
+  Metal's F16 products already were F32 sums rounded once (a new ignored
+  Metal test pins the latter) and are unchanged, so no gate profile changes.
 - Modular models: sinks with a soft cap are rejected at the spec field;
   sliding windows in encoder stacks are rejected; earlier block records still
   load; range contexts are validated once.
@@ -664,6 +699,91 @@ earlier row-by-row or per-chunk algorithm, which each test keeps as an oracle.
   record traces to the calibration rule's width, the decode tolerance, and
   the twice-rounded half-precision SiLU, remain open; no bound was changed
   and no checkpoint is promoted.
+- The Llama-family and Gemma half-precision gates are now judged against the
+  envelope of the four official graphs that Transformers 5.2.0 runs in the
+  run's dtype on this host (CPU and MPS, eager and SDPA attention), read at
+  run time from `TRANSFORMERS_LLAMA_FAMILY_OFFICIAL_DIRS`,
+  `TRANSFORMERS_GEMMA_OFFICIAL_DIRS`, and
+  `TRANSFORMERS_GEMMA_LONG_OFFICIAL_DIRS`, instead of `1.2` times the CPU-eager
+  BF16 twin, which Transformers' own other BF16 graphs failed on 5 of 7
+  bundles. A run passes a prompt when its maximum and mean deviation from the
+  F32 (F64) truth stay within `s_max` and `s_mean` times the largest official
+  ones; the slacks are the official graphs' pooled leave-one-out maxima,
+  rounded up (BF16 `1.5`/`1.3`, F16 `1.7`/`1.7`), derived by
+  `scripts/derive_half_precision_envelope.py` and re-derived, never tuned,
+  when its inputs change. F16 runs are calibrated on the official F16 graphs
+  instead of reusing the BF16 bounds; a truth whose official graph is
+  non-finite in the run's dtype (Qwen2-7B and gemma-3-4b-it in F16) fails as
+  uncalibrated. Decode steps are judged by truth-anchored rows: the cached and
+  stateless decode rows must each meet the official graphs' decode envelope
+  against an F32 (F64) CPU-eager decode truth
+  (`TRANSFORMERS_*_DECODE_TRUTH_DIR`), which F32 runs also check at their
+  tolerance, and the quarter-prefill decoded prompt is judged against the
+  official graphs' own cached decode. The `0.5` self-consistency tolerance
+  remains only, as provisional, for cached prefills, batched rows, and chunk
+  ends. Pairing fails closed on graph identity, generator script, decode
+  rows, and the decode truth's digests; the retired single-bundle variables
+  are refused. A Gemma `TRANSFORMERS_GEMMA_DTYPE=f16` run reads the official
+  F16 graphs (`TRANSFORMERS_GEMMA_F16_OFFICIAL_DIRS` and
+  `_LONG_F16_OFFICIAL_DIRS`) and fails as uncalibrated before loading, because
+  all of them overflow; Metal is qualified in F32 for Gemma. A gate-level
+  refusal of `f16`, which anticipated the maintainer's unconfirmed decision
+  (d), was withdrawn.
+- Operation-level tests pin the half-precision rounding points of SiLU, tanh
+  GELU, the sigmoid output gate (every finite F16 and BF16 input), RMSNorm in
+  both conventions, RoPE, and the eager and fused attention scores to the
+  references, and pin three Burn deviations as findings: Flex's F32-to-BF16
+  cast ignores the three lowest F32 bits, Flex's F16 matmul keeps F16 partial
+  sums, and tanh GELU overflows for BF16 inputs of at least `2^127`.
+- The once-rounded SiLU is pinned at the Mamba-2 and Gated DeltaNet
+  convolution sites themselves, not only in the shared helper: each mixer is
+  built so that its F32 recurrent state after one token holds the
+  post-convolution activation exactly (an identity convolution and exact
+  unit factors), which must equal the F32 SiLU rounded once in BF16 and F16
+  (BF16 `SiLU(2.8125) = 2.65625`, not the composed `2.640625`) and Burn's
+  graph bit for bit in F32, in both scan modes. Reverting either call site to
+  `activation::silu` fails its test.
+- An official-envelope round records the 57 official BF16 and F16 bundles
+  that the envelope rule reads, the derivation of its slacks, and the Burn
+  runs at `f9f78b5`, each in its own process with its log, checked by
+  `scripts/tests/test_half_precision_envelope_record.py`
+  ([record](acceptance/measurements/half-precision-envelope-20261018.json)).
+  Every Llama-family and Gemma gate in F32 and Flex/BF16 passes, and every
+  Metal/F16 gate of the four F16-calibrated Llama-family checkpoints; Qwen2-7B
+  in F16 is uncalibrated. Qwen3.5-0.8B's parity and memory gates pass
+  again, as do the larger checkpoints' official gates, smokes, and audits and
+  the Qwen3.8-27B Q8/Q4 conversions, except the Nemotron-H official-precision
+  gate, whose cached row at decision 22 falls below its official F16 floor
+  (`0.998558` against `0.998635`) with the once-rounded Mamba-2 convolution
+  SiLU; a control reverting only that site passes. Qwen3.5-0.8B's benchmarks
+  keep their tokens and every warm median, but their single-sample cold
+  first token breaches the approved September 10 baseline, in the pre-change
+  binary too: not attributable to this branch; the breach of the approved
+  baseline awaits the maintainer (review record below). No bound was changed
+  and no checkpoint is promoted.
+- A half-precision follow-ups record holds the round's decisions verbatim,
+  with their rationale and review flags. It also records a rerun of every
+  Llama-family and Gemma gate at the integrated head `8181605`: 106 processes
+  in the worktree, from rebuilt binaries byte-identical to the `f9f78b5` gate
+  binaries, checked by `scripts/tests/test_half_precision_followups_record.py`
+  ([record](acceptance/measurements/half-precision-followups-20261017.json)).
+  94 pass, and 12 fail as expected: Qwen2-7B's uncalibrated F16 runs, the
+  Gemma Metal/F16 refusals, and Metal BF16's load error on Burn 0.21. Every run
+  that also ran at `f9f78b5` reproduces its output exactly, and every F32 gate
+  repeats the pre-SiLU round's printed statistics. The Nemotron-H
+  official-precision failure was not rerun and stands. No checkpoint is
+  promoted.
+- A half-precision review record holds the review round at `1e38eec`: the
+  eager-attention and convolution-SiLU tests, seven failing mutations, the
+  torch 2.10.0 probe, and 33 single-process runs (every gemma-3-4b-it gate,
+  reproducing `8181605` exactly where it ran there, the Gemma Metal/F16 runs
+  failing as uncalibrated, and the operation-level tests on Flex and Metal),
+  checked by `scripts/tests/test_half_precision_review_record.py`
+  ([record](acceptance/measurements/half-precision-review-20261018.json)).
+  It records the Qwen3.5-0.8B cold-first-token breach of the approved
+  baseline for the maintainer and corrects the envelope record's benchmark
+  verdict and its claim that no real-checkpoint gate selects the eager graph
+  (Muse-Glimmer's does). No checkpoint is promoted.
 - The configuration fuzz target covers all eleven family parsers without
   count filters, and the modular-spec generator draws clamped experts,
   embedding scales, and logit caps.

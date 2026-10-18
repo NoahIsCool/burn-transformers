@@ -1,0 +1,36 @@
+== source f9f78b5fc7cca9d1a8afaf29f8f9df04fe7c3008 (git archive export /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src)
+== binary /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/local_artifacts-2ce2a5ca8495b149 sha256 055ecc55988b8b8f7411da6302e1c4be5ee2b74d126de428d4c23cffa19b6ed2 build B
+== metal/F16 loads_pinned_qwen35_weights_and_runs_metal_inference
+== env TRANSFORMERS_QWEN35_DIR=/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17
+== env TRANSFORMERS_QWEN35_REFERENCE_DIR=/Volumes/bag of holding/models/transformers-acceptance
+== cwd /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/local_artifacts-2ce2a5ca8495b149 --ignored --exact --nocapture --test-threads 1 loads_pinned_qwen35_weights_and_runs_metal_inference
+== start 2026-10-18T01:18:40+00:00 load 5.78 5.94 12.69 free 90%
+
+running 1 test
+test loads_pinned_qwen35_weights_and_runs_metal_inference ... official full-vocabulary prompt-logit cosine similarity: 0.999998486
+minimum cached/official full-vocabulary cosine similarity: 0.999995622
+minimum teacher-forced/official full-vocabulary cosine similarity: 0.999997690
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 25 filtered out; finished in 13.88s
+
+       14.31 real        10.88 user         1.69 sys
+          2591113216  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              219809  page reclaims
+                 102  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                  21  voluntary context switches
+               72721  involuntary context switches
+        142222182178  instructions retired
+         44673483348  cycles elapsed
+          3530934576  peak memory footprint
+== exit=0 wall=15.2s min_free_pct=89 max_swap_growth_mib=0 swapin_mib=2 pressured_swapin_mib=0

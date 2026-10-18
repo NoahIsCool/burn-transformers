@@ -1,0 +1,5 @@
+== source 1e38eecf989a1ae568b67b2e9fcdd9b2ebdbadb8 dirty=0
+== cmd cargo clippy --locked --all-targets --all-features -- -D warnings
+    Checking transformers v0.1.0 (/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/review3/validate-git)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 36.69s
+== exit=0

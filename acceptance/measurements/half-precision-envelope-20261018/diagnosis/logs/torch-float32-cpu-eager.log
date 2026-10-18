@@ -1,0 +1,27 @@
+== script /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/diag/torch_blocks.py sha256 da1a28f0a3445bf6fdf34b8841e3437e42608f207f0bdc39542144566eabf0c6
+== generator /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/diag/../gates/src/scripts/generate_causal_lm_reference.py sha256 a4ed0db48e9b4e6c816bf23c25f56cf39498d06165af49a0655c841d1b56a602 (load_causal_lm)
+== torch 2.10.0, transformers 5.2.0 (system python3)
+== Qwen2-7B per-block diagnosis: float32 cpu eager, the truth's three prompts
+== cwd /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/diag
+== cmd /usr/bin/time -l python3 -I /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/diag/torch_blocks.py /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/diag/../gates/src/scripts/generate_causal_lm_reference.py /Volumes/T9/models/Qwen/Qwen2-7B /Volumes/T9/transformers-references/Qwen2-7B-453ed157-f64/reference.json float32 cpu eager /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/diag/data/torch-float32-cpu-eager.npz
+== start 2026-10-18T03:29:00+00:00 load 1.57 1.87 2.68
+float32 cpu eager: 3 prompts, 28 blocks, 675 arrays -> /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/diag/data/torch-float32-cpu-eager.npz
+        8.48 real        10.74 user        10.43 sys
+         46015578112  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             2847478  page reclaims
+                3421  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                5465  voluntary context switches
+               32135  involuntary context switches
+        125378500796  instructions retired
+         72443097682  cycles elapsed
+         30809545648  peak memory footprint
+== exit=0 wall=9.2s end=2026-10-18T03:29:09+00:00 load_end 3.49 min_free_pct=90 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0

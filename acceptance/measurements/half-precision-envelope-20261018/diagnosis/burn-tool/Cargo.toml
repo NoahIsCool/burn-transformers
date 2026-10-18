@@ -1,0 +1,15 @@
+[package]
+name = "half2-diag"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "block-dump"
+path = "src/main.rs"
+
+[dependencies]
+transformers = { path = "../../gates/src", default-features = false, features = ["std", "metal"] }
+burn = { version = "=0.21.0", default-features = false }
+
+[workspace]

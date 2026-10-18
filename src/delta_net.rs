@@ -30,10 +30,17 @@
 //! state, where it is cheaper.
 //!
 //! The projected [`GatedDeltaNet`] mixer adds a depthwise causal convolution
-//! before the rule and a gated RMS normalization after it. Padding (a `false`
-//! token mask) is removed from both: padded tokens neither update the matrix
-//! state nor occupy convolution taps or history, so a padded row produces the
-//! same valid outputs and state as its compacted, unpadded form.
+//! followed by SiLU before the rule and a gated RMS normalization after it.
+//! For F16 and BF16 activations that SiLU is evaluated in F32 and rounded
+//! once, as the reference's PyTorch path (`F.silu` of the rounded
+//! convolution) is, rather than rounding the sigmoid before the product. (The
+//! optional fused CUDA kernel also keeps the convolution sum in F32 before
+//! the SiLU; that is not reproduced.) The norm's SiLU gate is F32 throughout.
+//!
+//! Padding (a `false` token mask) is removed from both the convolution and
+//! the rule: padded tokens neither update the matrix state nor occupy
+//! convolution taps or history, so a padded row produces the same valid
+//! outputs and state as its compacted, unpadded form.
 //!
 //! The integer planning behind both paths (chunk width and count, padding,
 //! balanced chunk blocks, the doubling-inverse levels, projection widths and
@@ -657,7 +664,8 @@ impl<B: Backend> GatedDeltaNet<B> {
                 self.convolution_kernel - 1,
             )
         });
-        let mixed = activation::silu(convolution.output).swap_dims(1, 2);
+        // SiLU rounded once in F16/BF16, as the reference's `F.silu` is.
+        let mixed = crate::feed_forward::silu(convolution.output).swap_dims(1, 2);
         // Verified tiling of the convolved channels: queries `0..K`, keys
         // `K..2K`, values `2K..2K + V`; a validated configuration's channel
         // count fits, which is the precondition.

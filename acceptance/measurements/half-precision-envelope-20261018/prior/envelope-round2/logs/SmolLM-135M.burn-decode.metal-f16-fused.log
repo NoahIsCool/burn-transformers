@@ -1,0 +1,24 @@
+== source 53f167b9f18c201e4392c708133b988198f12116 (burn-dump binary of the previous round)
+== binary /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/burn-dump sha256 27f3218694e6182f9304f5fc14c861592789bb1c3bd0347e06c21c6c630b3595
+== start 2026-10-17T22:33:36Z
+== cmd /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/burn-dump metal f16 /Volumes/bag of holding/models/HuggingFaceTB/SmolLM-135M-1d461723eec654e65efdc40cf49301c89c0c92f4 <prompt0+greedy> /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/envelope/round2/data/SmolLM-135M-burn-decode/metal-f16-fused fused 5
+wrote 32 points for 37 tokens (eager=false, prefill=5) to /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/envelope/round2/data/SmolLM-135M-burn-decode/metal-f16-fused
+       11.26 real         2.12 user         9.54 sys
+           429555712  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+               39960  page reclaims
+                 663  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                  80  voluntary context switches
+               62503  involuntary context switches
+        168356995807  instructions retired
+         42268900089  cycles elapsed
+           865764504  peak memory footprint
+== exit=0 end 2026-10-17T22:33:48Z

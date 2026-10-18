@@ -1,0 +1,14 @@
+2026-10-18T02:52:31+00:00 lock acquired
+r1.base.baseline.log: == exit=0 wall=245.5s end=2026-10-18T02:56:37+00:00 load_end 7.34 min_free_pct=86 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+r1.base.public.log: == exit=0 wall=29.4s end=2026-10-18T02:57:06+00:00 load_end 5.14 min_free_pct=87 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+r1.head.baseline.log: == exit=0 wall=241.0s end=2026-10-18T03:01:07+00:00 load_end 9.41 min_free_pct=87 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+r1.head.public.log: == exit=0 wall=29.5s end=2026-10-18T03:01:36+00:00 load_end 6.64 min_free_pct=87 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+r2.head.baseline.log: == exit=0 wall=210.2s end=2026-10-18T03:05:07+00:00 load_end 3.66 min_free_pct=87 max_swap_growth_mib=0 swapin_mib=1 pressured_swapin_mib=0
+r2.head.public.log: == exit=0 wall=29.4s end=2026-10-18T03:05:36+00:00 load_end 2.74 min_free_pct=87 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+r2.base.baseline.log: == exit=0 wall=206.1s end=2026-10-18T03:09:02+00:00 load_end 2.56 min_free_pct=87 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+r2.base.public.log: == exit=0 wall=29.4s end=2026-10-18T03:09:32+00:00 load_end 2.65 min_free_pct=87 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+r3.base.baseline.log: == exit=0 wall=207.1s end=2026-10-18T03:12:59+00:00 load_end 2.40 min_free_pct=87 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+r3.base.public.log: == exit=0 wall=29.5s end=2026-10-18T03:13:28+00:00 load_end 2.11 min_free_pct=87 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+r3.head.baseline.log: == exit=0 wall=207.0s end=2026-10-18T03:16:55+00:00 load_end 2.00 min_free_pct=87 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+r3.head.public.log: == exit=0 wall=29.5s end=2026-10-18T03:17:25+00:00 load_end 1.63 min_free_pct=87 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+2026-10-18T03:17:25+00:00 lock released

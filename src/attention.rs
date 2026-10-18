@@ -58,10 +58,7 @@ use burn::{
     module::{Initializer, Module, Param},
     nn::{Linear, LinearConfig, LinearLayout},
     tensor::{
-        Bool, DType, Tensor,
-        activation::{sigmoid, silu},
-        backend::Backend,
-        ops::AttentionModuleOptions,
+        Bool, DType, Tensor, activation::sigmoid, backend::Backend, ops::AttentionModuleOptions,
     },
 };
 
@@ -936,7 +933,9 @@ impl<B: Backend> GroupedQueryAttention<B> {
 ///
 /// `Sigmoid` computes `context * sigmoid(gate)` and `Silu` computes
 /// `context * gate * sigmoid(gate)`; the gate must be present exactly when a
-/// gating convention is configured.
+/// gating convention is configured. In F16 and BF16 the SiLU is evaluated in
+/// F32 and rounded once (`feed_forward::silu`, PyTorch's `silu` convention)
+/// before the product with the context.
 fn apply_output_gate<B: Backend>(
     context: Tensor<B, 3>,
     gate: Option<Tensor<B, 3>>,
@@ -945,7 +944,7 @@ fn apply_output_gate<B: Backend>(
     match (kind, gate) {
         (AttentionOutputGate::None, None) => Ok(context),
         (AttentionOutputGate::Sigmoid, Some(gate)) => Ok(context * sigmoid(gate)),
-        (AttentionOutputGate::Silu, Some(gate)) => Ok(context * silu(gate)),
+        (AttentionOutputGate::Silu, Some(gate)) => Ok(context * crate::feed_forward::silu(gate)),
         _ => Err(Error::shape(
             "attention.gate",
             format!("a gate matching {kind:?}"),

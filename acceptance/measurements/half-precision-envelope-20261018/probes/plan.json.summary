@@ -1,0 +1,3 @@
+2026-10-18T03:25:34+00:00 lock acquired
+probe_metal_overflow.log: == exit=0 wall=1.0s end=2026-10-18T03:25:35+00:00 load_end 1.80 min_free_pct=90 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+2026-10-18T03:25:35+00:00 lock released

@@ -1581,3 +1581,118 @@ fn depthwise_column_timing() {
         }
     }
 }
+
+/// Pins a Burn Flex 0.21 deviation: F16 matrix products accumulate in F16, while BF16 ones are F32 sums rounded once.
+///
+/// PyTorch's CPU and MPS matrix products accumulate F16 and BF16 operands in
+/// F32 and round the result once, and so does Burn on Metal and, for BF16
+/// (which it widens to F32 operands), on Flex. Flex's F16 GEMM reads the F16
+/// operands directly and keeps F16 partial sums: one plus 4096 terms of
+/// `2^-11`, exactly `3`, loses terms at half a unit of F16. This only
+/// concerns F16 on Flex, which no gate profile uses (Flex's half-precision
+/// profile is BF16); the test fails once Burn accumulates in F32 there.
+#[test]
+fn flex_f16_matmul_keeps_f16_partial_sums() {
+    let device = Default::default();
+    let count = 4097;
+    let mut left = vec![2.0_f32.powi(-11); count];
+    left[0] = 1.0;
+    let right = vec![1.0_f32; count];
+    for (dtype, expect_exact) in [(DType::BF16, true), (DType::F16, false), (DType::F32, true)] {
+        let product =
+            Tensor::<Flex, 2>::from_data(TensorData::new(left.clone(), [1, count]), &device)
+                .cast(dtype)
+                .matmul(
+                    Tensor::<Flex, 2>::from_data(
+                        TensorData::new(right.clone(), [count, 1]),
+                        &device,
+                    )
+                    .cast(dtype),
+                )
+                .cast(DType::F32)
+                .into_data()
+                .to_vec::<f32>()
+                .unwrap()[0];
+        // BF16 rounds 2^-11 terms to themselves too: 1 + 4096 * 2^-11 = 3 exactly.
+        assert_eq!(product == 3.0, expect_exact, "{dtype:?} product {product}");
+    }
+}
+
+/// Pins Burn Metal 0.21's F16 matrix products: an F32 sum rounded once, unlike Flex's F16 partial sums.
+///
+/// The counterpart of [`flex_f16_matmul_keeps_f16_partial_sums`]. One plus
+/// 4096 terms of `2^-11` is exactly `3` only if partial sums keep more than
+/// F16's eleven significand bits. A `[16, 256] x [256, 16]` product of
+/// multiples of `1/64` in `[-1, 1]` has exact sums that are multiples of
+/// `2^-12` below `256` in magnitude, 21 bits that F32 holds exactly, so every
+/// element must be the exact sum rounded once to F16 (round to nearest even,
+/// as `half::f16::from_f64` rounds), whatever the summation order. The eager
+/// attention graph relies on this to keep Metal's own F16 products
+/// (`attention::dispatch::f32_accumulated_matmul`). Run serially on a Metal
+/// host with `cargo test --release --features metal --lib
+/// operations::tests::metal_f16_matmul_is_an_f32_sum_rounded_once -- --ignored
+/// --exact --nocapture --test-threads=1`.
+#[cfg(all(
+    feature = "metal",
+    not(any(feature = "rocm", feature = "attention-kernel-tracing"))
+))]
+#[test]
+#[ignore = "requires a Metal-capable macOS host"]
+fn metal_f16_matmul_is_an_f32_sum_rounded_once() {
+    use burn::backend::Metal;
+    use burn::tensor::f16;
+
+    let device = Default::default();
+    let count = 4097;
+    let mut left = vec![2.0_f32.powi(-11); count];
+    left[0] = 1.0;
+    let long = Tensor::<Metal, 2>::from_data(TensorData::new(left, [1, count]), &device)
+        .cast(DType::F16)
+        .matmul(Tensor::<Metal, 2>::ones([count, 1], &device).cast(DType::F16))
+        .cast(DType::F32)
+        .into_data()
+        .to_vec::<f32>()
+        .unwrap()[0];
+    eprintln!("Metal F16 1 + 4096 * 2^-11 = {long}");
+    assert_eq!(long, 3.0, "Metal F16 partial sums lost terms");
+
+    let (rows, depth, columns) = (16, 256, 16);
+    let grid = |count: usize, seed: usize| {
+        (0..count)
+            .map(|index| (((index * 37 + seed * 11) % 129) as f32 - 64.0) / 64.0)
+            .collect::<Vec<_>>()
+    };
+    let (lhs, rhs) = (grid(rows * depth, 1), grid(depth * columns, 2));
+    let expected = (0..rows * columns)
+        .map(|index| {
+            let (row, column) = (index / columns, index % columns);
+            let sum = (0..depth)
+                .map(|inner| {
+                    f64::from(lhs[row * depth + inner]) * f64::from(rhs[inner * columns + column])
+                })
+                .sum::<f64>();
+            assert_eq!(f64::from(sum as f32), sum, "{sum} is not exact in F32");
+            f16::from_f64(sum).to_f32()
+        })
+        .collect::<Vec<_>>();
+    let actual = Tensor::<Metal, 2>::from_data(TensorData::new(lhs, [rows, depth]), &device)
+        .cast(DType::F16)
+        .matmul(
+            Tensor::<Metal, 2>::from_data(TensorData::new(rhs, [depth, columns]), &device)
+                .cast(DType::F16),
+        )
+        .cast(DType::F32)
+        .into_data()
+        .to_vec::<f32>()
+        .unwrap();
+    let differing = actual
+        .iter()
+        .zip(&expected)
+        .filter(|(actual, expected)| actual.to_bits() != expected.to_bits())
+        .count();
+    eprintln!(
+        "Metal F16 [{rows}, {depth}] x [{depth}, {columns}]: {differing} of {} differ from the exact sum rounded once",
+        actual.len()
+    );
+    assert_eq!(differing, 0);
+}

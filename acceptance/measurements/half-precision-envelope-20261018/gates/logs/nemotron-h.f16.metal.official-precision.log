@@ -1,0 +1,43 @@
+== source f9f78b5fc7cca9d1a8afaf29f8f9df04fe7c3008 (git archive export /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src)
+== binary /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/nemotron_h_artifacts-4cd54efee0f15525 sha256 651e75ca83bfa0bd1d6f5298f9a439fabfc5d502ff54441baefd545fe4ae2692 build B
+== metal/F16 compares_pinned_nemotron_f16_with_official_base_reference
+== env TRANSFORMERS_NEMOTRON_H_DIR=/Volumes/bag of holding/models/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16-a9904d24bcc1d289a1950fa9d2b978c47cf903b9
+== env TRANSFORMERS_NEMOTRON_H_PRECISION_DIR=/Volumes/bag of holding/models/transformers-acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24-precision.bundle
+== env TRANSFORMERS_NEMOTRON_H_REFERENCE_DIR=/Volumes/bag of holding/models/transformers-acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24-reference.bundle
+== cwd /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/nemotron_h_artifacts-4cd54efee0f15525 --ignored --exact --nocapture --test-threads 1 compares_pinned_nemotron_f16_with_official_base_reference
+== start 2026-10-18T02:41:34+00:00 load 3.50 3.40 4.23 free 55%
+
+running 1 test
+test compares_pinned_nemotron_f16_with_official_base_reference ... 
+thread 'compares_pinned_nemotron_f16_with_official_base_reference' (41122876) panicked at tests/support/nemotron_h_parity.rs:323:5:
+Nemotron recurrent cached row cosine 0.9985579844887273 against the F32 truth is below the official F16 floor 0.9986350472017235 at decision 22
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    compares_pinned_nemotron_f16_with_official_base_reference
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 41 filtered out; finished in 291.30s
+
+      291.34 real       165.02 user        48.41 sys
+          4097851392  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             4204711  page reclaims
+                 104  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                 261  voluntary context switches
+             1794279  involuntary context switches
+       2628337676082  instructions retired
+        766905146319  cycles elapsed
+         69185194864  peak memory footprint
+== exit=101 wall=292.0s min_free_pct=43 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0

@@ -1,0 +1,46 @@
+== source f9f78b5fc7cca9d1a8afaf29f8f9df04fe7c3008 (git archive export /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src)
+== binary /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/llama_family_artifacts-693e11c29d0eb894 sha256 72a204e1c37262448b47e772e980a72cba33fc8ae1618af1385ad521009db738 build A
+== metal/F16 metal::metal_cached_greedy_matches_the_reference
+== env TRANSFORMERS_LLAMA_FAMILY_DECODE_TRUTH_DIR=/Volumes/T9/transformers-references/Qwen2-7B-453ed157-f64-cpu-eager
+== env TRANSFORMERS_LLAMA_FAMILY_DIR=/Volumes/T9/models/Qwen/Qwen2-7B
+== env TRANSFORMERS_LLAMA_FAMILY_DTYPE=f16
+== env TRANSFORMERS_LLAMA_FAMILY_MIN_GREEDY=0
+== env TRANSFORMERS_LLAMA_FAMILY_OFFICIAL_DIRS=/Volumes/T9/transformers-references/Qwen2-7B-453ed157-f64-f16-cpu-eager-7a50e44:/Volumes/T9/transformers-references/Qwen2-7B-453ed157-f64-f16-cpu-sdpa-7a50e44:/Volumes/T9/transformers-references/Qwen2-7B-453ed157-f64-f16-mps-eager-7a50e44:/Volumes/T9/transformers-references/Qwen2-7B-453ed157-f64-f16-mps-sdpa-7a50e44
+== env TRANSFORMERS_LLAMA_FAMILY_REFERENCE_DIR=/Volumes/T9/transformers-references/Qwen2-7B-453ed157-f64
+== cwd /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/llama_family_artifacts-693e11c29d0eb894 --ignored --exact --nocapture --test-threads 1 metal::metal_cached_greedy_matches_the_reference
+== start 2026-10-18T01:08:56+00:00 load 9.26 13.02 20.48 free 89%
+
+running 1 test
+test metal::metal_cached_greedy_matches_the_reference ... 
+thread 'metal::metal_cached_greedy_matches_the_reference' (40684739) panicked at tests/support/half_precision_calibration.rs:1642:5:
+uncalibrated: official cpu-eager float16 non-finite at prompt 0 position 1; a checkpoint whose official evaluation overflows in this dtype has no envelope, so the run fails
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    metal::metal_cached_greedy_matches_the_reference
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 33 filtered out; finished in 0.04s
+
+        0.04 real         0.01 user         0.01 sys
+            40976384  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                2840  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   0  voluntary context switches
+                 150  involuntary context switches
+           272204777  instructions retired
+           134044547  cycles elapsed
+           175309592  peak memory footprint
+== exit=101 wall=1.0s min_free_pct=89 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0

@@ -1,0 +1,65 @@
+== step probe-burn022
+== start 2026-10-17T22:41:17Z load (53.03125, 26.9765625, 14.75048828125)
+== env {}
+== cmd ['/Volumes/bag of holding/cargo-targets/followups-gemma-burn022/release/burn022-metal-bf16-probe']
+PROBE declared BF16: supports_dtype=true
+PROBE declared F16: supports_dtype=true
+PROBE declared F32: supports_dtype=true
+PROBE F16 create+readback: tensor.dtype()=F16 readback dtype F16; max |diff| 0.000e0
+PROBE F16 cast from F32 (RNE ties, extremes): out dtype F16; mismatches vs host RNE: []
+PROBE F16 cast to F32 (exact widening): out dtype F32; max |diff| 0.000e0
+PROBE F16 cast to the other half type: out dtype BF16; max |diff| 0.000e0
+PROBE F16 add: out dtype F16; max |err| vs once-rounded sum 0.000e0
+PROBE F16 mul: out dtype F16; max |err| vs once-rounded product 0.000e0
+PROBE F16 exp: out dtype F16; max |err| 1.550e-2; worst err/(u*|exact|) 0.98
+PROBE F16 tanh: out dtype F16; max |err| 2.440e-4; worst err/(u*|exact|) 0.97
+PROBE F16 sigmoid: out dtype F16; max |err| 2.440e-4; worst err/(u*|exact|) 0.99
+PROBE F16 sqrt: out dtype F16; max |err| 4.882e-4; worst err/(u*|exact|) 1.00
+PROBE F16 cos: out dtype F16; max |err| 2.440e-4; worst err/(u*|exact|) 0.98
+PROBE F16 softmax [8,1031] dim 1: out dtype F16; max |err| 1.075e-5 (largest prob 1.698e-2); worst |row sum - 1| 4.396e-4
+PROBE F16 reductions sum/max/argmax: row0: sum err/(u*sum|x|) 0.007 max exact true argmax true; row1: sum err/(u*sum|x|) 0.055 max exact true argmax true; row2: sum err/(u*sum|x|) 0.021 max exact true argmax true; row3: sum err/(u*sum|x|) 0.011 max exact true argmax true
+PROBE F16 select rows (embedding gather): out dtype F16; max |diff| 0.000e0
+PROBE F16 swap_dims+reshape copy, cat, mask_fill: out dtype F16; swap max |diff| 0.000e0; cat exact true; mask_fill exact true
+PROBE F16 matmul [1,64]x[64,32]: out dtype F16; max |err| 9.355e-4; worst err/(u*sum|a||b|) 0.118; non-finite 0
+PROBE F16 matmul [7,2560]x[2560,257]: out dtype F16; max |err| 1.562e-2; worst err/(u*sum|a||b|) 0.050; non-finite 0
+PROBE F16 matmul [6,10240]x[10240,256]: out dtype F16; max |err| 3.124e-2; worst err/(u*sum|a||b|) 0.025; non-finite 0
+PROBE F16 batched matmul [2,3,128,96]x[2,3,96,80]: out dtype F16; max |err| 3.900e-3
+PROBE Bf16 create+readback: tensor.dtype()=BF16 readback dtype BF16; max |diff| 0.000e0
+PROBE Bf16 cast from F32 (RNE ties, extremes): out dtype BF16; mismatches vs host RNE: []
+PROBE Bf16 cast to F32 (exact widening): out dtype F32; max |diff| 0.000e0
+PROBE Bf16 cast to the other half type: out dtype F16; max |diff| 0.000e0
+PROBE Bf16 add: out dtype BF16; max |err| vs once-rounded sum 0.000e0
+PROBE Bf16 mul: out dtype BF16; max |err| vs once-rounded product 0.000e0
+PROBE Bf16 exp: out dtype BF16; max |err| 1.208e-1; worst err/(u*|exact|) 0.99
+PROBE Bf16 tanh: out dtype BF16; max |err| 1.940e-3; worst err/(u*|exact|) 0.95
+PROBE Bf16 sigmoid: out dtype BF16; max |err| 1.943e-3; worst err/(u*|exact|) 0.97
+PROBE Bf16 sqrt: out dtype BF16; max |err| 3.902e-3; worst err/(u*|exact|) 0.99
+PROBE Bf16 cos: out dtype BF16; max |err| 1.946e-3; worst err/(u*|exact|) 0.94
+PROBE Bf16 softmax [8,1031] dim 1: out dtype BF16; max |err| 9.714e-5 (largest prob 1.725e-2); worst |row sum - 1| 3.716e-3
+PROBE Bf16 reductions sum/max/argmax: row0: sum err/(u*sum|x|) 0.010 max exact true argmax true; row1: sum err/(u*sum|x|) 0.006 max exact true argmax true; row2: sum err/(u*sum|x|) 0.001 max exact true argmax true; row3: sum err/(u*sum|x|) 0.010 max exact true argmax true
+PROBE Bf16 select rows (embedding gather): out dtype BF16; max |diff| 0.000e0
+PROBE Bf16 swap_dims+reshape copy, cat, mask_fill: out dtype BF16; swap max |diff| 0.000e0; cat exact true; mask_fill exact true
+PROBE Bf16 matmul [1,64]x[64,32]: out dtype BF16; max |err| 1.226e-2; worst err/(u*sum|a||b|) 0.203; non-finite 0
+PROBE Bf16 matmul [7,2560]x[2560,257]: out dtype BF16; max |err| 1.244e-1; worst err/(u*sum|a||b|) 0.051; non-finite 0
+PROBE Bf16 matmul [6,10240]x[10240,256]: out dtype BF16; max |err| 2.413e-1; worst err/(u*sum|a||b|) 0.024; non-finite 0
+PROBE Bf16 batched matmul [2,3,128,96]x[2,3,96,80]: out dtype BF16; max |err| 3.124e-2
+        3.11 real         0.23 user         0.07 sys
+           128794624  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                9043  page reclaims
+                  80  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                  13  voluntary context switches
+                1852  involuntary context switches
+          3050298505  instructions retired
+          1084577676  cycles elapsed
+           250069880  peak memory footprint
+
+== exit=0 wall=3.2s end 2026-10-17T22:41:20Z

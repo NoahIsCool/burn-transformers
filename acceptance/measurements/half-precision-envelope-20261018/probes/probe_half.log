@@ -1,0 +1,61 @@
+== probe tests/probe_half.rs sha256 940fad85c35378cc9533c263fab60e18f86dce079481d06e8e5edb8793a54aef (calls Burn 0.21.0 only; built in the scratch probe tree, an export of 7bd057e with working copies of six src test files and src/feed_forward.rs, none of which the probe uses)
+== binary /Volumes/bag of holding/cargo-targets/tfm-half-followups2-probe/release/deps/probe_half-c8c2527631db9ad5 sha256 77d3a0c558c4879055ddb7d4103a0c54c7e5a832522884e4d880fde3820f6df2
+== cmd /Volumes/bag of holding/cargo-targets/tfm-half-followups2-probe/release/deps/probe_half-c8c2527631db9ad5 --nocapture --test-threads 1
+== start 2026-10-18T01:40:38Z
+
+running 7 tests
+test probe_binary_and_matmul ... BF16 mul: 0 of 4096 differ from the exact result rounded once
+BF16 add: 0 of 4096 differ from the exact result rounded once
+BF16 matmul k=16: 64 of 64 rows equal the exact sum rounded once; worst error 0.50 ulp, 1.96e-3 of sum|ab|
+BF16 matmul k=256: 64 of 64 rows equal the exact sum rounded once; worst error 0.50 ulp, 4.78e-4 of sum|ab|
+BF16 matmul k=4096: 64 of 64 rows equal the exact sum rounded once; worst error 0.50 ulp, 1.10e-4 of sum|ab|
+F16 mul: 0 of 4096 differ from the exact result rounded once
+F16 add: 0 of 4096 differ from the exact result rounded once
+F16 matmul k=16: 22 of 64 rows equal the exact sum rounded once; worst error 120.15 ulp, 4.27e-4 of sum|ab|
+F16 matmul k=256: 14 of 64 rows equal the exact sum rounded once; worst error 22.55 ulp, 1.03e-4 of sum|ab|
+F16 matmul k=4096: 14 of 64 rows equal the exact sum rounded once; worst error 843.64 ulp, 9.21e-5 of sum|ab|
+ok
+test probe_cast_pattern ... upper 0080: 7 wrong, low halves 8001..=8007 (flex rounds down)
+upper 3c00: 7 wrong, low halves 8001..=8007 (flex rounds down)
+upper 3efe: 7 wrong, low halves 8001..=8007 (flex rounds down)
+upper 4000: 7 wrong, low halves 8001..=8007 (flex rounds down)
+upper bf80: 7 wrong, low halves 8001..=8007 (flex rounds down)
+len 1: {16126}
+len 3: {16126}
+len 8: {16126}
+len 16: {16126}
+len 17: {16126}
+len 64: {16126}
+ok
+test probe_casts ... F32 sigmoid bits 3efe8001 value 4.970703423023e-1
+Flex cast 4.9609375e-1; half 4.9804688e-1
+F32->BF16 cast: 2000 of 14000 differ from round-to-nearest-even; by low half: {8001: 3e8, 8002: 3e8}
+F32->F16 cast: 0 of 14000 differ from round-to-nearest-even
+ok
+test probe_elementwise ... BF16 sigmoid: 1 of 65280 differ from the F32 value rounded once
+BF16 tanh: 0 of 65280 differ from the F32 value rounded once
+BF16 exp: 2 of 65280 differ from the F32 value rounded once
+BF16 gelu_tanh: 1012 of 65280 differ from the F32 value rounded once
+F16 sigmoid: 0 of 63488 differ from the F32 value rounded once
+F16 tanh: 0 of 63488 differ from the F32 value rounded once
+F16 exp: 0 of 63488 differ from the F32 value rounded once
+F16 gelu_tanh: 11911 of 63488 differ from the F32 value rounded once
+ok
+test probe_scalar_mul ... BF16 x * (1/sqrt(128)): 140 of 5938 differ from round(x * f32 scale) (PyTorch), 0 from round(x * BF16(scale)); mul_scalar(f32): 140
+F16 x * (1/sqrt(128)): 7384 of 47506 differ from round(x * f32 scale) (PyTorch), 0 from round(x * F16(scale)); mul_scalar(f32): 7384
+ok
+test probe_sigmoid_exp_mismatches ... BF16 sigmoid(-1.171875e-2) = 4.9804688e-1 (Burn BF16) vs 4.9609375e-1 (F32 rounded once); F32 value 4.9707034e-1; exact 4.9707034602715217e-1; exact rounded 4.9804688e-1
+BF16 exp(6.84375e0) = 9.4e2 (Burn BF16) vs 9.36e2 (F32 rounded once); F32 value 9.3800006e2; exact 9.380000478321625e2; exact rounded 9.4e2
+BF16 exp(-2.2460938e-1) = 8.0078125e-1 (Burn BF16) vs 7.96875e-1 (F32 rounded once); F32 value 7.988282e-1; exact 7.98828200087216e-1; exact rounded 8.0078125e-1
+ok
+test probe_softmax_and_attention ... BF16 fused attention output dtype BF16
+BF16 fused attention: 0 of 896 differ from the F32 attention rounded once; worst |diff| 9.742e-4
+BF16 softmax: 14 of 91 differ from the F32 softmax rounded once
+F16 fused attention output dtype F16
+F16 fused attention: 0 of 896 differ from the F32 attention rounded once; worst |diff| 1.219e-4
+F16 softmax: 22 of 91 differ from the F32 softmax rounded once
+ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+== exit=0

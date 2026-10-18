@@ -1,0 +1,252 @@
+{
+ "torch": "2.10.0",
+ "transformers": "5.2.0",
+ "variants": {
+  "float32-clamp": {
+   "rows": [
+    {
+     "prompt": 0,
+     "tokens": 6,
+     "finite": true,
+     "max": 33.32253873348236,
+     "position": 0,
+     "entry": 154896,
+     "mean": 1.9026029014112844,
+     "argmax_agree": [
+      false,
+      false,
+      true,
+      true,
+      true,
+      true
+     ],
+     "bound_max": 0.46030082702636715,
+     "bound_mean": 0.04525028393759436
+    },
+    {
+     "prompt": 1,
+     "tokens": 19,
+     "finite": true,
+     "max": 33.58118665218353,
+     "position": 0,
+     "entry": 154896,
+     "mean": 1.8584952722258121,
+     "argmax_agree": [
+      false,
+      true,
+      true,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+     ],
+     "bound_max": 0.7106002807617188,
+     "bound_mean": 0.06263315950001885
+    },
+    {
+     "prompt": 2,
+     "tokens": 9,
+     "finite": true,
+     "max": 33.57657849788666,
+     "position": 0,
+     "entry": 154896,
+     "mean": 1.9236895778879266,
+     "argmax_agree": [
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+     ],
+     "bound_max": 0.8973712921142578,
+     "bound_mean": 0.07606300748595012
+    }
+   ],
+   "clamp": {
+    "clamped_tensors": 111,
+    "clamped_entries": 184
+   },
+   "seconds": 20.372836457798257
+  },
+  "float16-clamp": {
+   "rows": [
+    {
+     "prompt": 0,
+     "tokens": 6,
+     "finite": true,
+     "max": 33.33623123168945,
+     "position": 0,
+     "entry": 23415,
+     "mean": 1.8965870067167636,
+     "argmax_agree": [
+      false,
+      false,
+      true,
+      true,
+      true,
+      true
+     ],
+     "bound_max": 0.46030082702636715,
+     "bound_mean": 0.04525028393759436
+    },
+    {
+     "prompt": 1,
+     "tokens": 19,
+     "finite": true,
+     "max": 33.461857199668884,
+     "position": 0,
+     "entry": 154896,
+     "mean": 1.769641401991467,
+     "argmax_agree": [
+      false,
+      true,
+      true,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+     ],
+     "bound_max": 0.7106002807617188,
+     "bound_mean": 0.06263315950001885
+    },
+    {
+     "prompt": 2,
+     "tokens": 9,
+     "finite": true,
+     "max": 33.44560623168945,
+     "position": 0,
+     "entry": 23415,
+     "mean": 1.921248975242729,
+     "argmax_agree": [
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+     ],
+     "bound_max": 0.8973712921142578,
+     "bound_mean": 0.07606300748595012
+    }
+   ],
+   "clamp": {
+    "clamped_tensors": 112,
+    "clamped_entries": 195
+   },
+   "seconds": 1.5790419168770313
+  },
+  "bfloat16": {
+   "rows": [
+    {
+     "prompt": 0,
+     "tokens": 6,
+     "finite": true,
+     "max": 0.38358402252197266,
+     "position": 5,
+     "entry": 1,
+     "mean": 0.0377085699479953,
+     "argmax_agree": [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+     ],
+     "bound_max": 0.46030082702636715,
+     "bound_mean": 0.04525028393759436
+    },
+    {
+     "prompt": 1,
+     "tokens": 19,
+     "finite": true,
+     "max": 0.5921669006347656,
+     "position": 1,
+     "entry": 23130,
+     "mean": 0.05219429958334904,
+     "argmax_agree": [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+     ],
+     "bound_max": 0.7106002807617188,
+     "bound_mean": 0.06263315950001885
+    },
+    {
+     "prompt": 2,
+     "tokens": 9,
+     "finite": true,
+     "max": 0.7478094100952148,
+     "position": 3,
+     "entry": 33178,
+     "mean": 0.0633858395716251,
+     "argmax_agree": [
+      true,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      true
+     ],
+     "bound_max": 0.8973712921142578,
+     "bound_mean": 0.07606300748595012
+    }
+   ],
+   "clamp": {
+    "clamped_tensors": 0,
+    "clamped_entries": 0
+   },
+   "seconds": 1.5000587080139667
+  }
+ }
+}

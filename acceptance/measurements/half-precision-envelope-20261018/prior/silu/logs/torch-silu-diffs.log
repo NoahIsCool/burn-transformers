@@ -1,0 +1,14 @@
+cpu torch.bfloat16: F.silu != once(x*sigmoid) on 0; != once(x/(1+exp(-x))) on 0; != correctly rounded F64 on 17; once(x*sigmoid) != correctly rounded on 17
+mps torch.bfloat16: F.silu != once(x*sigmoid) on 508; != once(x/(1+exp(-x))) on 508; != correctly rounded F64 on 525; once(x*sigmoid) != correctly rounded on 17
+    x=-1.8367099231598242e-40: F.silu=-0.0 once=-9.183549615799121e-41 exact=-9.183549615799121e-41
+    x=-2.7550648847397363e-40: F.silu=-0.0 once=-1.8367099231598242e-40 exact=-1.3775324423698682e-40
+    x=-3.6734198463196485e-40: F.silu=-0.0 once=-1.8367099231598242e-40 exact=-1.8367099231598242e-40
+    x=-4.5917748078995606e-40: F.silu=-0.0 once=-1.8367099231598242e-40 exact=-2.2958874039497803e-40
+    x=-5.510129769479473e-40: F.silu=-0.0 once=-2.7550648847397363e-40 exact=-2.7550648847397363e-40
+    x=-6.428484731059385e-40: F.silu=-0.0 once=-3.6734198463196485e-40 exact=-3.2142423655296924e-40
+    differing |x| range: min 1.8367099231598242e-40 max 2.341805152028776e-38; F.silu err vs exact max 1.171e-38, once err max 4.592e-41
+cpu torch.float16: F.silu != once(x*sigmoid) on 1; != once(x/(1+exp(-x))) on 0; != correctly rounded F64 on 1; once(x*sigmoid) != correctly rounded on 2
+    x=-2.724609375: F.silu=-0.1676025390625 once=-0.167724609375 exact=-0.16766356893491
+mps torch.float16: F.silu != once(x*sigmoid) on 2; != once(x/(1+exp(-x))) on 1; != correctly rounded F64 on 2; once(x*sigmoid) != correctly rounded on 2
+    x=-0.7138671875: F.silu=-0.234619140625 once=-0.2347412109375 exact=-0.23468019496190176
+    x=-2.724609375: F.silu=-0.1676025390625 once=-0.167724609375 exact=-0.16766356893491

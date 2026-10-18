@@ -1,0 +1,40 @@
+== source 818160545802c1374f7607d26ce20cc86d2d758d dirty=0
+== checkout /Users/nover/repos/transformers-worktrees/tfm-half-followups2 (branch claude/tfm-half-followups2)
+== binary /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/llama_family_artifacts-693e11c29d0eb894 sha256 72a204e1c37262448b47e772e980a72cba33fc8ae1618af1385ad521009db738
+== flex/F32 flex_cached_greedy_matches_the_reference
+== env TRANSFORMERS_LLAMA_FAMILY_DECODE_TRUTH_DIR=/Volumes/T9/transformers-references/Qwen3-4B-531c80e2-f32-cpu-eager
+== env TRANSFORMERS_LLAMA_FAMILY_DIR=/Volumes/T9/models/Qwen/Qwen3-4B
+== env TRANSFORMERS_LLAMA_FAMILY_REFERENCE_DIR=/Volumes/T9/transformers-references/Qwen3-4B-531c80e2
+== env TRANSFORMERS_LLAMA_FAMILY_TOLERANCE=1e-3
+== cwd /Users/nover/repos/transformers-worktrees/tfm-half-followups2
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/llama_family_artifacts-693e11c29d0eb894 --ignored --exact --nocapture --test-threads 1 flex_cached_greedy_matches_the_reference
+== start 2026-10-18T05:07:26+00:00 load 3.30 3.88 3.01 free 90%
+
+running 1 test
+test flex_cached_greedy_matches_the_reference ... F32 matrix products use F32 inputs; tolerance 1e-3
+greedy: 32 of 32 greedy tokens decisive and matching (smallest decisive margin 1.1731529e-1), 0 ties skipped
+cached decode: 32 decode rows from position 5: max |Δ| = 1.64031982421875e-4 to the decode truth, at step 4 (tolerance 1e-3)
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 33 filtered out; finished in 13.39s
+
+       13.41 real        19.47 user         3.01 sys
+         18859835392  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             1158370  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   0  voluntary context switches
+               64357  involuntary context switches
+        198976169572  instructions retired
+         80329914389  cycles elapsed
+         18859177880  peak memory footprint
+== exit=0 wall=14.2s min_free_pct=90 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+== source after run 818160545802c1374f7607d26ce20cc86d2d758d dirty=0
