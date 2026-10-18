@@ -4,7 +4,7 @@ use std::{io, path::PathBuf};
 
 use thiserror::Error;
 
-use super::{LoadReport, TensorDType};
+use super::{LoadReport, RangeHazard, TensorDType};
 
 /// Result type used by the checkpoint subsystem.
 pub type Result<T> = std::result::Result<T, CheckpointError>;
@@ -337,6 +337,24 @@ pub enum CheckpointError {
         observed: TensorDType,
         /// Required model dtype.
         expected: TensorDType,
+    },
+    /// A planned parameter takes a dtype the family's checkpoints are measured to overflow.
+    ///
+    /// Raised by [`super::check_range_hazards`] after strict planning and
+    /// before any payload is read, when the family declares a matching
+    /// [`RangeHazard`] and [`super::LoadOptions::range_hazards`] is
+    /// [`super::RangeHazardPolicy::Refuse`] (the default). The message names
+    /// the checkpoints, the dtype, the declared evidence, the wider dtypes the
+    /// loader can plan instead, and the [`super::RangeHazardPolicy::Accept`]
+    /// opt-in.
+    #[error("{}", super::hazard::refusal_message(.hazard, .target, *.parameters))]
+    RangeHazard {
+        /// The matched declaration: checkpoints, dtype, and measured evidence.
+        hazard: RangeHazard,
+        /// First planned parameter in the hazard's dtype, in canonical target order.
+        target: String,
+        /// Number of planned storage-owning parameters in the hazard's dtype.
+        parameters: usize,
     },
     /// Strict validation found unexplained missing or unexpected keys.
     #[error(
