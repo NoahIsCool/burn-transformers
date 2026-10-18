@@ -1,0 +1,8 @@
+== source 603ec5c41d4fcb8b4895010157f347dda4f57e26 dirty=0
+== cmd cargo fmt --check
+== env CARGO_TARGET_DIR=/Volumes/bag of holding/cargo-targets/tfm-nemotron-envelope
+== start 2026-10-18T23:35:42+00:00 uptime 19:35  up 17 days,  4:56, 3 users, load averages: 5.65 9.82 10.38
+== start free /Volumes/bag of holding 169.6 GiB
+== end 2026-10-18T23:35:44+00:00 wall=1.9s
+== source after run 603ec5c41d4fcb8b4895010157f347dda4f57e26 dirty=0
+== exit=0
