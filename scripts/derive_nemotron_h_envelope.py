@@ -130,8 +130,13 @@ def label(graph: tuple[str, str]) -> str:
     return f"{graph[0]}-{graph[1]}"
 
 
-def read_graph_bundle(root: Path, oracle: dict[str, Any], precision_sha256: str) -> dict[str, Any]:
-    """Validates one graph-tool bundle against the oracle and the precision manifest; returns it with its payloads."""
+def read_graph_bundle(root: Path, oracle: dict[str, Any], precision_sha256: str,
+                      allowed: Sequence[tuple[str, str]] = NEW) -> dict[str, Any]:
+    """Validates one graph-tool bundle against the oracle and the precision manifest; returns it with its payloads.
+
+    `allowed` names the graphs the bundle may evaluate: the new graphs for the
+    envelope, any of the four for a reported control.
+    """
 
     manifest_bytes = (root / "reference.json").read_bytes()
     manifest = json.loads(manifest_bytes)
@@ -139,7 +144,7 @@ def read_graph_bundle(root: Path, oracle: dict[str, Any], precision_sha256: str)
     require(manifest.get("schema_version") == GRAPH_TOOL.SCHEMA_VERSION, f"{name}: unsupported schema")
     graph = manifest["graph"]
     pair = (graph["device"], graph["attention_implementation"])
-    require(pair in NEW, f"{name}: {label(pair)} is not a new graph {[label(p) for p in NEW]}")
+    require(pair in allowed, f"{name}: {label(pair)} is not one of {[label(p) for p in allowed]}")
     require(graph["dtype"] == "float16", f"{name}: a {graph['dtype']} evaluation is not an F16 graph")
     require(graph["resolved"] == {"attention_implementation": pair[1],
                                   "experts_implementation": GRAPH_TOOL.EXPERTS_RESOLVED[pair[0]]},
@@ -270,8 +275,40 @@ def derive_paths(graphs: dict[str, dict[str, Any]], truth: dict[str, Any]) -> di
     }
 
 
-def derive(precision_dir: Path, oracle_dir: Path, graph_dirs: Sequence[Path]) -> dict[str, Any]:
-    """Authenticates every bundle, pairs the graphs, and derives the envelope."""
+def control_report(graphs: dict[str, dict[str, Any]], truth: dict[str, Any], name: str,
+                   rows: dict[str, Any]) -> dict[str, Any]:
+    """Measures a control evaluation of one graph; reports, without adopting, the envelope with it.
+
+    A control re-evaluates one of the four graphs. Its rows are compared with
+    those of the graph it repeats, and the leave-one-out derivation is
+    repeated twice: with the control in place of that graph, and with the
+    control as a fifth graph.
+    """
+
+    report: dict[str, Any] = {"repeats": name, "paths": {}}
+    for kind, _ in PATHS:
+        repeated = row_cosines(rows[kind], graphs[name][kind])
+        report["paths"][kind] = {"control": path_statistics(row_cosines(rows[kind], truth[kind])),
+                                 "minimum_cosine_to_the_repeated_graph": min(repeated),
+                                 "bitwise_equal_to_the_repeated_graph": bool((rows[kind] == graphs[name][kind]).all())}
+        for statistic in report["paths"][kind].values():
+            if isinstance(statistic, dict):
+                statistic.pop("cosines", None)
+                statistic.pop("deviations", None)
+    replaced = derive_paths(dict(graphs, **{name: rows}), truth)
+    added = derive_paths(dict(graphs, **{f"{name}-control": rows}), truth)
+    report["replacing"] = {"slacks": replaced["slacks"],
+                           "bounds": {kind: path["bound"] for kind, path in replaced["paths"].items()},
+                           "cosine_floors": {kind: path["cosine_floor"] for kind, path in replaced["paths"].items()}}
+    report["adding"] = {"slacks": added["slacks"],
+                        "bounds": {kind: path["bound"] for kind, path in added["paths"].items()},
+                        "cosine_floors": {kind: path["cosine_floor"] for kind, path in added["paths"].items()}}
+    return report
+
+
+def derive(precision_dir: Path, oracle_dir: Path, graph_dirs: Sequence[Path],
+           control_dirs: Sequence[Path] = ()) -> dict[str, Any]:
+    """Authenticates every bundle, pairs the graphs, and derives the envelope; reports any controls."""
 
     oracle = PRECISION.read_oracle(oracle_dir)
     precision = GRAPH_TOOL.read_precision_bundle(precision_dir)
@@ -284,7 +321,18 @@ def derive(precision_dir: Path, oracle_dir: Path, graph_dirs: Sequence[Path]) ->
     graphs = {"cpu-eager": matrices(precision["payloads"]["float16"]), "mps-eager": matrices(oracle["payloads"])}
     for bundle in bundles:
         graphs[label(bundle["graph"])] = matrices(bundle["payloads"])
-    result = derive_paths(graphs, matrices(precision["payloads"]["float32"]))
+    truth = matrices(precision["payloads"]["float32"])
+    result = derive_paths(graphs, truth)
+    controls = [read_graph_bundle(Path(root), oracle, precision["manifest_sha256"], allowed=tuple(EXISTING) + NEW)
+                for root in control_dirs]
+    for control in controls:
+        require(not scripts or control["script_sha256"] in scripts,
+                f"{control['bundle']}: comes from another generator script than the new graphs")
+        require(label(control["graph"]) in graphs, f"{control['bundle']}: repeats a graph outside the envelope")
+    result["controls_reported_not_adopted"] = [
+        dict(control_report(graphs, truth, label(control["graph"]), matrices(control["payloads"])),
+             bundle=control["bundle"], reference_json_sha256=control["reference_json_sha256"])
+        for control in controls]
     result["inputs"] = {
         "precision": {"bundle": str(precision_dir), "reference_json_sha256": precision["manifest_sha256"]},
         "oracle": {"bundle": str(oracle_dir), "sha256": oracle["digests"]},
@@ -312,6 +360,17 @@ def render(result: dict[str, Any]) -> str:
     lines.append(f"\nreported, not adopted: pooled slack {other['pooled_slack']} from {other['pooled_largest_ratio']:.4f} "
                  f"({other['pooled_largest_path']}); deficit slacks {other['deficit_slacks']}; "
                  f"mean slacks {other['mean_slacks']}")
+    for control in result.get("controls_reported_not_adopted", []):
+        lines.append(f"\ncontrol repeating {control['repeats']} (reported, not adopted): {control['bundle']}")
+        for kind, path in control["paths"].items():
+            statistic = path["control"]
+            lines.append(f"- {kind}: max delta {statistic['max']:.6e} at decision {statistic['decision']} "
+                         f"(cosine {statistic['minimum_cosine']:.9f}); minimum cosine to {control['repeats']} "
+                         f"{path['minimum_cosine_to_the_repeated_graph']:.9f}, bitwise equal "
+                         f"{path['bitwise_equal_to_the_repeated_graph']}")
+        for mode in ("replacing", "adding"):
+            floors = ", ".join(f"{kind} {value:.9f}" for kind, value in control[mode]["cosine_floors"].items())
+            lines.append(f"- {mode} it: slacks {control[mode]['slacks']}, cosine floors {floors}")
     return "\n".join(lines) + "\n"
 
 
@@ -322,6 +381,8 @@ def parse_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--precision-dir", type=Path, required=True, help="authenticated precision bundle")
     parser.add_argument("--oracle-dir", type=Path, required=True, help="authenticated MPS/F16 oracle bundle")
     parser.add_argument("--graph", type=Path, action="append", default=[], help="graph-tool bundle (repeatable)")
+    parser.add_argument("--control", type=Path, action="append", default=[],
+                        help="graph-tool bundle repeating one of the four graphs: reported, not adopted (repeatable)")
     parser.add_argument("--output", type=Path, required=True, help="JSON result to write")
     return parser.parse_args(argv)
 
@@ -330,7 +391,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Derives the envelope, writes the JSON result, and prints the tables."""
 
     arguments = parse_arguments(argv)
-    result = derive(arguments.precision_dir, arguments.oracle_dir, arguments.graph)
+    result = derive(arguments.precision_dir, arguments.oracle_dir, arguments.graph, arguments.control)
     arguments.output.write_text(json.dumps(result, indent=1, allow_nan=False) + "\n")
     print(render(result), end="")
     return 0

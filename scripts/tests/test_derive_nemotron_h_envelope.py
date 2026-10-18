@@ -230,7 +230,7 @@ class BundleTests(unittest.TestCase):
                 with self.assertRaises(DERIVE.PairingError):
                     self.read(self.write_bundle(Path(root), **{path: value}))
         with tempfile.TemporaryDirectory() as root:
-            with self.assertRaisesRegex(DERIVE.PairingError, "not a new graph"):
+            with self.assertRaisesRegex(DERIVE.PairingError, "is not one of"):
                 self.read(self.write_bundle(Path(root), attention="eager"))
         with tempfile.TemporaryDirectory() as root:
             bundle = self.write_bundle(Path(root))
@@ -284,6 +284,40 @@ class BundleTests(unittest.TestCase):
             other = self.write_bundle(root, "mps", "sdpa", **{"provenance.script_sha256": "9" * 64})
             with self.assertRaisesRegex(DERIVE.PairingError, "generator scripts"):
                 self.derive_synthetic(root, [first, other])
+
+    def test_a_control_is_reported_beside_the_envelope_without_changing_it(self) -> None:
+        """A control repeating an existing graph is compared with it and re-derived both ways, but not adopted."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            bundles = [self.write_bundle(root, "cpu", "sdpa", 0.016), self.write_bundle(root, "mps", "sdpa", 0.021)]
+            (root / "control").mkdir()
+            control = self.write_bundle(root / "control", "mps", "eager", 0.019)
+            plain = self.derive_synthetic(root, bundles)
+            result = self.derive_synthetic_with_controls(root, bundles, [control])
+            self.assertEqual(result["slacks"], plain["slacks"])
+            (report,) = result["controls_reported_not_adopted"]
+            self.assertEqual(report["repeats"], "mps-eager")
+            teacher = report["paths"]["teacher"]
+            self.assertFalse(teacher["bitwise_equal_to_the_repeated_graph"])
+            self.assertAlmostEqual(teacher["control"]["max"], chord(0.019), places=6)
+            self.assertNotIn("cosines", teacher["control"])
+            for mode in ("replacing", "adding"):
+                self.assertEqual(set(report[mode]["slacks"]), {"prompt", "teacher", "cached"})
+                self.assertLess(report[mode]["cosine_floors"]["teacher"], 1.0)
+            self.assertNotEqual(report["replacing"]["bounds"], report["adding"]["bounds"])
+            self.assertIn("control repeating mps-eager", DERIVE.render(result))
+            with self.assertRaisesRegex(DERIVE.PairingError, "another generator script"):
+                (root / "other").mkdir()
+                other = self.write_bundle(root / "other", "mps", "eager", **{"provenance.script_sha256": "9" * 64})
+                self.derive_synthetic_with_controls(root, bundles, [other])
+
+    def derive_synthetic_with_controls(self, root: Path, bundles: list[Path], controls: list[Path]):
+        """`derive_synthetic` with control bundles."""
+
+        original = DERIVE.derive
+        with mock.patch.object(DERIVE, "derive", lambda p, o, g: original(p, o, g, controls)):
+            return self.derive_synthetic(root, bundles)
 
     def test_command_line_writes_json_and_prints_tables(self) -> None:
         """`main` writes the derivation as strict JSON and renders its tables."""
