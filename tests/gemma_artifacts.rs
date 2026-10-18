@@ -613,7 +613,7 @@ fn load_bundle<B: Backend>(
             "TRANSFORMERS_GEMMA_LONG_TOLERANCE",
         ]);
         eprintln!(
-            "F32 matrix products use {precision:?} inputs; {} declares a {dtype:?} range hazard, so no official envelope judges this run ({RANGE_HAZARDS} policy {policy:?})",
+            "F32 matrix products use {precision:?} inputs; {} declares a range hazard for {dtype:?}, so no official envelope judges this run ({RANGE_HAZARDS} policy {policy:?})",
             hazard.checkpoints()
         );
         let reference = paired_reference(&reference_dir, &config);
