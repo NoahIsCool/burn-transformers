@@ -1,0 +1,36 @@
+== derived_utc 2026-10-18T09:29:39Z
+== source b4e2bdbeb6e011d77ba29b0e10903593bf59925c tool scripts/derive_nemotron_h_envelope.py sha256 2c4b5fc1143a0b067670d4bb2645db896b2f37df823954ea6eb5d63431c8e498
+== burn rows computed in this round before this derivation: none
+== cmd python3 -I scripts/derive_nemotron_h_envelope.py --precision-dir /Volumes/bag of holding/models/transformers-acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24-precision.bundle --oracle-dir /Volumes/bag of holding/models/transformers-acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24-reference.bundle --graph /Volumes/bag of holding/models/transformers-acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24-f16-graphs/f16-cpu-sdpa.bundle --graph /Volumes/bag of holding/models/transformers-acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24-f16-graphs/f16-mps-sdpa.bundle --control /Volumes/bag of holding/models/transformers-acceptance/nemotron-h-envelope-20261018/f16-mps-eager-control.bundle --output acceptance/measurements/nemotron-h-envelope-20261018/derivation/envelope.json
+# Nemotron-H official F16 envelope over 4 graphs: cpu-eager, cpu-sdpa, mps-eager, mps-sdpa
+
+## prompt (1 rows)
+- cpu-eager: max delta 4.014610e-02 at decision 0 (cosine 0.999194145), mean delta 4.014610e-02; leave-one-out 1.0002 (deficit 1.0004, mean 1.0002)
+- cpu-sdpa: max delta 4.000650e-02 at decision 0 (cosine 0.999199740), mean delta 4.000650e-02; leave-one-out 0.9965 (deficit 0.9931, mean 0.9965)
+- mps-eager: max delta 4.013720e-02 at decision 0 (cosine 0.999194502), mean delta 4.013720e-02; leave-one-out 0.9998 (deficit 0.9996, mean 0.9998)
+- mps-sdpa: max delta 3.996200e-02 at decision 0 (cosine 0.999201519), mean delta 3.996200e-02; leave-one-out 0.9954 (deficit 0.9908, mean 0.9954)
+- envelope E 4.014610e-02 (cpu-eager decision 0); slack 1.1 from 1.0002 (cpu-eager); bound 4.416071e-02, cosine floor 0.999024916
+
+## teacher (32 rows)
+- cpu-eager: max delta 5.230607e-02 at decision 27 (cosine 0.998632038), mean delta 1.594432e-02; leave-one-out 0.4951 (deficit 0.2452, mean 0.5524)
+- cpu-sdpa: max delta 1.056400e-01 at decision 18 (cosine 0.994420097), mean delta 2.886415e-02; leave-one-out 1.0042 (deficit 1.0084, mean 1.5945)
+- mps-eager: max delta 1.052006e-01 at decision 18 (cosine 0.994466421), mean delta 1.666482e-02; leave-one-out 0.9958 (deficit 0.9917, mean 0.5774)
+- mps-sdpa: max delta 1.048258e-01 at decision 18 (cosine 0.994505771), mean delta 1.810282e-02; leave-one-out 0.9923 (deficit 0.9846, mean 0.6272)
+- envelope E 1.056400e-01 (cpu-sdpa decision 18); slack 1.1 from 1.0042 (cpu-sdpa); bound 1.162040e-01, cosine floor 0.993248318
+
+## cached (32 rows)
+- cpu-eager: max delta 4.249860e-02 at decision 26 (cosine 0.999096934), mean delta 1.770490e-02; leave-one-out 0.8097 (deficit 0.6556, mean 1.0254)
+- cpu-sdpa: max delta 4.000650e-02 at decision 0 (cosine 0.999199740), mean delta 1.651922e-02; leave-one-out 0.7622 (deficit 0.5809, mean 0.9330)
+- mps-eager: max delta 5.224850e-02 at decision 22 (cosine 0.998635047), mean delta 1.726704e-02; leave-one-out 0.9954 (deficit 0.9909, mean 0.9753)
+- mps-sdpa: max delta 5.248829e-02 at decision 22 (cosine 0.998622490), mean delta 1.718501e-02; leave-one-out 1.0046 (deficit 1.0092, mean 0.9706)
+- envelope E 5.248829e-02 (mps-sdpa decision 22); slack 1.1 from 1.0046 (mps-sdpa); bound 5.773712e-02, cosine floor 0.998333213
+
+reported, not adopted: pooled slack 1.1 from 1.0046 (cached); deficit slacks {'prompt': 1.1, 'teacher': 1.1, 'cached': 1.1}; mean slacks {'prompt': 1.1, 'teacher': 1.6, 'cached': 1.1}
+
+control repeating mps-eager (reported, not adopted): /Volumes/bag of holding/models/transformers-acceptance/nemotron-h-envelope-20261018/f16-mps-eager-control.bundle
+- prompt: max delta 4.004701e-02 at decision 0 (cosine 0.999198118); minimum cosine to mps-eager 0.999999588, bitwise equal False
+- teacher: max delta 1.050496e-01 at decision 18 (cosine 0.994482288); minimum cosine to mps-eager 0.999686218, bitwise equal False
+- cached: max delta 5.299803e-02 at decision 22 (cosine 0.998595604); minimum cosine to mps-eager 0.999869702, bitwise equal False
+- replacing it: slacks {'prompt': 1.1, 'teacher': 1.1, 'cached': 1.1}, cosine floors prompt 0.999024916, teacher 0.993248318, cached 0.998300681
+- adding it: slacks {'prompt': 1.1, 'teacher': 1.1, 'cached': 1.1}, cosine floors prompt 0.999024916, teacher 0.993248318, cached 0.998300681
+== exit=0

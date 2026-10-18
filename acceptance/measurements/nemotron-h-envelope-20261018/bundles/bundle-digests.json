@@ -1,0 +1,143 @@
+{
+ "f16-cpu-sdpa": {
+  "files": {
+   "float16-cached-logits.f32le": {
+    "bytes": 16777216,
+    "sha256": "de2f89005459473d73a3c504f6a547e36b8084116c97428abd8d34d170f174e5"
+   },
+   "float16-prompt-logits.f32le": {
+    "bytes": 524288,
+    "sha256": "2693474fbaa46efa994df55c7d0385ed53897944c0a6b83f45e93f02a60edef6"
+   },
+   "float16-teacher-logits.f32le": {
+    "bytes": 16777216,
+    "sha256": "ac2ea1d0ef480472d23583cddcd5e1fcac833a9b853e7857d4d86608e22cff4a"
+   },
+   "reference.json": {
+    "bytes": 24596,
+    "sha256": "96253a039c3fb3580cf9fdd2bc12cfb88d6dad265f445f76f6559c40cb2d7f53"
+   }
+  },
+  "path": "/Volumes/bag of holding/models/transformers-acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24-f16-graphs/f16-cpu-sdpa.bundle"
+ },
+ "f16-mps-eager-control": {
+  "files": {
+   "float16-cached-logits.f32le": {
+    "bytes": 16777216,
+    "sha256": "c92a06e4577498b2a09424f56ea4351cc898c0643e8b177ed9ae4f7c8de57039"
+   },
+   "float16-prompt-logits.f32le": {
+    "bytes": 524288,
+    "sha256": "aa6c60531742a3555e21ce457bca701f9d18d8f4f9689418777eba80f2de1f0c"
+   },
+   "float16-teacher-logits.f32le": {
+    "bytes": 16777216,
+    "sha256": "95ed7ea2e0cfbccc003490308cadcafbb7ed33fa89aaef5ddbd8d4eda7a605ef"
+   },
+   "reference.json": {
+    "bytes": 25027,
+    "sha256": "a5f62fda6383a541c4956e6e920e475241b8c295191c57cdaa7c4b96fd4171bf"
+   }
+  },
+  "path": "/Volumes/bag of holding/models/transformers-acceptance/nemotron-h-envelope-20261018/f16-mps-eager-control.bundle"
+ },
+ "f16-mps-sdpa": {
+  "files": {
+   "float16-cached-logits.f32le": {
+    "bytes": 16777216,
+    "sha256": "d4cb3139faa109835c00b83be79c1174663ff4d68555dcdd4e6b16c9aad2ec8f"
+   },
+   "float16-prompt-logits.f32le": {
+    "bytes": 524288,
+    "sha256": "250f59e53528cf60fc7fd68f9cd45e82ebabf373e4b94b82b0c62cf213071af3"
+   },
+   "float16-teacher-logits.f32le": {
+    "bytes": 16777216,
+    "sha256": "328f593f52d21c875e7e1688f689f6195028a90107cbaf63aadc054b8413e4e6"
+   },
+   "reference.json": {
+    "bytes": 24785,
+    "sha256": "4298f895b7ed5f174d15008398359e7240c238f89112915860897618b974fba7"
+   }
+  },
+  "path": "/Volumes/bag of holding/models/transformers-acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24-f16-graphs/f16-mps-sdpa.bundle"
+ },
+ "oracle": {
+  "files": {
+   "nemotron-3.5-lightning-30b-a3b-a9904d24-cached-decode-1-hidden-last.f32le": {
+    "bytes": 580608,
+    "sha256": "46c65b5cc91b53c3cdb2c3b6df9acaf4fbb216e91ae09f007c8d1b5571d93b79"
+   },
+   "nemotron-3.5-lightning-30b-a3b-a9904d24-cached-prefill-hidden-last.f32le": {
+    "bytes": 580608,
+    "sha256": "56033b284b0c926a40fd50e51eeb232412d3d77ae97282782dc39b9645ff0be2"
+   },
+   "nemotron-3.5-lightning-30b-a3b-a9904d24-cached-prefix-logits.f32le": {
+    "bytes": 16777216,
+    "sha256": "b3a1ae948e55e6db409e0f9973c41c8767c874c6d64b1d351cfff7bbafa72480"
+   },
+   "nemotron-3.5-lightning-30b-a3b-a9904d24-hidden-last.f32le": {
+    "bytes": 580608,
+    "sha256": "56033b284b0c926a40fd50e51eeb232412d3d77ae97282782dc39b9645ff0be2"
+   },
+   "nemotron-3.5-lightning-30b-a3b-a9904d24-prompt-logits.f32le": {
+    "bytes": 524288,
+    "sha256": "f3c014bb043e9ffa3a114a4296ca0e0c2165c4abd63b942df6d910a4383a1dff"
+   },
+   "nemotron-3.5-lightning-30b-a3b-a9904d24-reference.json": {
+    "bytes": 98220,
+    "sha256": "bd3abb417f2fee82d1bef8bb654ca846fa4816351b1d9d7d0d057105f92de196"
+   },
+   "nemotron-3.5-lightning-30b-a3b-a9904d24-teacher-prefix-logits.f32le": {
+    "bytes": 16777216,
+    "sha256": "c1878c5e1396ddf01f3dfa85729ea58aa879ece28507399bdaf7addf4a65601b"
+   }
+  },
+  "path": "/Volumes/bag of holding/models/transformers-acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24-reference.bundle"
+ },
+ "precision": {
+  "files": {
+   "bfloat16-cached-logits.f32le": {
+    "bytes": 16777216,
+    "sha256": "cd38799625f1c5901e68df54b7ca8887becdc803c9ede6e93000b86b362c736e"
+   },
+   "bfloat16-prompt-logits.f32le": {
+    "bytes": 524288,
+    "sha256": "c84aa9bc69b26358a41dedbbfd5394452d733284a77bc7cc03143c79cbe55ea4"
+   },
+   "bfloat16-teacher-logits.f32le": {
+    "bytes": 16777216,
+    "sha256": "b888d62713d068185e26a35c9e82a6b77f3a141f6045dd812483ec32130d4633"
+   },
+   "float16-cached-logits.f32le": {
+    "bytes": 16777216,
+    "sha256": "d01d94bbbdce744e6621c717707f5a527a9870459115c91557e69104c772c7f6"
+   },
+   "float16-prompt-logits.f32le": {
+    "bytes": 524288,
+    "sha256": "d9fd6aee0ed30f0252b7141fd951e90cd2cb5aacd034c5422f833b3a949ac21f"
+   },
+   "float16-teacher-logits.f32le": {
+    "bytes": 16777216,
+    "sha256": "6dc5e0a295f9bb47c01f65b52a1026855b1866332a94d845e463545b2107f867"
+   },
+   "float32-cached-logits.f32le": {
+    "bytes": 16777216,
+    "sha256": "5b1dd446712ca764bf655fe324776e4468579e83f1b719e3437af96d817224f0"
+   },
+   "float32-prompt-logits.f32le": {
+    "bytes": 524288,
+    "sha256": "568f634d35d1e3a88fde59ee80a9c26caf5d59c2ac5eefbed6350acf16f8e588"
+   },
+   "float32-teacher-logits.f32le": {
+    "bytes": 16777216,
+    "sha256": "981f2f984f807012786103510ff8caaba79def48201bd0736bcdf38b48c62c88"
+   },
+   "reference.json": {
+    "bytes": 12185,
+    "sha256": "5da4427df4c882d3c4d42b5c2d37c2c61a4837597c944b9c67a23903a7ce73f9"
+   }
+  },
+  "path": "/Volumes/bag of holding/models/transformers-acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24-precision.bundle"
+ }
+}

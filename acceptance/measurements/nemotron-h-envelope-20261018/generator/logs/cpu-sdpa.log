@@ -1,0 +1,61 @@
+== source c25a2cb48eacfe5ff0a6cf543795175cd745a4ad (git archive export /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/nemo/export-c25a2cb)
+== tool /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/nemo/export-c25a2cb/scripts/generate_nemotron_h_f16_graph_reference.py sha256 81f5bd7735e79fde9e0d10bab5049bafa6803e8e469e3f0d9b44d0898e97b48f
+== cmd /usr/bin/time -l ["/Volumes/bag of holding/models/transformers-acceptance/envs/muse-cfa309-py311/bin/python", "-I", "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/nemo/export-c25a2cb/scripts/generate_nemotron_h_f16_graph_reference.py", "--model-dir", "/Volumes/bag of holding/models/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16-a9904d24bcc1d289a1950fa9d2b978c47cf903b9", "--transformers-dir", "/Volumes/bag of holding/models/hf-transformers-reference", "--oracle-dir", "/Volumes/bag of holding/models/transformers-acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24-reference.bundle", "--precision-dir", "/Volumes/bag of holding/models/transformers-acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24-precision.bundle", "--device", "cpu", "--attn-implementation", "sdpa", "--output", "/Volumes/bag of holding/models/transformers-acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24-f16-graphs/f16-cpu-sdpa.bundle", "--max-resident-gib", "16", "--offload-dir", "/Volumes/T9/transformers-offload/nemotron-h-envelope-20261018"]
+== start 2026-10-18T08:26:20+00:00
+== start uptime 4:26  up 16 days, 13:46, 3 users, load averages: 1.93 2.72 2.97
+== start top-cpu   PID  %CPU    RSS     ELAPSED COMM
+== start top-cpu   554  48.5  10864 16-13:44:32 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/FSEvents.framework/Versions/A/Support/fseventsd
+== start top-cpu   632   9.4  11840 16-13:44:32 /System/Library/PrivateFrameworks/CoreAnalytics.framework/Support/analyticsd
+== start top-cpu   579   8.2  21264 16-13:44:32 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mds
+== start top-cpu   796   5.7  18976 16-13:44:24 /usr/sbin/coreaudiod
+== start top-cpu 80937   5.6  19392       00:00 /Library/Frameworks/Python.framework/Versions/3.11/Resources/Python.app/Contents/MacOS/Python
+== start top-cpu  1341   5.6  21840 16-13:43:48 /System/Applications/Utilities/Activity Monitor.app/Contents/MacOS/Activity Monitor
+== start top-cpu 59357   3.6 551760    07:07:43 /Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Versions/155.0.8059.80/Helpers/Codex (Renderer).app/Contents/MacOS/Codex (Renderer)
+== start top-cpu   712   2.0  13696 16-13:44:31 /usr/libexec/syspolicyd
+== start free-memory 91% swap-used 8602192445 bytes
+== start disk / free 20.2 GiB
+== start disk /Volumes/bag of holding free 20.3 GiB
+== start disk /Volumes/T9 free 293.6 GiB
+== start gate: free-memory 91% system-volume 20.2 GiB after waiting 0s (needs 70% and 15 GiB)
+[transformers] `causal_conv1d_fn` is falling back to its reference PyTorch implementation because `causal_conv1d` is not installed. This is correct but much slower; install `causal_conv1d` for the optimized kernel.
+[transformers] `mamba_chunk_scan_combined` is falling back to its reference PyTorch implementation because `mamba_ssm` is not installed. This is correct but much slower; install `mamba_ssm` for the optimized kernel.
+[transformers] `causal_conv1d_update` is falling back to its reference PyTorch implementation because `causal_conv1d` is not installed. This is correct but much slower; install `causal_conv1d` for the optimized kernel.
+[transformers] `selective_state_update` is falling back to its reference PyTorch implementation because `mamba_ssm` is not installed. This is correct but much slower; install `mamba_ssm` for the optimized kernel.
+Some parameters are on the meta device because they were offloaded to the cpu and disk.
+Some parameters are on the meta device because they were offloaded to the cpu and disk.
+{"bundle": "/Volumes/bag of holding/models/transformers-acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24-f16-graphs/f16-cpu-sdpa.bundle", "graph": {"dtype": "float16", "device": "cpu", "attention_implementation": "sdpa", "experts_implementation_requested": null, "resolved": {"attention_implementation": "sdpa", "experts_implementation": "grouped_mm"}}, "minimum_cosines": {"float32": {"prompt": [0.99919974, 0, 1], "teacher": [0.994420097, 18, 32], "cached": [0.99919974, 0, 32]}, "float16-mps-oracle": {"prompt": [0.99999889, 0, 1], "teacher": [0.997000159, 14, 32], "cached": [0.998352406, 22, 32]}, "float16-cpu-eager": {"prompt": [0.999998851, 0, 1], "teacher": [0.994770293, 18, 32], "cached": [0.999676634, 12, 32]}}}
+      492.66 real       175.27 user       736.97 sys
+         80903028736  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+            13005398  page reclaims
+             5762339  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+               40940  voluntary context switches
+            67670290  involuntary context switches
+       2690316823553  instructions retired
+       2856986800349  cycles elapsed
+         22102386960  peak memory footprint
+== exit=0 wall=497.3s min_free_pct=73 max_swap_growth_mib=0 swapin_mib=53 pressured_swapin_mib=0 min_root_free_gib=20.2
+== end 2026-10-18T08:34:38+00:00
+== end uptime 4:34  up 16 days, 13:55, 3 users, load averages: 3.44 4.59 4.21
+== end top-cpu   PID  %CPU    RSS     ELAPSED COMM
+== end top-cpu   796  11.0  18976 16-13:52:42 /usr/sbin/coreaudiod
+== end top-cpu 59357   5.4 561040    07:16:01 /Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Versions/155.0.8059.80/Helpers/Codex (Renderer).app/Contents/MacOS/Codex (Renderer)
+== end top-cpu 20184   3.5 535600 03-07:33:24 /Users/nover/Library/Application Support/Claude/claude-code/2.1.295/9d6405864fdc/claude.app/Contents/MacOS/claude
+== end top-cpu 59299   3.5  37088    07:16:08 /Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Versions/155.0.8059.80/Helpers/Codex (Service).app/Contents/MacOS/Codex (Service)
+== end top-cpu 40293   2.3 583296    12:32:03 /Applications/Firefox.app/Contents/MacOS/plugin-container.app/Contents/MacOS/plugin-container
+== end top-cpu  6933   2.3 378752 02-18:14:13 /Applications/Firefox.app/Contents/MacOS/firefox
+== end top-cpu 49125   2.2 162864 03-19:48:03 /Users/nover/Library/Application Support/Claude/claude-code/2.1.295/9d6405864fdc/claude.app/Contents/MacOS/claude
+== end top-cpu 73534   1.6 664160    11:51:02 /Applications/Firefox.app/Contents/MacOS/plugin-container.app/Contents/MacOS/plugin-container
+== end free-memory 92% swap-used 8543472189 bytes
+== end disk / free 20.2 GiB
+== end disk /Volumes/bag of holding free 17.5 GiB
+== end disk /Volumes/T9 free 293.6 GiB
+== reference.json sha256 96253a039c3fb3580cf9fdd2bc12cfb88d6dad265f445f76f6559c40cb2d7f53
