@@ -719,8 +719,12 @@ earlier row-by-row or per-chunk algorithm, which each test keeps as an oracle.
   remains only, as provisional, for cached prefills, batched rows, and chunk
   ends. Pairing fails closed on graph identity, generator script, decode
   rows, and the decode truth's digests; the retired single-bundle variables
-  are refused. Gemma refuses `TRANSFORMERS_GEMMA_DTYPE=f16`, because its
-  official F16 graphs overflow; Metal is qualified in F32 for Gemma.
+  are refused. A Gemma `TRANSFORMERS_GEMMA_DTYPE=f16` run reads the official
+  F16 graphs (`TRANSFORMERS_GEMMA_F16_OFFICIAL_DIRS` and
+  `_LONG_F16_OFFICIAL_DIRS`) and fails as uncalibrated before loading, because
+  all of them overflow; Metal is qualified in F32 for Gemma. A gate-level
+  refusal of `f16`, which anticipated the maintainer's unconfirmed decision
+  (d), was withdrawn.
 - Operation-level tests pin the half-precision rounding points of SiLU, tanh
   GELU, the sigmoid output gate (every finite F16 and BF16 input), RMSNorm in
   both conventions, RoPE, and the eager and fused attention scores to the

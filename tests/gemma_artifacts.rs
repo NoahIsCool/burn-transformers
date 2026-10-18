@@ -97,14 +97,17 @@
 //! # Half precision
 //!
 //! `TRANSFORMERS_GEMMA_DTYPE` selects the stored dtype: `f32` (the default;
-//! everything above) or `bf16` (the Flex profile, and the CUDA one); any other
-//! value panics, and `f16` is refused (see [F16](#f16)). A half-precision run
+//! everything above), `bf16` (the Flex profile, and the CUDA one), or `f16`;
+//! any other value panics. Gemma F16 is uncalibrated, because all of its
+//! official F16 graphs overflow (see [F16](#f16)). A half-precision run
 //! is judged against the same F32 bundles, with bounds measured from the
 //! official implementation by `tests/support/half_precision_calibration.rs`,
 //! as in `tests/llama_family_artifacts.rs`: `TRANSFORMERS_GEMMA_OFFICIAL_DIRS`
 //! and `TRANSFORMERS_GEMMA_LONG_OFFICIAL_DIRS` list (separated as in `PATH`)
 //! the four bundles in which Transformers evaluates the short and long truths
-//! in BF16 on the CPU and on MPS, with eager and SDPA attention, and
+//! in BF16 on the CPU and on MPS, with eager and SDPA attention (an F16 run
+//! reads `TRANSFORMERS_GEMMA_F16_OFFICIAL_DIRS` and
+//! `TRANSFORMERS_GEMMA_LONG_F16_OFFICIAL_DIRS` instead), and
 //! `TRANSFORMERS_GEMMA_DECODE_TRUTH_DIR` and
 //! `TRANSFORMERS_GEMMA_LONG_DECODE_TRUTH_DIR` name the F32 CPU-eager decode
 //! truths, which add the reference's own stateless logits at the greedy
@@ -180,25 +183,28 @@
 //!
 //! # F16
 //!
-//! Gemma 3 has no F16 gate profile; Metal is qualified in F32 (the `metal::`
-//! tests without `TRANSFORMERS_GEMMA_DTYPE`) and half precision on Flex (and
-//! CUDA) in BF16. The published gemma-3-4b-it checkpoint overflows F16 in
-//! Transformers too: the first value beyond F16's `65,504` is the residual
-//! addition after block 5's MLP at the BOS position, channel 443
-//! (`51,941.5 + 21,568.1 = 73,509.6` in F32), identically in torch CPU and MPS
-//! F16 and in this crate's Metal and Flex F16, and every logit after it is
-//! NaN; gemma-3-12b-it and gemma-3-27b-it overflow at blocks 6 and 8. All four
-//! official F16 graphs of the short and long truths are therefore non-finite,
-//! so no F16 envelope exists and an F16 run could only fail as uncalibrated.
-//! `TRANSFORMERS_GEMMA_DTYPE=f16` is refused with that explanation instead.
-//! The bundle-only test
-//! `official_f16_graphs_overflow_so_gemma_has_no_f16_envelope` reads the
-//! official F16 graphs named by `TRANSFORMERS_GEMMA_F16_OFFICIAL_DIRS` and
-//! `TRANSFORMERS_GEMMA_LONG_F16_OFFICIAL_DIRS` and requires the envelope to be
-//! refused as uncalibrated. The crate itself still loads Gemma 3 in F16 and
-//! evaluates the faithful graph; whether it should refuse such loads by
-//! default is a policy question left to the maintainer (recorded in
-//! `acceptance/measurements/half-precision-envelope-20261018.json`).
+//! Gemma F16 is uncalibrated: all official F16 graphs overflow. The published
+//! gemma-3-4b-it checkpoint overflows F16 in Transformers too: the first value
+//! beyond F16's `65,504` is the residual addition after block 5's MLP at the
+//! BOS position, channel 443 (`51,941.5 + 21,568.1 = 73,509.6` in F32),
+//! identically in torch CPU and MPS F16 and in this crate's Metal and Flex
+//! F16, and every logit after it is NaN; gemma-3-12b-it and gemma-3-27b-it
+//! overflow at blocks 6 and 8. All four official F16 graphs of the short and
+//! long truths are therefore non-finite, so no F16 envelope exists. A
+//! `TRANSFORMERS_GEMMA_DTYPE=f16` run reads them from
+//! `TRANSFORMERS_GEMMA_F16_OFFICIAL_DIRS` and
+//! `TRANSFORMERS_GEMMA_LONG_F16_OFFICIAL_DIRS` and fails as uncalibrated
+//! (`uncalibrated: official ... float16 non-finite`) before its checkpoint
+//! loads, as Qwen2-7B's F16 runs do in `tests/llama_family_artifacts.rs`. The
+//! bundle-only test `official_f16_graphs_overflow_so_gemma_has_no_f16_envelope`
+//! requires exactly that refusal of the envelope. Meanwhile Metal is
+//! qualified in F32 (the `metal::` tests without `TRANSFORMERS_GEMMA_DTYPE`)
+//! and half precision on Flex (and CUDA) in BF16. Whether the gates should
+//! instead refuse `f16` outright and drop a Metal/F16 Gemma profile, and
+//! whether the crate should refuse F16 loads of Gemma 3 by default, is
+//! decision (d), which awaits the maintainer
+//! (`acceptance/measurements/half-precision-followups-20261017.json`); the
+//! crate still loads Gemma 3 in F16 and evaluates the faithful graph.
 //!
 //! # CUDA
 //!
@@ -235,7 +241,8 @@
 //! rounds F32 operands, while the matrix products of this graph take the
 //! stored F16 or BF16 tensors as operands (F32 appears only in elementwise
 //! steps and reductions such as normalization, softmax, and activation
-//! functions). `f16` is refused on CUDA as everywhere ([F16](#f16)). All of
+//! functions). An `f16` run fails as uncalibrated on CUDA as everywhere
+//! ([F16](#f16)). All of
 //! this is read from the source, not measured: no CUDA run, in any dtype, has
 //! been recorded yet.
 
@@ -362,9 +369,9 @@ struct BundleVariables {
     reference: &'static str,
     /// The truth's F32 CPU-eager decode truth.
     decode_truth: &'static str,
-    /// The four official BF16 graphs (half-precision runs only).
+    /// The four official BF16 graphs (BF16 runs).
     official: &'static str,
-    /// The four official F16 graphs, read only to show that no F16 envelope exists.
+    /// The four official F16 graphs (F16 runs, which they leave uncalibrated).
     official_f16: &'static str,
 }
 
@@ -396,20 +403,17 @@ const RETIRED: [(&str, &str); 2] = [
     ),
 ];
 
-/// Refuses an F16 run: Gemma 3 has no F16 gate profile.
+/// Names the variable listing the official graphs of a `dtype` run of the bundle `variables` names.
 ///
-/// # Panics
-///
-/// If `dtype` is F16; see the module documentation's [F16](self#f16) section.
-fn refuse_f16(dtype: TensorDType) {
-    assert!(
-        dtype != TensorDType::F16,
-        "TRANSFORMERS_GEMMA_DTYPE=f16 is not a gate profile: gemma-3-4b-it overflows F16 in \
-         Transformers' own CPU and MPS F16 graphs too (block 5's post-MLP residual add at BOS reaches \
-         73,509.6 > 65,504), so no official F16 envelope exists; qualify Metal in F32 and half \
-         precision in bf16 (see tests/gemma_artifacts.rs, F16, and \
-         acceptance/measurements/half-precision-envelope-20261018.json)"
-    );
+/// F16 runs read the official F16 graphs, which overflow, so their envelope
+/// is refused as uncalibrated ([F16](self#f16)); every other run reads the
+/// official BF16 graphs.
+fn official_variable(variables: &BundleVariables, dtype: TensorDType) -> &'static str {
+    if dtype == TensorDType::F16 {
+        variables.official_f16
+    } else {
+        variables.official
+    }
 }
 
 /// Returns the directory named by the environment variable `name`.
@@ -460,13 +464,15 @@ fn load<B: Backend>(device: &B::Device) -> Loaded<B> {
 /// Loads the checkpoint in `TRANSFORMERS_GEMMA_DTYPE` after checking it matches the bundle `variables` names.
 ///
 /// A multimodal checkpoint must report its vision tower, and nothing else,
-/// as intentionally ignored. The retired single-bundle variables and an F16
-/// run are refused first. The device is then probed. An F32 run (the
-/// default) takes the tolerance `f32_tolerance` resolves from the probe, so a
-/// TF32 device without an explicit tolerance fails before loading. A BF16 run
-/// refuses both F32 tolerance overrides on every device and is judged by the
-/// official envelope of the bundles `variables` names, which is validated
-/// before the checkpoint loads. Either run then prints one line with the
+/// as intentionally ignored. The retired single-bundle variables are refused
+/// first. The device is then probed. An F32 run (the default) takes the
+/// tolerance `f32_tolerance` resolves from the probe, so a TF32 device without
+/// an explicit tolerance fails before loading. A half-precision run refuses
+/// both F32 tolerance overrides on every device and is judged by the official
+/// envelope of the bundles `variables` names in its dtype
+/// ([`official_variable`]), which is validated before the checkpoint loads;
+/// an F16 run therefore fails there as uncalibrated, because every official
+/// F16 graph of gemma-3-4b-it is non-finite ([F16](self#f16)). Either run then prints one line with the
 /// probe's finding and what judges the run: the F32 tolerance, or, in half
 /// precision, the official envelope and its greedy tolerance, so a
 /// half-precision log states that the probe was not applied.
@@ -477,7 +483,6 @@ fn load_bundle<B: Backend>(
 ) -> Loaded<B> {
     refuse_retired(&RETIRED);
     let dtype = run_dtype("TRANSFORMERS_GEMMA_DTYPE");
-    refuse_f16(dtype);
     let reference_dir = directory(variables.reference);
     let precision = MatmulPrecision::probe::<B>(device);
     let (tolerance, half) = if is_half_precision(dtype) {
@@ -489,7 +494,7 @@ fn load_bundle<B: Backend>(
             dtype,
             &reference_dir,
             &directory(variables.decode_truth),
-            &required_directories(variables.official),
+            &required_directories(official_variable(variables, dtype)),
         );
         let tolerance = half.greedy_tolerance();
         eprintln!(
@@ -1137,46 +1142,37 @@ fn check_long_context_cached<B: Backend>(device: &B::Device) {
     );
 }
 
-/// An F16 run is refused before anything loads, naming the measured overflow; BF16 and F32 runs are not.
+/// An F16 run reads the official F16 graphs, and every other run the official BF16 graphs, of both bundles.
 #[test]
-fn f16_runs_are_refused_with_the_measured_overflow() {
-    refuse_f16(TensorDType::BF16);
-    refuse_f16(TensorDType::F32);
-    let refused = std::panic::catch_unwind(|| refuse_f16(TensorDType::F16))
-        .expect_err("an F16 run must be refused");
-    // A literal assertion message is a `&str` payload, a formatted one a `String`.
-    let message = refused
-        .downcast_ref::<String>()
-        .cloned()
-        .or_else(|| {
-            refused
-                .downcast_ref::<&str>()
-                .map(|text| (*text).to_owned())
-        })
-        .unwrap_or_default();
-    for fragment in [
-        "TRANSFORMERS_GEMMA_DTYPE=f16 is not a gate profile",
-        "73,509.6 > 65,504",
-        "no official F16 envelope exists",
-        "acceptance/measurements/half-precision-envelope-20261018.json",
+fn official_graphs_follow_the_run_dtype() {
+    for (variables, bf16, f16) in [
+        (
+            &SHORT,
+            "TRANSFORMERS_GEMMA_OFFICIAL_DIRS",
+            "TRANSFORMERS_GEMMA_F16_OFFICIAL_DIRS",
+        ),
+        (
+            &LONG,
+            "TRANSFORMERS_GEMMA_LONG_OFFICIAL_DIRS",
+            "TRANSFORMERS_GEMMA_LONG_F16_OFFICIAL_DIRS",
+        ),
     ] {
-        assert!(
-            message.contains(fragment),
-            "{fragment:?} missing from {message:?}"
-        );
+        assert_eq!(official_variable(variables, TensorDType::F16), f16);
+        assert_eq!(official_variable(variables, TensorDType::BF16), bf16);
+        assert_eq!(official_variable(variables, TensorDType::F32), bf16);
     }
 }
 
-/// Reads the official BF16 envelope of the bundle `variables` names, from the bundles alone.
+/// Reads the official envelope of the bundle `variables` names in the run's dtype, from the bundles alone.
 ///
 /// # Panics
 ///
-/// If a retired variable is set, the dtype is not BF16, or [`Envelope::read`]
-/// refuses the bundles.
+/// If a retired variable is set, the dtype is F32, or [`Envelope::read`]
+/// refuses the bundles; in F16 it refuses them as uncalibrated
+/// ([F16](self#f16)).
 fn official_envelope(variables: &BundleVariables) -> Envelope {
     refuse_retired(&RETIRED);
     let dtype = run_dtype("TRANSFORMERS_GEMMA_DTYPE");
-    refuse_f16(dtype);
     assert!(
         is_half_precision(dtype),
         "set TRANSFORMERS_GEMMA_DTYPE=bf16 to read the official BF16 envelope"
@@ -1185,7 +1181,7 @@ fn official_envelope(variables: &BundleVariables) -> Envelope {
         dtype,
         &directory(variables.reference),
         &directory(variables.decode_truth),
-        &required_directories(variables.official),
+        &required_directories(official_variable(variables, dtype)),
     )
 }
 
@@ -1223,8 +1219,8 @@ fn official_graphs_admit_each_other_leave_one_out() {
 /// Reads the four official F16 graphs named by
 /// `TRANSFORMERS_GEMMA_F16_OFFICIAL_DIRS` and
 /// `TRANSFORMERS_GEMMA_LONG_F16_OFFICIAL_DIRS` and requires the envelope to be
-/// refused as uncalibrated, which is why `TRANSFORMERS_GEMMA_DTYPE=f16` is
-/// refused (see [F16](self#f16)). Bundles only.
+/// refused as uncalibrated, which is why a `TRANSFORMERS_GEMMA_DTYPE=f16` run
+/// fails before its checkpoint loads (see [F16](self#f16)). Bundles only.
 #[test]
 #[ignore = "needs the short and long _REFERENCE_DIR, _DECODE_TRUTH_DIR, and _F16_OFFICIAL_DIRS (bundles only)"]
 fn official_f16_graphs_overflow_so_gemma_has_no_f16_envelope() {
@@ -1303,8 +1299,9 @@ fn flex_long_context_cached_decode_wraps_the_rings() {
 mod metal {
     //! Metal counterparts of the Flex checks, run serially by the integrator.
     //!
-    //! They run in F32 unless `TRANSFORMERS_GEMMA_DTYPE` selects the F16
-    //! profile (`f16`).
+    //! They run in F32 unless `TRANSFORMERS_GEMMA_DTYPE` selects half
+    //! precision; `f16` fails as uncalibrated ([F16](super#f16)), and Metal
+    //! cannot store BF16 on Burn 0.21.
 
     use burn::backend::Metal;
 

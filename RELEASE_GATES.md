@@ -305,7 +305,7 @@ model, so its pass is not a gate pass.
 
 Half-precision Llama-family and Gemma runs (`TRANSFORMERS_LLAMA_FAMILY_DTYPE`
 or `TRANSFORMERS_GEMMA_DTYPE`: `bf16` on Flex, `f16` on Metal for the Llama
-family, either on CUDA; Gemma refuses `f16`) are judged against the same F32
+family, either on CUDA; Gemma's `f16` runs fail as uncalibrated) are judged against the same F32
 bundles (F64 for Qwen2-7B), the *truths*, with bounds read at run time from
 the official implementation itself. Each truth has four official graphs in
 the run's dtype, written by the same script with the truth's prompts and
@@ -410,7 +410,10 @@ alone; they evaluate no Burn model, so their passes are not gate passes. The
 previous single-bundle calibration stays recorded, unchanged, in the
 [half-precision calibration record](acceptance/measurements/half-precision-calibration-20261017.json).
 
-Gemma 3 has no F16 gate profile. gemma-3-4b-it overflows F16 in Transformers
+Gemma F16 is uncalibrated (all official F16 graphs overflow): an `f16` run
+reads them from `TRANSFORMERS_GEMMA_F16_OFFICIAL_DIRS` and
+`TRANSFORMERS_GEMMA_LONG_F16_OFFICIAL_DIRS` and fails as uncalibrated before
+its checkpoint loads, as Qwen2-7B's F16 runs do. gemma-3-4b-it overflows F16 in Transformers
 too: the first value beyond `65,504` is the residual addition after block 5's
 MLP at the BOS position (`51,941.5 + 21,568.1 = 73,509.6` in F32), identically
 in torch CPU and MPS F16 and in this crate's Metal and Flex F16;
@@ -425,7 +428,8 @@ existing `backend cannot store checkpoint dtype BF16` error (measured at
 passes every step, which an upgrade (a maintainer decision: MSRV 1.95 and the
 backend-erased tensor API) would revisit. The crate still loads Gemma 3 in F16
 and evaluates the faithful graph; whether it should refuse such loads by
-default is open for the maintainer.
+default, and whether the gates should refuse `f16` outright and drop a
+Metal/F16 Gemma profile, is decision (d), open for the maintainer.
 
 These gates establish experimental validation only; none promotes a
 checkpoint. The Flex and Metal F32 runs at `f4c56c4` and the runs of the Mac
@@ -448,8 +452,9 @@ variables, `bf16` or, for the Llama family, `f16`) keep the official envelope
 above on every device and refuse those tolerance variables, since TF32 rounds
 F32 operands and their matrix products take the stored F16 or BF16 tensors
 (read from the source, not measured). The envelope's official graphs ran on
-this Mac's CPU and MPS; no official CUDA graph is part of it. Gemma refuses
-`f16` everywhere, so `bf16` is its half-precision run on CUDA. The FLAN-T5-small release gate qualifies F32 numerics at
+this Mac's CPU and MPS; no official CUDA graph is part of it. Gemma's `f16`
+runs fail as uncalibrated everywhere, so `bf16` is its half-precision run on
+CUDA. The FLAN-T5-small release gate qualifies F32 numerics at
 `atol = rtol = 1e-4` and refuses a TF32 device:
 
 ```sh
@@ -898,8 +903,10 @@ profile), and its integrated-head rerun:
 - F16 measurements of Gemma 3 1B and 270m and of Gemma 2 (no local
   checkpoints), and a maintainer decision on a library-level Gemma 3 F16
   policy (a default refusal with an explicit opt-in, declared by the family
-  and checked by a generic load-option policy); until then the gates refuse
-  `f16` and the library evaluates the faithful, overflowing graph;
+  and checked by a generic load-option policy); until then the library
+  evaluates the faithful, overflowing graph, and Gemma `f16` gate runs fail as
+  uncalibrated (the gate-level refusal recorded here anticipated the decision
+  and was withdrawn in the review round below);
 - Metal BF16, unavailable on the pinned Burn 0.21; a Burn 0.22 upgrade (MSRV
   1.95 and the backend-erased tensor API) is a maintainer decision;
 - a non-finite guard in generation (a maintainer decision) and a
