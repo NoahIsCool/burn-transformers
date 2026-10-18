@@ -2,12 +2,20 @@
 """Derive the Nemotron-H official F16 envelope and its per-path leave-one-out slacks from the official graphs alone.
 
 The Nemotron-H official-precision gate (``tests/nemotron_h_artifacts.rs``)
-judges each Burn F16 logit row by its distance from the official class's F32
-row of the same path and decision (the precision bundle). Its bound comes
-from the official F16 graphs only, by the procedure of the half-precision
-envelope round (``scripts/derive_half_precision_envelope.py``), applied to
-the gate's own row statistic. The method was registered before any new data
-in ``acceptance/measurements/nemotron-h-envelope-20261018/derivation/method.txt``.
+judges each Burn F16 logit row by its cosine to the official class's F32 row
+of the same path and decision (the precision bundle), against a per-path
+floor: the worst cosine of the two official F16 evaluations it is
+calibrated on (the MPS/F16 oracle and the precision bundle's CPU/F16 rows),
+with no slack. This tool applies the half-precision envelope round's
+procedure (``scripts/derive_half_precision_envelope.py``) to the gate's row
+statistic over four official graphs, by the method registered before any new
+data in
+``acceptance/measurements/nemotron-h-envelope-20261018/derivation/method.txt``.
+The maintainer did not adopt the resulting rule (decision of 2026-10-18,
+``acceptance/measurements/nemotron-h-envelope-decision-20261018.json``):
+every largest leave-one-out ratio is at most ``1.0046``, so every slack is
+``1.1`` only by rounding. Its output is a diagnostic; the gate prints the
+same envelope beside its floor verdict and never applies it.
 
 Graphs
 ------
@@ -43,9 +51,10 @@ Envelope and slack
 ``rho[g, k] = D[g, k] / max_{h != g} D[h, k]``, how far the envelope of the
 other graphs must stretch to admit it, and the path's slack is
 ``s[k] = round_up(max_g rho[g, k])``, the envelope round's ceiling to two
-significant digits of the shortest round-trip decimal. A Burn row of path
-``k`` passes when ``delta <= s[k] E[k]``, the cosine floor
-``1 - (s[k] E[k])^2 / 2``, which must stay at or above ``0.99``. For
+significant digits of the shortest round-trip decimal. The registered (not
+adopted) rule would pass a Burn row of path ``k`` when
+``delta <= s[k] E[k]``, the cosine floor ``1 - (s[k] E[k])^2 / 2``, which the
+method requires to stay at or above ``0.99``. For
 transparency the result also reports the pooled slack, the ratios of the
 cosine deficit ``1 - c`` (which scales as ``delta^2``), and the
 leave-one-out ratios of the means; none of them is adopted.
@@ -107,9 +116,9 @@ PATHS = tuple(PRECISION.KINDS)
 EXISTING = {("cpu", "eager"): "precision bundle float16", ("mps", "eager"): "MPS/F16 oracle"}
 #: Graphs the graph tool provides.
 NEW = (("cpu", "sdpa"), ("mps", "sdpa"))
-#: Fewest graphs whose leave-one-out ratios the gate may adopt.
+#: Fewest graphs whose leave-one-out ratios the registered method may use.
 MINIMUM_GRAPHS = 3
-#: Lowest implied cosine floor accepted (the gate's MINIMUM_HALF_PRECISION_FLOOR).
+#: Lowest implied cosine floor accepted (the value of the gate's MINIMUM_HALF_PRECISION_FLOOR).
 MINIMUM_FLOOR = 0.99
 
 
