@@ -440,6 +440,15 @@ code written against unreleased sources.
   dtype first, which for `1 / sqrt(128)` moved 2.4% of BF16 and 15.5% of F16
   scores by one unit in the last place. F32 and F64 are unchanged, and the
   fused default path is unaffected.
+- Attention: on Flex, the eager graph's two F16 matrix products (`Q K^T` and
+  probabilities times values) are summed in F32 and rounded once, as
+  `torch.matmul` sums half-precision operands on the CPU and MPS. Burn Flex
+  0.21's F16 GEMM keeps F16 partial sums, so on the operation-level eager test
+  10 of 120 probabilities and 45 of 96 outputs differed from Transformers'
+  `eager_attention_forward`; the eager graph now matches it bit for bit there
+  in BF16 and F16 on every row with a visible key. Flex's BF16 products and
+  Metal's F16 products already were F32 sums rounded once (a new ignored
+  Metal test pins the latter) and are unchanged, so no gate profile changes.
 - Modular models: sinks with a soft cap are rejected at the spec field;
   sliding windows in encoder stacks are rejected; earlier block records still
   load; range contexts are validated once.

@@ -46,6 +46,25 @@
 //! finite or `-inf`; `+inf`/NaN bias is unsupported. Backend-native kernels
 //! define fully excluded rows themselves (Burn's fallback and Flex return zero).
 //!
+//! In F16 and BF16 the eager graph rounds where Transformers' eager attention
+//! (`eager_attention_forward`) does, five times per output:
+//!
+//! - `p = round(Q K^T)`, the matrix product summed in F32 and rounded once,
+//!   as `torch.matmul` sums half-precision operands;
+//! - `s = round(p * scale)`, the product times the unrounded scale in F32, as
+//!   PyTorch multiplies a tensor by a Python float;
+//! - `t = round(s + bias)`, the bias (Transformers' additive mask) added in
+//!   the dtype, with exclusions at `-inf`;
+//! - `P = round(softmax_f32(t))`, as `softmax(..., dtype=torch.float32).to(dtype)`;
+//! - `out = round(P V)`, summed in F32 and rounded once.
+//!
+//! Burn Flex 0.21's F16 GEMM keeps F16 partial sums, so on inference Flex the
+//! two F16 products are widened to F32 and rounded once
+//! ([`f32_accumulated_matmul`]); Burn's BF16 products on Flex and its F16
+//! products on Metal already are F32 sums rounded once. `dispatch_tests.rs`
+//! compares the probabilities and outputs with an emulation of these five
+//! points bit for bit.
+//!
 //! # Attention sinks
 //!
 //! A learned per-head sink logit `s_h` adds one extra softmax column that is
@@ -69,11 +88,12 @@
 //!
 //! # Reduced precision
 //!
-//! Folding changes only matmul shapes, never operand rounding. In F16 and
-//! BF16 on Flex the folded and repeated graphs are bit-identical except eager
-//! F16 decode, where a folded `g`-row GEMM and per-head GEMVs accumulate
-//! scores in a different order; both stay within the same distance of an F64
-//! reference (see the reduced-precision tests for calibrated tolerances).
+//! Folding changes only matmul shapes, never operand rounding. Every
+//! half-precision product of the eager graph is an F32 sum rounded once, so
+//! the folded and repeated graphs can differ only where F32 sums in another
+//! order round differently; on the reduced-precision fixtures they are equal
+//! on Flex, and both stay within the same distance of an F64 reference (see
+//! the reduced-precision tests for calibrated tolerances).
 
 use burn::tensor::{
     BasicOps, Bool, DType, Int, Tensor, activation::softmax, backend::Backend, module::attention,
@@ -312,14 +332,24 @@ pub(crate) fn default_scale(head_dim: usize) -> f64 {
 /// Softcapping applies `cap * tanh(scores / cap)` before any exclusion, so
 /// `-inf` masking is never mapped to a finite value.
 ///
-/// In F16 and BF16 the product `Q K^T` is rounded to the operand dtype by the
-/// matmul, as in Transformers' eager `torch.matmul(query, key.T) * scaling`,
-/// and is then multiplied by the unrounded scale in F32 and rounded once
-/// ([`crate::feed_forward::evaluate_in_f32`]): PyTorch evaluates a
-/// half-precision tensor times a Python float in F32 opmath. Burn's
-/// `tensor * scalar` would round the scalar to the tensor dtype first, which
-/// for `1 / sqrt(128)` moves 2.4% of BF16 and 15.5% of F16 products by one
-/// unit in the last place. F32 and F64 multiply in their own dtype, unchanged.
+/// In F16 and BF16 the product `Q K^T` is summed in F32 and rounded to the
+/// operand dtype ([`f32_accumulated_matmul`]), as in Transformers' eager
+/// `torch.matmul(query, key.T) * scaling`, and is then multiplied by the
+/// unrounded scale in F32 and rounded once
+/// ([`crate::feed_forward::evaluate_in_f32`]). This is the convention of
+/// PyTorch's CPU kernel, which multiplies a half-precision tensor by a Python
+/// float in F32 opmath: with torch 2.10.0, `x * (1 / sqrt(128))` equals
+/// `(x.float() * s).to(dtype)` on all 65,280 finite BF16 and all 63,488
+/// finite F16 values. On MPS it holds for every F16 value, but 1,120 BF16
+/// values differ: in each the F32 product is subnormal and MPS flushes it to
+/// zero (1,118 would round to a BF16 subnormal, 2 to the smallest normal)
+/// (`acceptance/measurements/half-precision-review-20261018/probes/probe_torch_half.log`).
+/// Burn's `tensor * scalar` would round the scalar to the tensor dtype
+/// first, which for `1 / sqrt(128)` moves 1,508 of the finite BF16 and 8,722
+/// of the finite F16 products by one unit in the last place (140 of 5,938
+/// BF16 and 7,384 of 47,506 F16 inputs of the earlier Flex probe,
+/// `half-precision-envelope-20261018/probes/probe_half.log`). F32 and F64
+/// multiply in their own dtype, unchanged.
 pub(crate) fn scaled_scores<B: Backend>(
     query: Tensor<B, 4>,
     key: Tensor<B, 4>,
@@ -328,7 +358,7 @@ pub(crate) fn scaled_scores<B: Backend>(
 ) -> Tensor<B, 4> {
     let [batch, query_heads, query_sequence, _] = query.dims();
     let [_, key_value_heads, key_sequence, _] = key.dims();
-    let product = fold_groups(query, key_value_heads).matmul(key.swap_dims(2, 3));
+    let product = f32_accumulated_matmul(fold_groups(query, key_value_heads), key.swap_dims(2, 3));
     let scores = crate::feed_forward::evaluate_in_f32(product, |product| product * scale)
         .reshape([batch, query_heads, query_sequence, key_sequence]);
     match softcap {
@@ -427,6 +457,10 @@ pub(crate) fn zero_excluded<B: Backend>(
 }
 
 /// Multiplies per-head probabilities by native-head values: `[b, qh, q, k] x [b, kvh, k, dv]`.
+///
+/// In F16 and BF16 the products are summed in F32 and rounded once
+/// ([`f32_accumulated_matmul`]), as Transformers' eager
+/// `torch.matmul(attn_weights, value)` sums them.
 pub(crate) fn grouped_mix<B: Backend>(
     probabilities: Tensor<B, 4>,
     value: Tensor<B, 4>,
@@ -434,9 +468,36 @@ pub(crate) fn grouped_mix<B: Backend>(
     let query_heads = probabilities.dims()[1];
     let key_value_heads = value.dims()[1];
     unfold_groups(
-        fold_groups(probabilities, key_value_heads).matmul(value),
+        f32_accumulated_matmul(fold_groups(probabilities, key_value_heads), value),
         query_heads,
     )
+}
+
+/// Multiplies `lhs` by `rhs` with an F32 sum rounded once to a half-precision dtype, as `torch.matmul` sums F16 and BF16.
+///
+/// PyTorch's CPU and MPS products accumulate F16 and BF16 operands in F32
+/// and round each element once. Burn's BF16 products on Flex (which widens
+/// them to F32 operands) and its F16 products on Metal do too
+/// (`operations_tests.rs`: `flex_f16_matmul_keeps_f16_partial_sums` and
+/// `metal_f16_matmul_is_an_f32_sum_rounded_once`), and are returned
+/// unchanged. Burn Flex 0.21's F16 GEMM reads F16 operands directly and
+/// keeps F16 partial sums, so on inference Flex an F16 product is formed from
+/// F32 copies of both operands and rounded once; an exact sum then rounds
+/// exactly as PyTorch's does, and other sums differ from it only by F32
+/// summation order. The copies cost four bytes per operand element for the
+/// duration of the call. Other backends, including autodiff ones (half
+/// precision is not a training contract), use their own products.
+pub(crate) fn f32_accumulated_matmul<B: Backend>(
+    lhs: Tensor<B, 4>,
+    rhs: Tensor<B, 4>,
+) -> Tensor<B, 4> {
+    if lhs.dtype() == DType::F16 && crate::operations::is_inference_flex::<B>(&lhs.device()) {
+        return lhs
+            .cast(DType::F32)
+            .matmul(rhs.cast(DType::F32))
+            .cast(DType::F16);
+    }
+    lhs.matmul(rhs)
 }
 
 // ---------------------------------------------------------------------------

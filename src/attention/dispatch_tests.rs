@@ -412,10 +412,15 @@ fn assert_within(actual: &[f32], expected: &[f32], tolerance: f32, context: &str
 /// Fixture outputs are convex combinations of values in `[-1.1, 1.1]` with
 /// scaled scores up to about 5 at head width 128. The eager graph rounds those
 /// scores to the operand dtype before its F32 softmax (relative `2^-11` in F16,
-/// `2^-8` in BF16), which alone moves outputs by a few `1e-3`; Flex's F16
-/// matmul also accumulates in F16. Observed maxima: F16 `2.4e-3` between
-/// graphs and `8.6e-3` against F64; BF16 `3.9e-3` and `9.8e-3`. The bounds
-/// below leave at least 1.4x headroom and match common F16/BF16 attention
+/// `2^-8` in BF16), which alone moves outputs by a few `1e-3`. Every product
+/// is an F32 sum rounded once (the eager F16 products on Flex through
+/// [`f32_accumulated_matmul`]). Observed maxima on Flex: the folded and
+/// repeated graphs are equal in both dtypes (up to the sign of zero on fully
+/// padded rows); against F64, F16 `1.6e-3` eager and `7.9e-4` fused, BF16
+/// `9.8e-3` eager and `5.1e-3` fused. While Flex's F16 GEMM still formed the
+/// eager products with F16 partial sums, eager F16 differed between graphs
+/// by up to `2.0e-3` and from F64 by `7.6e-3`. The bounds below, unchanged by
+/// that fix, leave at least 1.6x headroom and match common F16/BF16 attention
 /// parity tolerances.
 const REDUCED_PRECISION: [(DType, f32, f32); 2] =
     [(DType::F16, 4e-3, 1.25e-2), (DType::BF16, 1.6e-2, 1.6e-2)];
@@ -423,9 +428,11 @@ const REDUCED_PRECISION: [(DType, f32, f32); 2] =
 /// Folding stays equivalent to repeated K/V in F16 and BF16 at production head widths.
 ///
 /// Both graphs see identical rounded operands; folding changes only matmul
-/// shapes. On Flex they are bit-identical except eager F16 decode, where a
-/// folded `g`-row GEMM and a per-head GEMV accumulate scores differently.
-/// Both stay within the same distance of the F64 oracle.
+/// shapes, and every product is an F32 sum rounded once, so the graphs can
+/// differ only where F32 sums in another order round differently. On these
+/// fixtures they are equal on Flex (up to the sign of zero on fully padded
+/// rows); the tolerance keeps the test independent of summation order. Both
+/// stay within the same distance of the F64 oracle.
 #[test]
 fn folded_groups_match_repeated_key_value_in_reduced_precision() {
     for head_dim in [64, 128] {
@@ -1105,21 +1112,22 @@ fn half_operand(rows: usize, seed: usize, dtype: DType) -> Tensor<TestBackend, 4
 /// Eager half-precision scores are the rounded `Q K^T` times the unrounded scale, rounded once, as in Transformers.
 ///
 /// Transformers' eager attention computes `torch.matmul(query, key.T) *
-/// scaling` with `scaling` a Python float, which PyTorch multiplies in F32 and
-/// rounds once (`(x.float() * s).bfloat16()` equals `x * s` on every tested
-/// BF16 value). With 128-wide heads `scaling = 1 / sqrt(128)` is exact in
-/// neither format, so rounding it to the dtype first, as Burn's `tensor *
-/// scalar` does, moves some scores by one unit in the last place; this test
-/// detects that. The matmul's own rounding is read back from Burn, so only
-/// the scale's rounding point is under test.
+/// scaling` with `scaling` a Python float, which PyTorch's CPU kernel
+/// multiplies in F32 and rounds once: `x * s` equals `(x.float() * s).to(dtype)`
+/// on every finite BF16 and F16 `x` (the review round's torch probe; MPS
+/// agrees except that it flushes BF16 subnormals). With 128-wide heads
+/// `scaling = 1 / sqrt(128)` is exact in neither format, so rounding it to
+/// the dtype first, as Burn's `tensor * scalar` does, moves some scores by
+/// one unit in the last place; this test detects that. The matmul's own
+/// rounding is read back from the graph's product
+/// ([`f32_accumulated_matmul`]), so only the scale's rounding point is under
+/// test.
 #[test]
 fn half_precision_eager_scores_multiply_by_the_unrounded_scale() {
     let scale = default_scale(128);
     for dtype in [DType::BF16, DType::F16] {
         let (query, key) = (half_operand(3, 1, dtype), half_operand(64, 2, dtype));
-        let product = query
-            .clone()
-            .matmul(key.clone().swap_dims(2, 3))
+        let product = f32_accumulated_matmul(query.clone(), key.clone().swap_dims(2, 3))
             .cast(DType::F32)
             .into_data()
             .to_vec::<f32>()
@@ -1206,5 +1214,439 @@ fn half_precision_fused_attention_is_the_f32_attention_rounded_once() {
             wide.cast(dtype).cast(DType::F32).into_data(),
             "{dtype:?}"
         );
+    }
+}
+
+/// One grouped eager problem whose exact sums are exact in F32 but not in F16 or BF16.
+///
+/// Queries and keys are multiples of `1/64` in `[-0.75, 0.75]` with eight
+/// channels, so every `Q K^T` partial sum is a multiple of `2^-12` below
+/// `4.5` in magnitude: exact in F32, but not in F16 (whose spacing is
+/// `2^-11` from `0.5`) or BF16. Values are multiples of `1/8` in `[-1, 1]`
+/// and the bias lies in `[-0.45, 0.45]`, so with the score scale
+/// `1 / sqrt(8)` every probability-times-value sum is exact in F32 too
+/// ([`EagerGrid::emulate`] asserts both). Four query heads share two key/value heads; three queries
+/// over five keys make the causal plane non-square (bottom-right aligned),
+/// and the explicit mask excludes every key of batch 0, head 1, query 0 (a
+/// fully masked row) and one more link.
+struct EagerGrid {
+    /// Queries `[2, 4, 3, 8]`.
+    query: Vec<f32>,
+    /// Keys `[2, 2, 5, 8]`.
+    key: Vec<f32>,
+    /// Values `[2, 2, 5, 4]`.
+    value: Vec<f32>,
+    /// Explicit exclusions `[2, 4, 3, 5]` (`true == excluded`), before causality.
+    mask: Vec<bool>,
+    /// Additive bias `[1, 4, 3, 5]`, broadcast over the batch.
+    bias: Vec<f32>,
+}
+
+/// One rounding point of [`EagerGrid::emulate`] moved elsewhere, to show the grid detects it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EagerVariant {
+    /// The five rounding points of Transformers' eager attention.
+    Reference,
+    /// The score product `Q K^T` keeps dtype partial sums (`acc = round(acc + q k)`).
+    ScorePartialSums,
+    /// The value product `P V` keeps dtype partial sums.
+    ValuePartialSums,
+    /// The bias is added to the widened scores, without rounding the sum.
+    WideBias,
+    /// Softmax runs in the dtype instead of F32.
+    DtypeSoftmax,
+}
+
+impl EagerGrid {
+    /// Batch rows.
+    const BATCH: usize = 2;
+    /// Query heads.
+    const QUERY_HEADS: usize = 4;
+    /// Native key/value heads.
+    const KEY_VALUE_HEADS: usize = 2;
+    /// Query tokens.
+    const QUERIES: usize = 3;
+    /// Key tokens.
+    const KEYS: usize = 5;
+    /// Query/key channels.
+    const HEAD_DIM: usize = 8;
+    /// Value channels.
+    const VALUE_DIM: usize = 4;
+
+    /// Builds the deterministic grid operands.
+    fn new() -> Self {
+        // `steps` multiples of `half_range / steps` on either side of zero.
+        let grid = |count: usize, seed: usize, steps: usize, half_range: f32| {
+            (0..count)
+                .map(|index| {
+                    let step = (index * 29 + seed * 13) % (2 * steps + 1);
+                    (step as f32 - steps as f32) * half_range / steps as f32
+                })
+                .collect::<Vec<_>>()
+        };
+        let (batch, heads, queries, keys) =
+            (Self::BATCH, Self::QUERY_HEADS, Self::QUERIES, Self::KEYS);
+        let mut mask = vec![false; batch * heads * queries * keys];
+        // Batch 0, head 1, query 0: every key excluded.
+        mask[keys * queries..keys * queries + keys].fill(true);
+        // Batch 1, head 2, query 2, key 4: one more excluded link.
+        mask[((heads + 2) * queries + 2) * keys + 4] = true;
+        Self {
+            query: grid(batch * heads * queries * Self::HEAD_DIM, 1, 48, 0.75),
+            key: grid(
+                batch * Self::KEY_VALUE_HEADS * keys * Self::HEAD_DIM,
+                2,
+                48,
+                0.75,
+            ),
+            value: grid(
+                batch * Self::KEY_VALUE_HEADS * keys * Self::VALUE_DIM,
+                3,
+                8,
+                1.0,
+            ),
+            mask,
+            bias: grid(heads * queries * keys, 4, 16, 0.45),
+        }
+    }
+
+    /// The operands cast to `dtype`, with the explicit mask.
+    fn operands(&self, dtype: DType) -> Operands<TestBackend> {
+        let device = Default::default();
+        let tensor = |values: &[f32], shape: [usize; 4]| {
+            Tensor::<TestBackend, 4>::from_data(TensorData::new(values.to_vec(), shape), &device)
+                .cast(dtype)
+        };
+        Operands {
+            query: tensor(
+                &self.query,
+                [
+                    Self::BATCH,
+                    Self::QUERY_HEADS,
+                    Self::QUERIES,
+                    Self::HEAD_DIM,
+                ],
+            ),
+            key: tensor(
+                &self.key,
+                [
+                    Self::BATCH,
+                    Self::KEY_VALUE_HEADS,
+                    Self::KEYS,
+                    Self::HEAD_DIM,
+                ],
+            ),
+            value: tensor(
+                &self.value,
+                [
+                    Self::BATCH,
+                    Self::KEY_VALUE_HEADS,
+                    Self::KEYS,
+                    Self::VALUE_DIM,
+                ],
+            ),
+            mask: Some(Tensor::<TestBackend, 4, Bool>::from_data(
+                TensorData::new(
+                    self.mask.clone(),
+                    [Self::BATCH, Self::QUERY_HEADS, Self::QUERIES, Self::KEYS],
+                ),
+                &device,
+            )),
+            bias: Some(tensor(
+                &self.bias,
+                [1, Self::QUERY_HEADS, Self::QUERIES, Self::KEYS],
+            )),
+            sinks: None,
+        }
+    }
+
+    /// Whether link `(batch, head, query, key)` is excluded, by the mask or by bottom-right causality.
+    fn excluded(&self, batch: usize, head: usize, query: usize, key: usize) -> bool {
+        let index = ((batch * Self::QUERY_HEADS + head) * Self::QUERIES + query) * Self::KEYS + key;
+        self.mask[index] || key > query + Self::KEYS - Self::QUERIES
+    }
+
+    /// `[batch, head, row, column]` sums `Σ_i left(row, i) right(i, column)` over grouped heads.
+    ///
+    /// `left` is `[batch, query_head, rows, inner]` and `right` is
+    /// `[batch, kv_head, inner, columns]` read through `right_index(kv, i,
+    /// column)`. A reference sum is formed exactly in F64 and asserted exact
+    /// in F32, so its summation order cannot matter; with `partial` every
+    /// partial sum is rounded by it instead.
+    fn grouped_sums(
+        left: &[f32],
+        right: impl Fn(usize, usize, usize, usize) -> f32,
+        [rows, inner, columns]: [usize; 3],
+        partial: Option<&dyn Fn(f32) -> f32>,
+    ) -> Vec<f32> {
+        let groups = Self::QUERY_HEADS / Self::KEY_VALUE_HEADS;
+        let mut sums = Vec::with_capacity(Self::BATCH * Self::QUERY_HEADS * rows * columns);
+        for batch in 0..Self::BATCH {
+            for head in 0..Self::QUERY_HEADS {
+                for row in 0..rows {
+                    for column in 0..columns {
+                        let term = |index: usize| {
+                            f64::from(
+                                left[((batch * Self::QUERY_HEADS + head) * rows + row) * inner
+                                    + index],
+                            ) * f64::from(right(batch, head / groups, index, column))
+                        };
+                        sums.push(match partial {
+                            Some(round) => (0..inner)
+                                .fold(0.0_f32, |sum, index| round(sum + term(index) as f32)),
+                            None => {
+                                let sum = (0..inner).map(term).sum::<f64>();
+                                assert_eq!(f64::from(sum as f32), sum, "{sum} is not exact in F32");
+                                sum as f32
+                            }
+                        });
+                    }
+                }
+            }
+        }
+        sums
+    }
+
+    /// Transformers' eager graph in `dtype` (or a [`EagerVariant`] of it), emulated on the host.
+    ///
+    /// Returns the probabilities `[batch, head, query, key]` and the output
+    /// `[batch, head, query, value]`, widened to F32. `round` is Flex's own
+    /// F32-to-`dtype` cast ([`cast_through`]), so the reference emulation
+    /// fixes the rounding points and nothing else:
+    ///
+    /// - `p_qk = round(Σ q k)`: the matrix product, an exact sum rounded once
+    ///   (`torch.matmul` accumulates half-precision operands in F32);
+    /// - `s = round(p_qk * f32(scale))`: a Python-float scale in F32 opmath;
+    /// - `t = round(s + bias)`, `-inf` where excluded: Transformers adds its
+    ///   additive mask in the dtype;
+    /// - `p = round(softmax_f32(t))`, zero on a fully excluded row (the
+    ///   crate's definition): `softmax(..., dtype=torch.float32).to(dtype)`;
+    /// - `out = round(Σ p v)`: the value product, an exact sum rounded once.
+    ///
+    /// The F32 softmax itself is Burn's (`activation::softmax` of an F32
+    /// tensor of the emulated `t`): two F32 softmax implementations may differ
+    /// in the last F32 bit, which is no rounding point.
+    fn emulate(&self, dtype: DType, variant: EagerVariant) -> (Vec<f32>, Vec<f32>) {
+        let (batch, heads, queries, keys) =
+            (Self::BATCH, Self::QUERY_HEADS, Self::QUERIES, Self::KEYS);
+        let round = |values: &[f32]| cast_through(dtype, values);
+        let round_one = |value: f32| match dtype {
+            DType::BF16 => burn::tensor::bf16::from_f32(value).to_f32(),
+            _ => burn::tensor::f16::from_f32(value).to_f32(),
+        };
+        let partial =
+            |moved: EagerVariant| (variant == moved).then_some(&round_one as &dyn Fn(f32) -> f32);
+        let (query, key, value, bias) = (
+            round(&self.query),
+            round(&self.key),
+            round(&self.value),
+            round(&self.bias),
+        );
+        let products = Self::grouped_sums(
+            &query,
+            |batch, kv, channel, column| {
+                key[((batch * Self::KEY_VALUE_HEADS + kv) * keys + column) * Self::HEAD_DIM
+                    + channel]
+            },
+            [queries, Self::HEAD_DIM, keys],
+            partial(EagerVariant::ScorePartialSums),
+        );
+        let scale = default_scale(Self::HEAD_DIM) as f32;
+        let scores = round(
+            &round(&products)
+                .iter()
+                .map(|product| product * scale)
+                .collect::<Vec<_>>(),
+        );
+        let biased = scores
+            .iter()
+            .enumerate()
+            .map(|(index, score)| score + bias[index % (heads * queries * keys)])
+            .collect::<Vec<_>>();
+        let mut biased = match variant {
+            EagerVariant::WideBias => biased,
+            _ => round(&biased),
+        };
+        let mut fully_excluded = vec![false; batch * heads * queries];
+        for b in 0..batch {
+            for h in 0..heads {
+                for q in 0..queries {
+                    let row = (b * heads + h) * queries + q;
+                    for k in 0..keys {
+                        if self.excluded(b, h, q, k) {
+                            biased[row * keys + k] = f32::NEG_INFINITY;
+                        }
+                    }
+                    fully_excluded[row] = (0..keys).all(|k| self.excluded(b, h, q, k));
+                    if fully_excluded[row] {
+                        // The graph zeroes unsupported rows before and after normalization.
+                        biased[row * keys..(row + 1) * keys].fill(0.0);
+                    }
+                }
+            }
+        }
+        let shape = [batch, heads, queries, keys];
+        let wide = Tensor::<TestBackend, 4>::from_data(
+            TensorData::new(biased, shape),
+            &Default::default(),
+        );
+        let softmax = match variant {
+            EagerVariant::DtypeSoftmax => {
+                burn::tensor::activation::softmax(wide.cast(dtype), 3).cast(DType::F32)
+            }
+            _ => burn::tensor::activation::softmax(wide, 3),
+        };
+        let mut probabilities = round(&softmax.into_data().to_vec::<f32>().unwrap());
+        for (row, &excluded) in fully_excluded.iter().enumerate() {
+            if excluded {
+                probabilities[row * keys..(row + 1) * keys].fill(0.0);
+            }
+        }
+        let output = Self::grouped_sums(
+            &probabilities,
+            |batch, kv, key, channel| {
+                value[((batch * Self::KEY_VALUE_HEADS + kv) * keys + key) * Self::VALUE_DIM
+                    + channel]
+            },
+            [queries, keys, Self::VALUE_DIM],
+            partial(EagerVariant::ValuePartialSums),
+        );
+        (probabilities, round(&output))
+    }
+}
+
+/// Transformers' `eager_attention_forward` on [`EagerGrid`], as BF16 bits `[batch, head, query, value]`.
+///
+/// Pinned with transformers 5.2.0 and torch 2.10.0 on the CPU by
+/// `acceptance/measurements/half-precision-review-20261018/probes/probe_torch_half.py`
+/// (Llama's eager function, excluded links at `finfo(bfloat16).min` as in
+/// Transformers' masks, `scaling = 8 ** -0.5`). Elements 12 to 15 are the
+/// fully masked row, which Transformers averages over every key and the crate
+/// defines as zero.
+const TRANSFORMERS_EAGER_BF16: [u16; 96] = [
+    0x3cc4, 0xbddc, 0x3e17, 0xbef4, 0xbd8c, 0x3ddb, 0xbc48, 0xbe31, 0x3e54, 0xbe04, 0xbed9, 0x3cfe,
+    0x3e1a, 0xbd4d, 0xbe80, 0xbccd, 0x3ea3, 0x3dfe, 0xbe39, 0xbe04, 0x3e88, 0xbcb9, 0xbe44, 0xbe5d,
+    0xbee0, 0x3e5d, 0x3ee0, 0xbe40, 0x3c60, 0x3e9a, 0x3db2, 0xbf0a, 0xbd8a, 0x3d04, 0x3e44, 0xbe52,
+    0xbf11, 0x3ef1, 0x3e9e, 0xbea2, 0xbeae, 0x3e91, 0x3e4e, 0xbed9, 0x3ca9, 0x3e30, 0x3da0, 0xbe8c,
+    0xbe8f, 0xbda9, 0x3f18, 0xbcf0, 0xbed7, 0xbd26, 0x3ee9, 0xbe2e, 0x3cde, 0xbdc1, 0x3e17, 0x3e8e,
+    0xbe64, 0xbdd6, 0x3f27, 0x3ce4, 0xbf11, 0x3e41, 0x3e9d, 0xbea3, 0xbdb0, 0xbd20, 0x3e67, 0x3e28,
+    0x3de2, 0xbf03, 0xbe26, 0x3eb8, 0xbe82, 0xbe03, 0x3e7b, 0xbb88, 0xbe2c, 0xbef0, 0x3e23, 0x3da8,
+    0xbd52, 0xbf2d, 0x3e0a, 0x3e4c, 0xbe0b, 0xbec5, 0x3e64, 0x3dea, 0x3d54, 0xbe42, 0xbdfc, 0x3d98,
+];
+
+/// Transformers' `eager_attention_forward` on [`EagerGrid`] in F16, pinned like [`TRANSFORMERS_EAGER_BF16`].
+const TRANSFORMERS_EAGER_F16: [u16; 96] = [
+    0x260a, 0xaee2, 0x30bc, 0xb7a2, 0xac59, 0x2ebf, 0xa206, 0xb187, 0x32a4, 0xb029, 0xb6ca, 0x27f4,
+    0x30cc, 0xaa66, 0xb400, 0xa666, 0x3520, 0x2ff9, 0xb1cc, 0xb01d, 0x3437, 0xa5cc, 0xb21f, 0xb2e1,
+    0xb6ff, 0x32dc, 0x3701, 0xb1fe, 0x22e6, 0x34d1, 0x2d90, 0xb84e, 0xac51, 0x283d, 0x321d, 0xb294,
+    0xb889, 0x378a, 0x34ef, 0xb512, 0xb571, 0x3488, 0x3272, 0xb6c8, 0x2534, 0x3185, 0x2cfd, 0xb460,
+    0xb479, 0xad54, 0x38c4, 0xa78c, 0xb6b8, 0xa922, 0x3748, 0xb171, 0x26f8, 0xae09, 0x30b3, 0x346f,
+    0xb319, 0xaebe, 0x393a, 0x2738, 0xb88b, 0x320a, 0x34e9, 0xb516, 0xad78, 0xa8fa, 0x3334, 0x3144,
+    0x2f1a, 0xb81c, 0xb136, 0x35c6, 0xb413, 0xb014, 0x33d9, 0x9ca4, 0xb156, 0xb77e, 0x310e, 0x2d55,
+    0xaa84, 0xb968, 0x304e, 0x325f, 0xb059, 0xb629, 0x3320, 0x2f4f, 0x2a8e, 0xb212, 0xafd0, 0x2cc0,
+];
+
+/// Counts the elements whose bits differ.
+fn differing_bits(actual: &[f32], expected: &[f32]) -> usize {
+    assert_eq!(actual.len(), expected.len());
+    actual
+        .iter()
+        .zip(expected)
+        .filter(|(actual, expected)| actual.to_bits() != expected.to_bits())
+        .count()
+}
+
+/// Eager half-precision attention rounds where Transformers' eager attention does, on grouped heads with causal and fully masked rows.
+///
+/// [`EagerGrid::emulate`] lists the five rounding points. The probabilities
+/// ([`eager_probabilities`] of [`scaled_scores`], the hook path's pattern)
+/// and the output of [`eager`] must equal the emulation bit for bit in BF16
+/// and F16, and the output must equal Transformers' own
+/// `eager_attention_forward` ([`TRANSFORMERS_EAGER_BF16`],
+/// [`TRANSFORMERS_EAGER_F16`]) on every row with a visible key. Each
+/// [`EagerVariant`] must differ from the emulation, so the grid detects dtype
+/// partial sums in either product, a bias added after widening, and a softmax
+/// in the dtype. On Flex the F16 products are formed in F32
+/// ([`f32_accumulated_matmul`]); Flex's own F16 GEMM, which keeps F16 partial
+/// sums, fails this test in either product.
+#[test]
+fn half_precision_eager_attention_rounds_like_transformers_eager() {
+    let problem = EagerGrid::new();
+    let options = AttentionModuleOptions {
+        scale: None,
+        softcap: None,
+        is_causal: true,
+    };
+    let device = Default::default();
+    for dtype in [DType::BF16, DType::F16] {
+        let (probabilities, output) = problem.emulate(dtype, EagerVariant::Reference);
+        let operands = problem.operands(dtype);
+        let geometry = operands.geometry().unwrap();
+        let exclusion = union_exclusions(
+            operands.mask.clone(),
+            causal_exclusion(true, geometry, &device).unwrap(),
+        );
+        let pattern = eager_probabilities(
+            scaled_scores(
+                operands.query.clone(),
+                operands.key.clone(),
+                default_scale(EagerGrid::HEAD_DIM),
+                None,
+            ),
+            exclusion.as_ref(),
+            operands.bias.clone(),
+            None,
+        );
+        assert_eq!(pattern.dtype(), dtype);
+        let pattern = pattern
+            .cast(DType::F32)
+            .into_data()
+            .to_vec::<f32>()
+            .unwrap();
+        assert_eq!(
+            differing_bits(&pattern, &probabilities),
+            0,
+            "{dtype:?} probabilities\nactual   {pattern:?}\nexpected {probabilities:?}"
+        );
+        let actual = eager(operands, options, geometry).unwrap();
+        assert_eq!(actual.dtype(), dtype);
+        let actual = actual.cast(DType::F32).into_data().to_vec::<f32>().unwrap();
+        assert_eq!(
+            differing_bits(&actual, &output),
+            0,
+            "{dtype:?} output\nactual   {actual:?}\nexpected {output:?}"
+        );
+        // The fully excluded row is zero; every other output is Transformers' own.
+        let row = EagerGrid::QUERIES * EagerGrid::VALUE_DIM;
+        assert!(
+            actual[row..row + EagerGrid::VALUE_DIM]
+                .iter()
+                .all(|&value| value == 0.0)
+        );
+        let pinned = match dtype {
+            DType::BF16 => {
+                TRANSFORMERS_EAGER_BF16.map(|bits| burn::tensor::bf16::from_bits(bits).to_f32())
+            }
+            _ => TRANSFORMERS_EAGER_F16.map(|bits| burn::tensor::f16::from_bits(bits).to_f32()),
+        };
+        let supported =
+            |values: &[f32]| [&values[..row], &values[row + EagerGrid::VALUE_DIM..]].concat();
+        assert_eq!(
+            differing_bits(&supported(&actual), &supported(&pinned)),
+            0,
+            "{dtype:?}: the output differs from Transformers' eager_attention_forward"
+        );
+        for variant in [
+            EagerVariant::ScorePartialSums,
+            EagerVariant::ValuePartialSums,
+            EagerVariant::WideBias,
+            EagerVariant::DtypeSoftmax,
+        ] {
+            let (other_probabilities, other_output) = problem.emulate(dtype, variant);
+            let moved = differing_bits(&other_probabilities, &probabilities)
+                + differing_bits(&other_output, &output);
+            eprintln!("{dtype:?} {variant:?}: {moved} probabilities and outputs move");
+            assert!(moved > 0, "{dtype:?}: the grid does not detect {variant:?}");
+        }
     }
 }
