@@ -651,15 +651,21 @@ class ReleaseGateTests(unittest.TestCase):
         self.assertIn("--deny", command)
 
     def test_unreachable_vulnerabilities_stay_denied_in_the_built_graph(self):
-        """Only cargo-audit waives unreachable vulnerabilities; deny.toml and CI agree."""
+        """Only cargo-audit waives unreachable vulnerabilities; deny.toml and CI agree.
+
+        The published archive ships ``deny.toml`` but not ``.github/``, so
+        there the policy is checked alone; a Git checkout checks both.
+        """
 
         policy = (GATES.CRATE / "deny.toml").read_text()
-        workflow = (GATES.CRATE / ".github/workflows/ci.yml").read_text()
         for advisory in GATES.UNREACHABLE_ADVISORIES:
             self.assertNotIn(advisory, policy)
-            self.assertIn(f"--ignore {advisory}", workflow)
         for advisory in GATES.MAINTENANCE_NOTICES:
             self.assertIn(advisory, policy)
+        if GATES.package_contents.is_packaged_archive(GATES.CRATE):
+            return
+        workflow = (GATES.CRATE / ".github/workflows/ci.yml").read_text()
+        for advisory in (*GATES.UNREACHABLE_ADVISORIES, *GATES.MAINTENANCE_NOTICES):
             self.assertIn(f"--ignore {advisory}", workflow)
 
     def test_built_graph_advisories_include_yanked_checks(self):
