@@ -4,6 +4,8 @@ An experiment is an ordinary Burn `Module`. Its backbone, inserted processing,
 and task head use Burn's autodiff, optimizers, records, and data loaders. The
 crate supplies transformer computation and activation access; the training
 procedure stays in your application. These workflows use pinned Burn 0.21.
+Your application depends on the package `burn-transformers` and imports its
+library as `transformers` ([adding the dependency](README.md#adding-the-dependency)).
 
 <!-- Maintainers: `python3 scripts/check_release.py --gate guides` compiles
 every Rust block in this guide. A fragment names the hidden context it compiles

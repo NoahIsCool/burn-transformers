@@ -12,7 +12,9 @@ cargo run --release --locked --example activation_workbench
 
 The fragments below assume an initialized model, an input, and a backend `B`;
 the workbench supplies the complete setup. For a trained circuit, read the
-[grokking experiment](examples/mechanistic/grokking.md).
+[grokking experiment](examples/mechanistic/grokking.md). In your own project,
+depend on the package `burn-transformers`; its library is imported as
+`transformers`, as below ([adding the dependency](README.md#adding-the-dependency)).
 
 <!-- Maintainers: `python3 scripts/check_release.py --gate guides` compiles
 every Rust block in this guide. A fragment names the hidden context it compiles

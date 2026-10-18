@@ -26,9 +26,12 @@ real-checkpoint gates.
   Verus harnesses that prove the cache, planning, decoding, and checkpoint
   arithmetic overflow-free and in bounds.
 
-This is a Rust 2024 crate (MSRV 1.92) pinned to Burn 0.21. The package version
-is 0.1.0; [support](#model-families-and-status) is deliberately narrower than
-what is implemented.
+This is a Rust 2024 crate (MSRV 1.92) pinned to Burn 0.21. Its Cargo package
+is `burn-transformers`, after [this repository](https://github.com/NoahIsCool/burn-transformers),
+and its library is imported as `transformers` ([adding the
+dependency](#adding-the-dependency)). The package version is 0.1.0;
+[support](#model-families-and-status) is deliberately narrower than what is
+implemented.
 
 ## Quickstart
 
@@ -361,14 +364,24 @@ masks, cache transactions, SafeTensors headers, chat templates, and generation.
 | `kernel-tracing` | Test-only. Implies `metal` and Burn tracing so opt-in tests can observe CubeCL kernel launches. |
 | `attention-kernel-tracing` | Test-only. Implies `kernel-tracing` and enables CubeCL autotuning (`burn/autotune`) for the fused-attention parity gate; it is not a certified packed-Metal build. |
 
-A consumer in a sibling directory selecting only Metal and local tokenization
-can use (adjust the path for your checkout):
+### Adding the dependency
+
+The Cargo package is `burn-transformers`, because the crates.io name
+`transformers` belongs to another publisher; the library keeps the name
+`transformers`, so code imports `use transformers::…` as every example here
+does. The package is not on crates.io, so a consumer depends on the
+repository. One selecting only Metal and local tokenization can use:
 
 ```toml
 [dependencies]
 burn = { version = "=0.21.0", default-features = false, features = ["metal"] }
-transformers = { path = "../transformers", default-features = false, features = ["std", "metal", "tokenizers"] }
+burn-transformers = { git = "https://github.com/NoahIsCool/burn-transformers", default-features = false, features = ["std", "metal", "tokenizers"] }
 ```
+
+Add `rev = "<commit>"` to pin a revision, or replace `git = …` with
+`path = "../burn-transformers"` (adjusted to your checkout) to build a local
+clone. A manifest that should keep the dependency key `transformers` writes
+`transformers = { package = "burn-transformers", … }` instead.
 
 ## Local artifacts
 
