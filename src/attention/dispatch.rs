@@ -311,6 +311,15 @@ pub(crate) fn default_scale(head_dim: usize) -> f64 {
 /// matmul and the result is reshaped (a free view) back to per-head scores.
 /// Softcapping applies `cap * tanh(scores / cap)` before any exclusion, so
 /// `-inf` masking is never mapped to a finite value.
+///
+/// In F16 and BF16 the product `Q K^T` is rounded to the operand dtype by the
+/// matmul, as in Transformers' eager `torch.matmul(query, key.T) * scaling`,
+/// and is then multiplied by the unrounded scale in F32 and rounded once
+/// ([`crate::feed_forward::evaluate_in_f32`]): PyTorch evaluates a
+/// half-precision tensor times a Python float in F32 opmath. Burn's
+/// `tensor * scalar` would round the scalar to the tensor dtype first, which
+/// for `1 / sqrt(128)` moves 2.4% of BF16 and 15.5% of F16 products by one
+/// unit in the last place. F32 and F64 multiply in their own dtype, unchanged.
 pub(crate) fn scaled_scores<B: Backend>(
     query: Tensor<B, 4>,
     key: Tensor<B, 4>,
@@ -319,7 +328,8 @@ pub(crate) fn scaled_scores<B: Backend>(
 ) -> Tensor<B, 4> {
     let [batch, query_heads, query_sequence, _] = query.dims();
     let [_, key_value_heads, key_sequence, _] = key.dims();
-    let scores = (fold_groups(query, key_value_heads).matmul(key.swap_dims(2, 3)) * scale)
+    let product = fold_groups(query, key_value_heads).matmul(key.swap_dims(2, 3));
+    let scores = crate::feed_forward::evaluate_in_f32(product, |product| product * scale)
         .reshape([batch, query_heads, query_sequence, key_sequence]);
     match softcap {
         Some(softcap) => (scores / softcap).tanh() * softcap,

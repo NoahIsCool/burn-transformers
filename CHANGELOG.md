@@ -425,6 +425,14 @@ code written against unreleased sources.
   sigmoid to the activation dtype before the product (BF16 `SiLU(2.8125)` was
   `2.640625` instead of `2.65625`). F32 and F64 evaluation is unchanged, and
   the clamped SwiGLU keeps gpt-oss's operation-by-operation graph.
+- Attention: the eager graph (`AttentionPrecisionMode::EagerFp32Softmax`,
+  the default of GPT-NeoX, and every score or pattern hook) multiplies F16 and
+  BF16 `Q K^T` by the unrounded score scale in F32 and rounds once, as
+  Transformers' eager `torch.matmul(query, key.T) * scaling` does with a
+  Python float. Burn's `tensor * scalar` rounded the scale to the activation
+  dtype first, which for `1 / sqrt(128)` moved 2.4% of BF16 and 15.5% of F16
+  scores by one unit in the last place. F32 and F64 are unchanged, and the
+  fused default path is unaffected.
 - Modular models: sinks with a soft cap are rejected at the spec field;
   sliding windows in encoder stacks are rejected; earlier block records still
   load; range contexts are validated once.

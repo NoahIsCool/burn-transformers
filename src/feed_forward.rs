@@ -447,7 +447,7 @@ pub(crate) fn silu<B: Backend, const D: usize>(input: Tensor<B, D>) -> Tensor<B,
 /// (within one rounding of F32 evaluation error). Any other dtype is passed
 /// to `function` unchanged. The F32 intermediate costs one tensor of the
 /// input's shape at four bytes per element, live only during the call.
-fn evaluate_in_f32<B: Backend, const D: usize>(
+pub(crate) fn evaluate_in_f32<B: Backend, const D: usize>(
     input: Tensor<B, D>,
     function: impl FnOnce(Tensor<B, D>) -> Tensor<B, D>,
 ) -> Tensor<B, D> {

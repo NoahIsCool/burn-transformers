@@ -1076,3 +1076,135 @@ fn metal_causal_suffix_matches_eager_reference() {
         "native and eager causal suffixes differ by {maximum}"
     );
 }
+
+/// Rounds F32 values to a 16-bit float `dtype` with Flex's own cast, and widens them back.
+fn cast_through(dtype: DType, values: &[f32]) -> Vec<f32> {
+    Tensor::<TestBackend, 1>::from_data(
+        TensorData::new(values.to_vec(), [values.len()]),
+        &Default::default(),
+    )
+    .cast(dtype)
+    .cast(DType::F32)
+    .into_data()
+    .to_vec::<f32>()
+    .unwrap()
+}
+
+/// Half-precision operands `[1, 1, rows, 128]` with values exactly representable in F16 and BF16.
+fn half_operand(rows: usize, seed: usize, dtype: DType) -> Tensor<TestBackend, 4> {
+    let data = (0..rows * 128)
+        .map(|index| ((index * 53 + seed * 29) % 61) as f32 / 32.0 - 0.9375)
+        .collect::<Vec<_>>();
+    Tensor::<TestBackend, 4>::from_data(
+        TensorData::new(data, [1, 1, rows, 128]),
+        &Default::default(),
+    )
+    .cast(dtype)
+}
+
+/// Eager half-precision scores are the rounded `Q K^T` times the unrounded scale, rounded once, as in Transformers.
+///
+/// Transformers' eager attention computes `torch.matmul(query, key.T) *
+/// scaling` with `scaling` a Python float, which PyTorch multiplies in F32 and
+/// rounds once (`(x.float() * s).bfloat16()` equals `x * s` on every tested
+/// BF16 value). With 128-wide heads `scaling = 1 / sqrt(128)` is exact in
+/// neither format, so rounding it to the dtype first, as Burn's `tensor *
+/// scalar` does, moves some scores by one unit in the last place; this test
+/// detects that. The matmul's own rounding is read back from Burn, so only
+/// the scale's rounding point is under test.
+#[test]
+fn half_precision_eager_scores_multiply_by_the_unrounded_scale() {
+    let scale = default_scale(128);
+    for dtype in [DType::BF16, DType::F16] {
+        let (query, key) = (half_operand(3, 1, dtype), half_operand(64, 2, dtype));
+        let product = query
+            .clone()
+            .matmul(key.clone().swap_dims(2, 3))
+            .cast(DType::F32)
+            .into_data()
+            .to_vec::<f32>()
+            .unwrap();
+        let unrounded = product
+            .iter()
+            .map(|value| value * scale as f32)
+            .collect::<Vec<_>>();
+        let expected = cast_through(dtype, &unrounded);
+        let scores = scaled_scores(query.clone(), key.clone(), scale, None);
+        assert_eq!(scores.dtype(), dtype);
+        let actual = scores.cast(DType::F32).into_data().to_vec::<f32>().unwrap();
+        assert_eq!(
+            actual, expected,
+            "{dtype:?}: the unrounded scale, rounded once"
+        );
+        // The scale rounded to the dtype first gives other scores on these operands.
+        let rounded_scale = cast_through(dtype, &[scale as f32])[0];
+        let rounded = cast_through(
+            dtype,
+            &product
+                .iter()
+                .map(|value| value * rounded_scale)
+                .collect::<Vec<_>>(),
+        );
+        assert_ne!(
+            rounded, expected,
+            "{dtype:?}: the test detects a rounded scale"
+        );
+        // F32 keeps Burn's own graph bit for bit.
+        let wide = scaled_scores(query.cast(DType::F32), key.cast(DType::F32), scale, None);
+        let wide_product = half_operand(3, 1, DType::F32)
+            .matmul(half_operand(64, 2, DType::F32).swap_dims(2, 3))
+            * scale;
+        assert_eq!(wide.into_data(), wide_product.into_data());
+    }
+}
+
+/// The fused half-precision path equals F32 attention of the same operands rounded once, like PyTorch's SDPA.
+///
+/// PyTorch's fused `scaled_dot_product_attention` on half-precision operands
+/// accumulates scores, softmax, and the value product in F32 and rounds the
+/// output once. On Flex, Burn's fused `attention` does the same: its F16 and
+/// BF16 output equals its F32 output on the widened operands, cast once.
+#[test]
+fn half_precision_fused_attention_is_the_f32_attention_rounded_once() {
+    let problem = Problem {
+        head_dim: 16,
+        value_dim: 8,
+        causal: true,
+        ..Problem::new(1, 4, 2, 5, 7)
+    };
+    for dtype in [DType::BF16, DType::F16] {
+        let (query, key, value, mask, bias, _) = problem.tensors_in(dtype);
+        let operands = |query: Tensor<TestBackend, 4>,
+                        key: Tensor<TestBackend, 4>,
+                        value: Tensor<TestBackend, 4>| Operands {
+            query,
+            key,
+            value,
+            mask: mask.clone(),
+            bias: bias.clone(),
+            sinks: None,
+        };
+        let half = evaluate(
+            operands(query.clone(), key.clone(), value.clone()),
+            problem.options(),
+            AttentionPrecisionMode::BackendDefault,
+        )
+        .unwrap();
+        assert_eq!(half.dtype(), dtype);
+        let wide = evaluate(
+            operands(
+                query.cast(DType::F32),
+                key.cast(DType::F32),
+                value.cast(DType::F32),
+            ),
+            problem.options(),
+            AttentionPrecisionMode::BackendDefault,
+        )
+        .unwrap();
+        assert_eq!(
+            half.cast(DType::F32).into_data(),
+            wide.cast(dtype).cast(DType::F32).into_data(),
+            "{dtype:?}"
+        );
+    }
+}
