@@ -118,8 +118,10 @@ manifests that name the package change: a dependency is
 `burn-transformers = { git = "…", … }` (the [README
 example](README.md#adding-the-dependency)), or keeps the key with
 `transformers = { package = "burn-transformers", … }` as `fuzz/Cargo.toml`
-does, and a `cargo -p` selector names `burn-transformers`. Run the ownership
-check above for `burn-transformers` immediately before its first publish.
+does, and a `cargo -p` selector names `burn-transformers`. That name was
+unclaimed when checked on 2026-10-18 (the owners query above returned 404,
+"crate `burn-transformers` does not exist"); repeat the check immediately
+before the first publish, since anyone may claim it in the meantime.
 
 Package from the clean, committed transformer source tree. Preserve unrelated
 changes outside this standalone crate. Record the commit ID and archive checksum
