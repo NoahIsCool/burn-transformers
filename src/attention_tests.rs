@@ -1441,3 +1441,24 @@ fn output_gate_payload_must_match_its_convention() {
     let removed = super::apply_output_gate(context, Some(gate), AttentionOutputGate::Silu).unwrap();
     assert_eq!(removed.into_data().to_vec::<f32>().unwrap(), vec![0.0; 8]);
 }
+
+/// In BF16 the SiLU output gate rounds `gate * sigmoid(gate)` once before multiplying the context.
+///
+/// With a unit context the gated output is the gate's SiLU itself. At
+/// `gate = 2.8125` the once-rounded BF16 value is `2.65625` and at `-1.25`
+/// it is `-0.279296875` (PyTorch's `F.silu`); rounding the sigmoid first,
+/// as Burn's two-operation graph does, gives `2.640625` and `-0.27734375`.
+#[test]
+fn bf16_silu_output_gate_rounds_the_activation_once() {
+    use burn::tensor::DType;
+
+    let device = Default::default();
+    let context = Tensor::<Flex, 3>::ones([1, 1, 2], &device).cast(DType::BF16);
+    let gate = Tensor::<Flex, 3>::from_floats([[[2.8125, -1.25]]], &device).cast(DType::BF16);
+    let gated = super::apply_output_gate(context, Some(gate), AttentionOutputGate::Silu).unwrap();
+    assert_eq!(gated.dtype(), DType::BF16);
+    assert_eq!(
+        gated.cast(DType::F32).into_data().to_vec::<f32>().unwrap(),
+        vec![2.656_25, -0.279_296_88]
+    );
+}

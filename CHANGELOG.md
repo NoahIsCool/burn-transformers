@@ -418,6 +418,13 @@ code written against unreleased sources.
   `gelu_pytorch_tanh`) does. Burn's composed graph rounded every operation and
   both constants to the activation dtype (BF16 `GeluTanh(-2)` was `-0.046875`
   instead of `-0.0454`). F32 and F64 evaluation is unchanged.
+- SiLU on F16 and BF16 inputs is evaluated in F32 and rounded once, as
+  PyTorch's `silu` (Transformers' `SiLUActivation`) does: in dense and gated
+  MLPs, routed and shared experts, the SiLU attention output gate, and the
+  Gated DeltaNet and Mamba-2 convolutions. Burn's `x * sigmoid(x)` rounded the
+  sigmoid to the activation dtype before the product (BF16 `SiLU(2.8125)` was
+  `2.640625` instead of `2.65625`). F32 and F64 evaluation is unchanged, and
+  the clamped SwiGLU keeps gpt-oss's operation-by-operation graph.
 - Modular models: sinks with a soft cap are rejected at the spec field;
   sliding windows in encoder stacks are rejected; earlier block records still
   load; range contexts are validated once.

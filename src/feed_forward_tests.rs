@@ -361,6 +361,242 @@ proptest::proptest! {
             "{:?} tanh-GELU({}) = {}, exact {}, bound {:e}", dtype, x, actual, exact, bound
         );
     }
+
+    /// For any small shape and finite values, half-precision SiLU is the widened F32 graph rounded once.
+    ///
+    /// The rank-3 `[batch, token, intermediate]` layout is the one gated MLPs
+    /// use; the shape and dtype survive, every element equals Burn's F32
+    /// `activation::silu` rounded to the dtype, and the crate-wide helper
+    /// agrees with the activation dispatch.
+    #[test]
+    fn half_precision_silu_is_the_widened_graph_for_any_shape(
+        shape in (1_usize..4, 1_usize..5, 1_usize..9),
+        seed_values in proptest::collection::vec(-40.0_f32..40.0, 96),
+        bf16 in proptest::bool::ANY,
+    ) {
+        use burn::tensor::{DType, activation};
+
+        let dtype = if bf16 { DType::BF16 } else { DType::F16 };
+        let dims = [shape.0, shape.1, shape.2];
+        let count = dims.iter().product::<usize>();
+        let values = seed_values[..count].to_vec();
+        let input = Tensor::<Flex, 3>::from_data(TensorData::new(values, dims), &Default::default())
+            .cast(dtype);
+        let actual = apply_activation(input.clone(), Activation::Silu);
+        proptest::prop_assert_eq!(actual.dims(), dims);
+        proptest::prop_assert_eq!(actual.dtype(), dtype);
+        let widened = activation::silu(input.clone().cast(DType::F32)).cast(dtype);
+        proptest::prop_assert_eq!(actual.clone().into_data(), widened.into_data());
+        proptest::prop_assert_eq!(super::silu(input).into_data(), actual.into_data());
+    }
+}
+
+/// Exact SiLU `x / (1 + exp(-x))` in F64.
+fn silu_f64(x: f64) -> f64 {
+    x / (1.0 + (-x).exp())
+}
+
+/// Returns the largest error a once-rounded F32 evaluation of SiLU may have when its exact value is `exact`, in `dtype`.
+///
+/// Rounding to the format errs by at most half a unit in the last place of
+/// `exact` (the format's subnormal step below its normal range). The F32
+/// evaluation of `x * sigmoid(x)` adds a few F32 roundings relative to `|y|`
+/// (the exponential, the sum, the quotient and the product, about `6e-8`
+/// each; SiLU has no cancellation, since `1 + exp(-x) >= 1`), bounded by
+/// `1e-6 |y|`. Below `x = -87` the F32 `exp(x)` is subnormal and carries an
+/// absolute error of at most `2^-149`, which the product scales by
+/// `|x| < 104` to below `2^-142`; `2^-140` covers it. Both slacks are far
+/// smaller than half a unit of either format (BF16's smallest half-step is
+/// `2^-134`), so a result one unit away from the correctly rounded value
+/// fails this bound.
+fn silu_once_rounded_bound(exact: f64, dtype: burn::tensor::DType) -> f64 {
+    use burn::tensor::DType;
+
+    let (significand_bits, smallest_step) = match dtype {
+        DType::BF16 => (8, 2.0_f64.powi(-133)),
+        DType::F16 => (11, 2.0_f64.powi(-24)),
+        other => unreachable!("no half-precision format {other:?}"),
+    };
+    let unit = if exact == 0.0 {
+        smallest_step
+    } else {
+        2.0_f64
+            .powi(exact.abs().log2().floor() as i32 + 1 - significand_bits)
+            .max(smallest_step)
+    };
+    0.5 * unit + 1e-6 * exact.abs() + 2.0_f64.powi(-140)
+}
+
+/// Returns every finite value of a 16-bit float `dtype` as a Flex tensor of that dtype, and the values as F64.
+///
+/// The values are decoded from all 65,536 bit patterns, widened to F32 (an
+/// exact conversion) to build the tensor, and cast to `dtype`; the cast is
+/// checked to reproduce every value, so the tensor holds each finite value
+/// exactly once.
+fn every_finite_half(dtype: burn::tensor::DType) -> (Tensor<Flex, 1>, Vec<f64>) {
+    use burn::tensor::{DType, bf16, f16};
+
+    let widened = (0..=u16::MAX)
+        .map(|bits| match dtype {
+            DType::BF16 => bf16::from_bits(bits).to_f32(),
+            DType::F16 => f16::from_bits(bits).to_f32(),
+            other => unreachable!("no half-precision format {other:?}"),
+        })
+        .filter(|value| value.is_finite())
+        .collect::<Vec<_>>();
+    let count = widened.len();
+    let tensor = Tensor::<Flex, 1>::from_data(
+        TensorData::new(widened.clone(), [count]),
+        &Default::default(),
+    )
+    .cast(dtype);
+    assert_eq!(tensor.dtype(), dtype);
+    let exact = widened.into_iter().map(f64::from).collect::<Vec<_>>();
+    assert_eq!(
+        as_f64(tensor.clone()),
+        exact,
+        "{dtype:?} holds every value exactly"
+    );
+    (tensor, exact)
+}
+
+/// In F32 and F64, SiLU is Burn's `activation::silu`, the two-operation graph `x * sigmoid(x)`, bit for bit.
+///
+/// Full-precision numerics, and therefore every F32 golden and gradient, are
+/// untouched by the half-precision evaluation rule. The grid spans zero,
+/// subnormal-producing negative inputs, the exponential's F32 underflow near
+/// `-88` and `-104`, and large magnitudes.
+#[test]
+fn silu_is_burns_operation_graph_bit_for_bit_in_full_precision() {
+    use burn::tensor::{DType, activation};
+
+    let device = Default::default();
+    let mut values = (0..64)
+        .map(|index| index as f32 * 0.29 - 9.0)
+        .collect::<Vec<_>>();
+    values.extend([
+        0.0, -0.0, 1e-30, -1e-30, -87.5, -90.0, -103.5, -110.0, 88.0, 1e30, -1e30,
+    ]);
+    let count = values.len();
+    for dtype in [DType::F32, DType::F64] {
+        let input = Tensor::<Flex, 1>::from_data(TensorData::new(values.clone(), [count]), &device)
+            .cast(dtype);
+        let actual = apply_activation(input.clone(), Activation::Silu);
+        assert_eq!(actual.dtype(), dtype);
+        assert_eq!(
+            actual.into_data(),
+            (input.clone() * activation::sigmoid(input)).into_data(),
+            "{dtype:?}"
+        );
+    }
+}
+
+/// On every finite F16 and BF16 input, SiLU is the F32 value rounded once, within half a unit of the exact value.
+///
+/// This is PyTorch's `silu` convention (its CPU kernel agrees with the
+/// once-rounded F32 value on every finite BF16 input and on all but one F16
+/// near-tie). All 65,280 finite BF16 and 63,488 finite F16 values are checked
+/// against the exact F64 SiLU with [`silu_once_rounded_bound`], so the test
+/// covers zeros, subnormals, both overflow ends and every binade.
+#[test]
+fn half_precision_silu_is_once_rounded_on_every_finite_input() {
+    use burn::tensor::{DType, activation};
+
+    for dtype in [DType::BF16, DType::F16] {
+        let (input, xs) = every_finite_half(dtype);
+        let actual = apply_activation(input.clone(), Activation::Silu);
+        assert_eq!(actual.dtype(), dtype, "the output keeps the input dtype");
+        let widened = activation::silu(input.clone().cast(DType::F32)).cast(dtype);
+        assert_eq!(
+            actual.clone().into_data(),
+            widened.into_data(),
+            "{dtype:?}: the F32 evaluation rounded once"
+        );
+        let actual = as_f64(actual);
+        assert_eq!(actual.len(), xs.len());
+        for (&x, &actual) in xs.iter().zip(&actual) {
+            let exact = silu_f64(x);
+            let bound = silu_once_rounded_bound(exact, dtype);
+            assert!(
+                (actual - exact).abs() <= bound,
+                "{dtype:?} SiLU({x:e}) = {actual:e}, exact {exact:e}, bound {bound:e}"
+            );
+        }
+    }
+}
+
+/// Burn's composed half-precision graph `x * sigmoid(x)` misses the once-rounded bound, which the activation meets.
+///
+/// Rounding the sigmoid before the product moves BF16 `SiLU(2.8125)` to
+/// `2.640625` and F16 `SiLU(6.6875)` to `6.67578125`, one unit below the
+/// correctly rounded `2.65625` and `6.6796875` (the exact values are
+/// `2.65317` and `6.67918`). The once-rounded values are PyTorch 2.10.0's
+/// `F.silu` on CPU for the same inputs, and the composed ones equal its
+/// `x * torch.sigmoid(x)`.
+#[test]
+fn composed_half_precision_silu_misses_the_once_rounded_bound() {
+    use burn::tensor::{DType, activation};
+
+    let device = Default::default();
+    for (dtype, x, composed_expected, once_expected) in [
+        (DType::BF16, 2.8125_f32, 2.640_625, 2.656_25),
+        (DType::F16, 6.6875_f32, 6.675_781_25, 6.679_687_5),
+    ] {
+        let input = Tensor::<Flex, 1>::from_floats([x], &device).cast(dtype);
+        let composed = as_f64(input.clone() * activation::sigmoid(input.clone()))[0];
+        let once = as_f64(apply_activation(input, Activation::Silu))[0];
+        let exact = silu_f64(f64::from(x));
+        assert_eq!(
+            (composed, once),
+            (composed_expected, once_expected),
+            "{dtype:?}"
+        );
+        let bound = silu_once_rounded_bound(exact, dtype);
+        assert!((once - exact).abs() <= bound, "{dtype:?}");
+        assert!(
+            (composed - exact).abs() > 1.5 * bound,
+            "{dtype:?}: the composed graph misses the once-rounded bound"
+        );
+    }
+}
+
+/// Gradients flow through the half-precision SiLU's F32 evaluation and match the derivative's closed form.
+///
+/// `d/dx SiLU(x) = sigmoid(x) (1 + x (1 - sigmoid(x)))`. The widening and
+/// narrowing casts are differentiable, so a BF16 graph still trains through
+/// the gate. The backward pass runs in F32 and its result is rounded once to
+/// the BF16 input gradient, so it lies within half a BF16 unit (at most
+/// `2^-8` relative) plus F32 evaluation error of the closed form.
+#[cfg(feature = "autodiff")]
+#[test]
+fn half_precision_silu_is_differentiable() {
+    use burn::{backend::Autodiff, tensor::DType};
+    /// Differentiable CPU backend for the half-precision SiLU gradient check.
+    type Ad = Autodiff<Flex>;
+
+    let device = Default::default();
+    let xs = [-3.0_f32, -0.5, 0.0, 0.75, 2.8125];
+    let input = Tensor::<Ad, 1>::from_floats(xs, &device)
+        .cast(DType::BF16)
+        .require_grad();
+    let gradients = apply_activation(input.clone(), Activation::Silu)
+        .sum()
+        .backward();
+    let gradient = input.grad(&gradients).expect("SiLU input gradient");
+    let gradient = gradient
+        .cast(DType::F32)
+        .into_data()
+        .to_vec::<f32>()
+        .unwrap();
+    for (x, gradient) in xs.into_iter().zip(gradient) {
+        let x = f64::from(x);
+        let sigmoid = 1.0 / (1.0 + (-x).exp());
+        let expected = sigmoid * (1.0 + x * (1.0 - sigmoid));
+        assert!(
+            (f64::from(gradient) - expected).abs() <= 2.0_f64.powi(-8) * expected.abs() + 1e-6,
+            "d SiLU / dx at {x} = {gradient}, expected {expected}"
+        );
+    }
 }
 
 /// Builds a 2-to-2 gated block with distinct gate and up weights and identity output.
