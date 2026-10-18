@@ -1462,3 +1462,77 @@ fn bf16_silu_output_gate_rounds_the_activation_once() {
         vec![2.656_25, -0.279_296_88]
     );
 }
+
+/// Returns every finite value of a 16-bit float `dtype`, widened to F32, in bit-pattern order.
+fn every_finite_half(dtype: burn::tensor::DType) -> Vec<f32> {
+    use burn::tensor::{DType, bf16, f16};
+
+    (0..=u16::MAX)
+        .map(|bits| match dtype {
+            DType::BF16 => bf16::from_bits(bits).to_f32(),
+            DType::F16 => f16::from_bits(bits).to_f32(),
+            other => unreachable!("no half-precision format {other:?}"),
+        })
+        .filter(|value| value.is_finite())
+        .collect()
+}
+
+/// On every finite F16 and BF16 gate, the sigmoid output gate is the F32 sigmoid rounded once, as PyTorch's is.
+///
+/// The gated attention references (Qwen3.5's `attn_output *
+/// torch.sigmoid(gate)`) round `sigmoid(gate)` once from F32 and then the
+/// product. With a unit context the output is the gate's sigmoid itself,
+/// which must equal Burn's F32 sigmoid of the same value rounded to nearest
+/// (ties to even) on every finite input, and lie within half a unit plus F32
+/// evaluation error of the exact sigmoid. Flex's half-precision sigmoid
+/// kernel rounds its F32 result correctly, so no widening is needed here
+/// (unlike SiLU, whose composed graph rounds twice).
+#[test]
+fn half_precision_sigmoid_output_gate_is_once_rounded_on_every_finite_gate() {
+    use burn::tensor::{DType, TensorData, activation, bf16, f16};
+
+    let device = Default::default();
+    for dtype in [DType::BF16, DType::F16] {
+        let values = every_finite_half(dtype);
+        let count = values.len();
+        let gate =
+            Tensor::<Flex, 3>::from_data(TensorData::new(values.clone(), [1, 1, count]), &device)
+                .cast(dtype);
+        let context = Tensor::<Flex, 3>::ones([1, 1, count], &device).cast(dtype);
+        let gated =
+            super::apply_output_gate(context, Some(gate), AttentionOutputGate::Sigmoid).unwrap();
+        assert_eq!(gated.dtype(), dtype);
+        let actual = gated.cast(DType::F32).into_data().to_vec::<f32>().unwrap();
+        let wide = activation::sigmoid(Tensor::<Flex, 1>::from_data(
+            TensorData::new(values.clone(), [count]),
+            &device,
+        ))
+        .into_data()
+        .to_vec::<f32>()
+        .unwrap();
+        let (significand_bits, smallest_step) = match dtype {
+            DType::BF16 => (8, 2.0_f64.powi(-133)),
+            _ => (11, 2.0_f64.powi(-24)),
+        };
+        for ((&x, &actual), &wide) in values.iter().zip(&actual).zip(&wide) {
+            let once = match dtype {
+                DType::BF16 => bf16::from_f32(wide).to_f32(),
+                _ => f16::from_f32(wide).to_f32(),
+            };
+            assert_eq!(actual.to_bits(), once.to_bits(), "{dtype:?} sigmoid({x:e})");
+            let exact = 1.0 / (1.0 + (-f64::from(x)).exp());
+            let unit = if exact == 0.0 {
+                smallest_step
+            } else {
+                2.0_f64
+                    .powi(exact.log2().floor() as i32 + 1 - significand_bits)
+                    .max(smallest_step)
+            };
+            let bound = 0.5 * unit + 1e-6 * exact + 2.0_f64.powi(-140);
+            assert!(
+                (f64::from(actual) - exact).abs() <= bound,
+                "{dtype:?} sigmoid({x:e}) = {actual:e}, exact {exact:e}, bound {bound:e}"
+            );
+        }
+    }
+}

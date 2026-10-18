@@ -933,3 +933,126 @@ fn hooked_mlp_forward_propagates_point_failures() {
         }
     }
 }
+
+/// Pins a Burn Flex 0.21 deviation: its F32-to-BF16 tensor cast ignores the three lowest bits of an F32 value.
+///
+/// Correct rounding to nearest, ties to even (PyTorch's, and `half`'s
+/// `bf16::from_f32`) rounds an F32 value whose discarded low half is
+/// `0x8001` to `0x8007` up: it lies above the midpoint. Flex rounds it down
+/// whenever the kept half is even, as if those bits were zero and the value
+/// an exact tie. Every half-precision evaluation that rounds an F32 result
+/// to BF16 on Flex (`evaluate_in_f32`, the F32 norms, the F32 softmax) can
+/// therefore differ from PyTorch by one unit in the last place on such
+/// near-ties, about one value in 18,700 for uniformly distributed low bits.
+/// Odd kept halves, F16 casts, and Flex's own elementwise BF16 kernels round
+/// correctly. This test fails once Burn fixes the cast; the comparisons that
+/// allow one unit for it should then be tightened.
+#[test]
+fn flex_bf16_cast_rounds_values_just_above_a_tie_down() {
+    use burn::tensor::{DType, bf16};
+
+    let device = Default::default();
+    let values: Vec<f32> = [
+        0x3efe_8001_u32,
+        0x3efe_8007,
+        0x3efe_8008,
+        0x3eff_8001,
+        0x3efe_7fff,
+    ]
+    .into_iter()
+    .map(f32::from_bits)
+    .collect();
+    let count = values.len();
+    let cast = Tensor::<Flex, 1>::from_data(TensorData::new(values.clone(), [count]), &device)
+        .cast(DType::BF16)
+        .cast(DType::F32)
+        .into_data()
+        .to_vec::<f32>()
+        .unwrap();
+    let correct: Vec<f32> = values
+        .iter()
+        .map(|&value| bf16::from_f32(value).to_f32())
+        .collect();
+    let kept = |value: f32| value.to_bits() >> 16;
+    // Even kept half, low half 0x8001 and 0x8007: Flex rounds down, correct rounding up.
+    assert_eq!([kept(cast[0]), kept(cast[1])], [0x3efe, 0x3efe]);
+    assert_eq!([kept(correct[0]), kept(correct[1])], [0x3eff, 0x3eff]);
+    // 0x8008, an odd kept half, and a value below the midpoint round correctly.
+    assert_eq!(cast[2..], correct[2..]);
+    // The same value as the output of a Flex BF16 elementwise kernel rounds correctly.
+    let sigmoid = burn::tensor::activation::sigmoid(
+        Tensor::<Flex, 1>::from_floats([-0.011_718_75], &device).cast(DType::BF16),
+    );
+    let correct_sigmoid = bf16::from_f32(
+        burn::tensor::activation::sigmoid(Tensor::<Flex, 1>::from_floats([-0.011_718_75], &device))
+            .into_data()
+            .to_vec::<f32>()
+            .unwrap()[0],
+    );
+    assert_eq!(as_f64(sigmoid)[0], correct_sigmoid.to_f64());
+}
+
+/// On every finite F16 and BF16 input, tanh-GELU is the F32 value rounded once, within half a unit of the exact value.
+///
+/// This extends `half_precision_tanh_gelu_rounds_the_f32_value_once` from a
+/// grid to all 65,280 finite BF16 and 63,488 finite F16 values, PyTorch's
+/// `gelu(approximate="tanh")` convention (Gemma's `gelu_pytorch_tanh`).
+/// Burn's own `gelu_approximate` evaluated in the half dtype misses the
+/// once-rounded F32 value on 1,012 BF16 and 11,911 F16 inputs on Flex, which
+/// is why the crate evaluates it in F32. The bound is [`once_rounded_bound`],
+/// whose F32 slack is absolute in `x` because `1 + tanh` cancels for negative
+/// inputs.
+///
+/// One range is pinned instead: BF16 shares F32's exponent range, and for
+/// `x >= 2^127` Burn's F32 graph `x (1 + tanh(...)) / 2` overflows when it
+/// doubles `x` before halving, so the result is `+inf`, where PyTorch's
+/// kernel, `0.5 x (1 + tanh(...))`, halves first and returns `x`. These are
+/// the 128 largest positive BF16 values, far beyond any activation a model
+/// produces; F16 cannot hold them (its largest value is 65,504). Removing
+/// the deviation needs a crate-owned graph with PyTorch's operation order.
+#[test]
+fn half_precision_tanh_gelu_is_once_rounded_on_every_finite_input() {
+    use burn::tensor::{DType, activation};
+
+    for dtype in [DType::BF16, DType::F16] {
+        let (input, xs) = every_finite_half(dtype);
+        let actual = apply_activation(input.clone(), Activation::GeluTanh);
+        assert_eq!(actual.dtype(), dtype, "the output keeps the input dtype");
+        let widened = activation::gelu_approximate(input.clone().cast(DType::F32)).cast(dtype);
+        assert_eq!(
+            actual.clone().into_data(),
+            widened.into_data(),
+            "{dtype:?}: the F32 evaluation rounded once"
+        );
+        let composed = as_f64(activation::gelu_approximate(input));
+        let actual = as_f64(actual);
+        let mut composed_misses = 0;
+        let mut overflowing = 0;
+        for ((&x, &actual), &composed) in xs.iter().zip(&actual).zip(&composed) {
+            if x >= 2.0_f64.powi(127) {
+                assert_eq!(
+                    actual,
+                    f64::INFINITY,
+                    "{dtype:?} tanh-GELU({x:e}) overflows"
+                );
+                overflowing += 1;
+                continue;
+            }
+            let exact = tanh_gelu_f64(x);
+            let bound = once_rounded_bound(x, exact, dtype);
+            assert!(
+                (actual - exact).abs() <= bound,
+                "{dtype:?} tanh-GELU({x:e}) = {actual:e}, exact {exact:e}, bound {bound:e}"
+            );
+            if composed.to_bits() != actual.to_bits() {
+                composed_misses += 1;
+            }
+        }
+        assert!(
+            composed_misses > 0,
+            "{dtype:?}: Burn's half-precision graph differs on some input"
+        );
+        let pinned = if dtype == DType::BF16 { 128 } else { 0 };
+        assert_eq!(overflowing, pinned, "{dtype:?} inputs of at least 2^127");
+    }
+}

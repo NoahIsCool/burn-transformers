@@ -1581,3 +1581,39 @@ fn depthwise_column_timing() {
         }
     }
 }
+
+/// Pins a Burn Flex 0.21 deviation: F16 matrix products accumulate in F16, while BF16 ones are F32 sums rounded once.
+///
+/// PyTorch's CPU and MPS matrix products accumulate F16 and BF16 operands in
+/// F32 and round the result once, and so does Burn on Metal and, for BF16
+/// (which it widens to F32 operands), on Flex. Flex's F16 GEMM reads the F16
+/// operands directly and keeps F16 partial sums: one plus 4096 terms of
+/// `2^-11`, exactly `3`, loses terms at half a unit of F16. This only
+/// concerns F16 on Flex, which no gate profile uses (Flex's half-precision
+/// profile is BF16); the test fails once Burn accumulates in F32 there.
+#[test]
+fn flex_f16_matmul_keeps_f16_partial_sums() {
+    let device = Default::default();
+    let count = 4097;
+    let mut left = vec![2.0_f32.powi(-11); count];
+    left[0] = 1.0;
+    let right = vec![1.0_f32; count];
+    for (dtype, expect_exact) in [(DType::BF16, true), (DType::F16, false), (DType::F32, true)] {
+        let product =
+            Tensor::<Flex, 2>::from_data(TensorData::new(left.clone(), [1, count]), &device)
+                .cast(dtype)
+                .matmul(
+                    Tensor::<Flex, 2>::from_data(
+                        TensorData::new(right.clone(), [count, 1]),
+                        &device,
+                    )
+                    .cast(dtype),
+                )
+                .cast(DType::F32)
+                .into_data()
+                .to_vec::<f32>()
+                .unwrap()[0];
+        // BF16 rounds 2^-11 terms to themselves too: 1 + 4096 * 2^-11 = 3 exactly.
+        assert_eq!(product == 3.0, expect_exact, "{dtype:?} product {product}");
+    }
+}
