@@ -98,15 +98,18 @@
 //!
 //! `TRANSFORMERS_GEMMA_DTYPE` selects the stored dtype: `f32` (the default;
 //! everything above), `bf16` (the Flex profile, and the CUDA one), or `f16`;
-//! any other value panics. Gemma F16 is uncalibrated, because all of its
-//! official F16 graphs overflow (see [F16](#f16)). A half-precision run
+//! any other value panics. An `f16` run of a Gemma 3 checkpoint, such as the
+//! pinned one, expects the loader to refuse it, because Gemma 3 declares an
+//! F16 range hazard: all of its official F16 graphs overflow (see
+//! [F16](#f16)). A BF16 run
 //! is judged against the same F32 bundles, with bounds measured from the
 //! official implementation by `tests/support/half_precision_calibration.rs`,
 //! as in `tests/llama_family_artifacts.rs`: `TRANSFORMERS_GEMMA_OFFICIAL_DIRS`
 //! and `TRANSFORMERS_GEMMA_LONG_OFFICIAL_DIRS` list (separated as in `PATH`)
 //! the four bundles in which Transformers evaluates the short and long truths
 //! in BF16 on the CPU and on MPS, with eager and SDPA attention (an F16 run
-//! reads `TRANSFORMERS_GEMMA_F16_OFFICIAL_DIRS` and
+//! of a checkpoint without a declared F16 hazard, of which none is pinned,
+//! would read `TRANSFORMERS_GEMMA_F16_OFFICIAL_DIRS` and
 //! `TRANSFORMERS_GEMMA_LONG_F16_OFFICIAL_DIRS` instead), and
 //! `TRANSFORMERS_GEMMA_DECODE_TRUTH_DIR` and
 //! `TRANSFORMERS_GEMMA_LONG_DECODE_TRUTH_DIR` name the F32 CPU-eager decode
@@ -183,28 +186,55 @@
 //!
 //! # F16
 //!
-//! Gemma F16 is uncalibrated: all official F16 graphs overflow. The published
-//! gemma-3-4b-it checkpoint overflows F16 in Transformers too: the first value
-//! beyond F16's `65,504` is the residual addition after block 5's MLP at the
-//! BOS position, channel 443 (`51,941.5 + 21,568.1 = 73,509.6` in F32),
-//! identically in torch CPU and MPS F16 and in this crate's Metal and Flex
-//! F16, and every logit after it is NaN; gemma-3-12b-it and gemma-3-27b-it
-//! overflow at blocks 6 and 8. All four official F16 graphs of the short and
-//! long truths are therefore non-finite, so no F16 envelope exists. A
-//! `TRANSFORMERS_GEMMA_DTYPE=f16` run reads them from
-//! `TRANSFORMERS_GEMMA_F16_OFFICIAL_DIRS` and
-//! `TRANSFORMERS_GEMMA_LONG_F16_OFFICIAL_DIRS` and fails as uncalibrated
-//! (`uncalibrated: official ... float16 non-finite`) before its checkpoint
-//! loads, as Qwen2-7B's F16 runs do in `tests/llama_family_artifacts.rs`. The
-//! bundle-only test `official_f16_graphs_overflow_so_gemma_has_no_f16_envelope`
-//! requires exactly that refusal of the envelope. Meanwhile Metal is
-//! qualified in F32 (the `metal::` tests without `TRANSFORMERS_GEMMA_DTYPE`)
-//! and half precision on Flex (and CUDA) in BF16. Whether the gates should
-//! instead refuse `f16` outright and drop a Metal/F16 Gemma profile, and
-//! whether the crate should refuse F16 loads of Gemma 3 by default, is
-//! decision (d), which awaits the maintainer
-//! (`acceptance/measurements/half-precision-followups-20261017.json`); the
-//! crate still loads Gemma 3 in F16 and evaluates the faithful graph.
+//! The published gemma-3-4b-it checkpoint overflows F16 in Transformers too:
+//! the first value beyond F16's `65,504` is the residual addition after block
+//! 5's MLP at the BOS position, channel 443 (`51,941.5 + 21,568.1 = 73,509.6`
+//! in F32), identically in torch CPU and MPS F16 and in this crate's Metal and
+//! Flex F16, and the logits after it are non-finite; gemma-3-12b-it and
+//! gemma-3-27b-it overflow at blocks 6 and 8. All four official F16 graphs of
+//! the short and long truths are therefore non-finite, so no F16 envelope
+//! exists (the bundle-only test
+//! `official_f16_graphs_overflow_so_gemma_has_no_f16_envelope` requires the
+//! envelope's refusal). Following the maintainer's decision (d), Gemma 3
+//! declares F16 a range hazard (`GemmaVariant::range_hazards`), and the crate
+//! refuses F16 loads of `gemma3` and `gemma3_text` checkpoints by default with
+//! `CheckpointError::RangeHazard`, unless `LoadOptions::range_hazards` is
+//! `RangeHazardPolicy::Accept`.
+//!
+//! A `TRANSFORMERS_GEMMA_DTYPE=f16` run of a checkpoint whose variant declares
+//! that hazard therefore expects the refusal: each test loads the checkpoint
+//! through `AutoCausalLm::load_local` with the default policy and requires
+//! `Error::CheckpointPlan(CheckpointError::RangeHazard)` with exactly the
+//! declared hazard, raised while planning, whose message names the measured
+//! overflow, the alternatives, and the opt-in. It prints the refusal and
+//! passes without judging anything else, so its pass qualifies the refusal,
+//! not F16 numerics. Such a run reads no official F16 graph and refuses the
+//! F32 tolerance overrides, like every half-precision run. With
+//! `TRANSFORMERS_GEMMA_RANGE_HAZARDS=accept` the same tests load with
+//! `RangeHazardPolicy::Accept` and evaluate the faithful F16 graph on the
+//! first prompt of their bundle, with every hidden state retained. Without an
+//! official envelope such a run cannot pass: it prints the first hidden state
+//! (embedding, block output, or final norm) holding a non-finite value, with
+//! its position and channel, and how many logits are non-finite, then fails
+//! at the first non-finite logit, as Transformers' own F16 graphs do, or, if
+//! every logit were finite, as uncalibrated. The variable takes `refuse` (the
+//! default) or `accept`; any other value, or `accept` in a run whose dtype
+//! the checkpoint's variant declares no hazard for, panics. To show both on
+//! Metal, with the directories set as above, one test at a time:
+//!
+//! ```text
+//! TRANSFORMERS_GEMMA_DTYPE=f16 cargo test --release --features metal --test gemma_artifacts -- \
+//!   --ignored --exact metal::metal_prompt_logits_match_the_reference --nocapture
+//! TRANSFORMERS_GEMMA_DTYPE=f16 TRANSFORMERS_GEMMA_RANGE_HAZARDS=accept cargo test --release \
+//!   --features metal --test gemma_artifacts -- --ignored --exact \
+//!   metal::metal_prompt_logits_match_the_reference --nocapture
+//! ```
+//!
+//! The first passes having verified the refusal; the second fails on the
+//! non-finite logits. Metal's Gemma qualification is F32 (the `metal::` tests
+//! without `TRANSFORMERS_GEMMA_DTYPE`), and half precision is qualified on Flex
+//! (and CUDA) in BF16; Metal cannot store BF16 on Burn 0.21. Gemma 2 declares
+//! no hazard, because no Gemma 2 checkpoint has been measured in F16.
 //!
 //! # CUDA
 //!
@@ -241,8 +271,8 @@
 //! rounds F32 operands, while the matrix products of this graph take the
 //! stored F16 or BF16 tensors as operands (F32 appears only in elementwise
 //! steps and reductions such as normalization, softmax, and activation
-//! functions). An `f16` run fails as uncalibrated on CUDA as everywhere
-//! ([F16](#f16)). All of
+//! functions). An `f16` run of a Gemma 3 checkpoint expects the loader's
+//! refusal on CUDA as everywhere ([F16](#f16)). All of
 //! this is read from the source, not measured: no CUDA run, in any dtype, has
 //! been recorded yet.
 
@@ -253,7 +283,11 @@ mod backend_numerics;
 #[path = "support/half_precision_calibration.rs"]
 mod half_precision_calibration;
 
-use std::path::{Path, PathBuf};
+use std::{
+    ffi::OsStr,
+    path::{Path, PathBuf},
+    time::Instant,
+};
 
 use backend_numerics::{Gap, MatmulPrecision, check_teacher_forced_greedy, checkpoint_tolerance};
 use burn::{
@@ -267,12 +301,18 @@ use half_precision_calibration::{
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use transformers::{
-    AutoCausalLm, AutoLoadOptions, CausalLmInput, DecodeInput, ForwardOptions, LogitsSelection,
-    TokenMask,
+    AutoCausalLm, AutoLoadOptions, CausalLmInput, DecodeInput, Error, ForwardOptions, LoadedModel,
+    LogitsSelection, TokenMask,
     attention::AttentionConnectivity,
     cache::CacheConfig,
-    checkpoint::{DTypePolicy, LoadOptions, TensorDType},
-    models::AutoCausalDecodeState,
+    checkpoint::{
+        CheckpointError, DTypePolicy, LoadOptions, RangeHazard, RangeHazardPolicy, TensorDType,
+    },
+    models::{
+        AutoCausalDecodeState,
+        config::ModelConfig,
+        gemma::{GemmaConfig, GemmaVariant},
+    },
 };
 
 /// Default absolute logit tolerance; see the module documentation.
@@ -405,9 +445,10 @@ const RETIRED: [(&str, &str); 2] = [
 
 /// Names the variable listing the official graphs of a `dtype` run of the bundle `variables` names.
 ///
-/// F16 runs read the official F16 graphs, which overflow, so their envelope
-/// is refused as uncalibrated ([F16](self#f16)); every other run reads the
-/// official BF16 graphs.
+/// F16 runs read the official F16 graphs and every other run the official
+/// BF16 graphs. A Gemma 3 F16 run never gets here, because it expects the
+/// loader's refusal ([F16](self#f16)); the bundle-only tests still read the
+/// official F16 graphs, whose envelope is refused as uncalibrated.
 fn official_variable(variables: &BundleVariables, dtype: TensorDType) -> &'static str {
     if dtype == TensorDType::F16 {
         variables.official_f16
@@ -448,7 +489,7 @@ fn minimum_greedy() -> usize {
         .unwrap_or(DEFAULT_MIN_GREEDY)
 }
 
-/// A loaded checkpoint, its bundle, its greedy tolerance, and the gate of an F16 or BF16 run.
+/// A loaded checkpoint, its bundle, its greedy tolerance, and the gate of a half-precision run.
 ///
 /// The tolerance decides greedy steps ([`check_teacher_forced_greedy`]). In
 /// an F32 run it is the bundle's absolute logit tolerance and also judges
@@ -456,35 +497,129 @@ fn minimum_greedy() -> usize {
 /// ([`HalfPrecisionGate::greedy_tolerance`]), and the gate judges the logits.
 type Loaded<B> = (AutoCausalLm<B>, Reference, f32, Option<HalfPrecisionGate>);
 
-/// Loads the checkpoint and the short-prompt bundle.
-fn load<B: Backend>(device: &B::Device) -> Loaded<B> {
+/// Loads the checkpoint and the short-prompt bundle, or `None` once an expected refusal is verified.
+fn load<B: Backend>(device: &B::Device) -> Option<Loaded<B>> {
     load_bundle(&SHORT, tolerance, device)
+}
+
+/// The variable selecting the range-hazard policy of a run (see [F16](self#f16)).
+const RANGE_HAZARDS: &str = "TRANSFORMERS_GEMMA_RANGE_HAZARDS";
+
+/// Parses the value of [`RANGE_HAZARDS`]: unset or `refuse` refuses, `accept` accepts.
+///
+/// # Panics
+///
+/// For any other value, so a misspelled opt-in never silently runs the default.
+fn parse_range_hazard_policy(value: Option<&OsStr>) -> RangeHazardPolicy {
+    match value.map(|value| value.to_str()) {
+        None | Some(Some("refuse")) => RangeHazardPolicy::Refuse,
+        Some(Some("accept")) => RangeHazardPolicy::Accept,
+        Some(other) => panic!("{RANGE_HAZARDS} must be `refuse` or `accept`, not {other:?}"),
+    }
+}
+
+/// Returns the range hazard the checkpoint's variant declares for `dtype`, if any.
+///
+/// `config` is the checkpoint's `config.json`; a multimodal `gemma3` wrapper
+/// is read through its `text_config`, as the loader reads it.
+///
+/// # Panics
+///
+/// If `config` is not a valid Gemma configuration.
+fn declared_hazard(config: &str, dtype: TensorDType) -> Option<RangeHazard> {
+    let config = GemmaConfig::from_json_str(config).expect("the checkpoint is a Gemma checkpoint");
+    let variant = GemmaVariant::from_model_type(&config.model_type)
+        .expect("a parsed Gemma configuration names a Gemma variant");
+    variant
+        .range_hazards()
+        .iter()
+        .copied()
+        .find(|hazard| hazard.applies_to(dtype))
+}
+
+/// Strict automatic load options in `dtype` under the range-hazard `policy`, without a tokenizer.
+fn load_options(dtype: TensorDType, policy: RangeHazardPolicy) -> AutoLoadOptions {
+    AutoLoadOptions {
+        checkpoint: LoadOptions {
+            dtype_policy: DTypePolicy::Cast(dtype),
+            range_hazards: policy,
+            ..LoadOptions::default()
+        },
+        load_tokenizer: false,
+        ..AutoLoadOptions::default()
+    }
+}
+
+/// Requires a multimodal checkpoint to report its vision tower, and nothing else, as ignored.
+fn check_ignored_vision_tower<B: Backend>(loaded: &LoadedModel<AutoCausalLm<B>>) {
+    let ignored = &loaded.load_report().allowlisted_ignored;
+    assert!(
+        ignored.iter().all(|name| {
+            [
+                "vision_tower.",
+                "multi_modal_projector.",
+                "model.vision_tower.",
+                "model.multi_modal_projector.",
+            ]
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+        }),
+        "only vision-tower tensors may be ignored"
+    );
+    eprintln!(
+        "load: {} vision-tower tensors intentionally ignored",
+        ignored.len()
+    );
 }
 
 /// Loads the checkpoint in `TRANSFORMERS_GEMMA_DTYPE` after checking it matches the bundle `variables` names.
 ///
 /// A multimodal checkpoint must report its vision tower, and nothing else,
 /// as intentionally ignored. The retired single-bundle variables are refused
-/// first. The device is then probed. An F32 run (the default) takes the
-/// tolerance `f32_tolerance` resolves from the probe, so a TF32 device without
-/// an explicit tolerance fails before loading. A half-precision run refuses
-/// both F32 tolerance overrides on every device and is judged by the official
-/// envelope of the bundles `variables` names in its dtype
-/// ([`official_variable`]), which is validated before the checkpoint loads;
-/// an F16 run therefore fails there as uncalibrated, because every official
-/// F16 graph of gemma-3-4b-it is non-finite ([F16](self#f16)). Either run then prints one line with the
-/// probe's finding and what judges the run: the F32 tolerance, or, in half
-/// precision, the official envelope and its greedy tolerance, so a
-/// half-precision log states that the probe was not applied.
+/// first. The device is then probed. When the checkpoint's variant declares a
+/// range hazard for the run's dtype (Gemma 3 in F16), the run refuses both F32
+/// tolerance overrides and goes to [`check_declared_hazard`]: it returns
+/// `None` once the loader's refusal is verified, and with the opt-in it fails
+/// on the faithful graph ([F16](self#f16)). Otherwise an F32 run (the default)
+/// takes the tolerance `f32_tolerance` resolves from the probe, so a TF32
+/// device without an explicit tolerance fails before loading. A BF16 run
+/// refuses both F32 tolerance overrides on every device and is judged by the
+/// official envelope of the bundles `variables` names in its dtype
+/// ([`official_variable`]), which is validated before the checkpoint loads.
+/// Either run then prints one line with the probe's finding and what judges
+/// the run: the F32 tolerance, or, in half precision, the official envelope
+/// and its greedy tolerance, so a half-precision log states that the probe
+/// was not applied.
 fn load_bundle<B: Backend>(
     variables: &BundleVariables,
     f32_tolerance: fn(MatmulPrecision) -> f32,
     device: &B::Device,
-) -> Loaded<B> {
+) -> Option<Loaded<B>> {
     refuse_retired(&RETIRED);
     let dtype = run_dtype("TRANSFORMERS_GEMMA_DTYPE");
+    let policy = parse_range_hazard_policy(std::env::var_os(RANGE_HAZARDS).as_deref());
+    let model_dir = directory("TRANSFORMERS_GEMMA_DIR");
+    let config = std::fs::read(model_dir.join("config.json")).unwrap();
+    let hazard = declared_hazard(std::str::from_utf8(&config).unwrap(), dtype);
+    assert!(
+        hazard.is_some() || policy == RangeHazardPolicy::Refuse,
+        "{RANGE_HAZARDS}=accept applies only to a run in a dtype the checkpoint's variant declares a range hazard for, not {dtype:?}"
+    );
     let reference_dir = directory(variables.reference);
     let precision = MatmulPrecision::probe::<B>(device);
+    if let Some(hazard) = hazard {
+        reject_overrides(&[
+            "TRANSFORMERS_GEMMA_TOLERANCE",
+            "TRANSFORMERS_GEMMA_LONG_TOLERANCE",
+        ]);
+        eprintln!(
+            "F32 matrix products use {precision:?} inputs; {} declares a {dtype:?} range hazard, so no official envelope judges this run ({RANGE_HAZARDS} policy {policy:?})",
+            hazard.checkpoints()
+        );
+        let reference = paired_reference(&reference_dir, &config);
+        check_declared_hazard::<B>(&model_dir, &reference, dtype, hazard, policy, device);
+        return None;
+    }
     let (tolerance, half) = if is_half_precision(dtype) {
         reject_overrides(&[
             "TRANSFORMERS_GEMMA_TOLERANCE",
@@ -506,44 +641,165 @@ fn load_bundle<B: Backend>(
         eprintln!("F32 matrix products use {precision:?} inputs; tolerance {tolerance:e}");
         (tolerance, None)
     };
-    let model_dir = directory("TRANSFORMERS_GEMMA_DIR");
-    let reference = Reference::read(&reference_dir);
-    let config = std::fs::read(model_dir.join("config.json")).unwrap();
+    let reference = paired_reference(&reference_dir, &config);
+    let loaded = AutoCausalLm::<B>::load_local(
+        &model_dir,
+        &load_options(dtype, RangeHazardPolicy::Refuse),
+        device,
+    )
+    .expect("strict load");
+    check_ignored_vision_tower(&loaded);
+    let model = loaded.into_model();
+    assert_eq!(model.config().vocabulary_size(), reference.vocabulary);
+    Some((model, reference, tolerance, half))
+}
+
+/// Reads the bundle at `reference_dir` and requires it to come from the checkpoint's `config` bytes.
+fn paired_reference(reference_dir: &Path, config: &[u8]) -> Reference {
+    let reference = Reference::read(reference_dir);
     assert_eq!(
-        hex(&Sha256::digest(&config)),
+        hex(&Sha256::digest(config)),
         reference.config_sha256,
         "the bundle was generated from another config.json"
     );
-    let options = AutoLoadOptions {
-        checkpoint: LoadOptions {
-            dtype_policy: DTypePolicy::Cast(dtype),
-            ..LoadOptions::default()
-        },
-        load_tokenizer: false,
-        ..AutoLoadOptions::default()
+    reference
+}
+
+/// Checks a run in a dtype the checkpoint's variant declares `hazard` for, under `policy`.
+///
+/// Under [`RangeHazardPolicy::Refuse`] the strict automatic load must fail
+/// while planning, with [`CheckpointError::RangeHazard`] carrying exactly
+/// `hazard`, and its message must name the measured overflow, F32 and BF16 as
+/// alternatives, and the opt-in; the refusal is printed and the function
+/// returns, so the calling test passes having qualified the refusal only.
+/// Under [`RangeHazardPolicy::Accept`] the checkpoint loads and
+/// [`reproduce_overflow`] evaluates the faithful graph, which fails the test.
+fn check_declared_hazard<B: Backend>(
+    model_dir: &Path,
+    reference: &Reference,
+    dtype: TensorDType,
+    hazard: RangeHazard,
+    policy: RangeHazardPolicy,
+    device: &B::Device,
+) {
+    let options = load_options(dtype, policy);
+    let started = Instant::now();
+    let loaded = AutoCausalLm::<B>::load_local(model_dir, &options, device);
+    if policy == RangeHazardPolicy::Accept {
+        let loaded = loaded.expect("strict load with the range hazard accepted");
+        eprintln!(
+            "load with the {dtype:?} range hazard accepted: {:.1} s",
+            started.elapsed().as_secs_f64()
+        );
+        check_ignored_vision_tower(&loaded);
+        let model = loaded.into_model();
+        assert_eq!(model.config().vocabulary_size(), reference.vocabulary);
+        reproduce_overflow(&model, reference, device);
+    }
+    let Err(error) = loaded else {
+        panic!("the declared {dtype:?} range hazard must refuse the load");
     };
-    let loaded = AutoCausalLm::<B>::load_local(&model_dir, &options, device).expect("strict load");
-    let ignored = &loaded.load_report().allowlisted_ignored;
-    assert!(
-        ignored.iter().all(|name| {
-            [
-                "vision_tower.",
-                "multi_modal_projector.",
-                "model.vision_tower.",
-                "model.multi_modal_projector.",
-            ]
-            .iter()
-            .any(|prefix| name.starts_with(prefix))
-        }),
-        "only vision-tower tensors may be ignored"
-    );
+    let Error::CheckpointPlan(CheckpointError::RangeHazard {
+        hazard: refused,
+        target,
+        parameters,
+    }) = &error
+    else {
+        panic!("expected the range-hazard refusal while planning, got {error}");
+    };
+    assert_eq!(*refused, hazard, "the refusal names the declared hazard");
+    let message = error.to_string();
+    for fragment in [
+        "73,509.6",
+        "65,504",
+        "`DTypePolicy::Cast(TensorDType::F32)`",
+        "`DTypePolicy::Cast(TensorDType::BF16)`",
+        "`RangeHazardPolicy::Accept`",
+    ] {
+        assert!(
+            message.contains(fragment),
+            "missing {fragment:?} in {message}"
+        );
+    }
     eprintln!(
-        "load: {} vision-tower tensors intentionally ignored",
-        ignored.len()
+        "refused while planning, {:.1} s after the load began ({parameters} planned {dtype:?} parameters, first `{target}`): {message}",
+        started.elapsed().as_secs_f64()
     );
-    let model = loaded.into_model();
-    assert_eq!(model.config().vocabulary_size(), reference.vocabulary);
-    (model, reference, tolerance, half)
+}
+
+/// Names hidden state `index` of a stack of `layers` blocks: the embedding, a block output, or the final norm.
+fn hidden_state_label(index: usize, layers: usize) -> String {
+    match index {
+        0 => "the scaled embedding".into(),
+        index if index <= layers => format!("block {} output", index - 1),
+        _ => "the final norm".into(),
+    }
+}
+
+/// Returns the first non-finite entry of a row-major `[rows, width]` buffer as `(row, column, value)`.
+fn first_non_finite(values: &[f32], width: usize) -> Option<(usize, usize, f32)> {
+    values
+        .iter()
+        .position(|value| !value.is_finite())
+        .map(|index| (index / width, index % width, values[index]))
+}
+
+/// Evaluates the faithful graph on the bundle's first prompt and fails: at the first non-finite logit, or as uncalibrated.
+///
+/// Every hidden state is retained, and the first one holding a non-finite
+/// value is printed with its position and channel (for gemma-3-4b-it the
+/// evidence places the overflow at block 5's output, the BOS position,
+/// channel 443), followed by the number of non-finite logits. No official
+/// envelope exists in a dtype the variant declares a hazard for, so the run
+/// cannot pass.
+fn reproduce_overflow<B: Backend>(
+    model: &AutoCausalLm<B>,
+    reference: &Reference,
+    device: &B::Device,
+) -> ! {
+    let prompt = &reference.prompts[0];
+    let input = CausalLmInput {
+        token_ids: row::<B>(&prompt.tokens, device),
+        token_mask: None,
+        position_ids: None,
+    };
+    let options = ForwardOptions {
+        logits: LogitsSelection::All,
+        hidden_states: true,
+        ..ForwardOptions::default()
+    };
+    let output = model.forward(input, &options).unwrap();
+    let layers = output.hidden_states.len() - 2;
+    let overflow = output
+        .hidden_states
+        .into_iter()
+        .enumerate()
+        .find_map(|(index, state)| {
+            let [_, _, width] = state.dims();
+            first_non_finite(&host(state), width).map(|found| (index, found))
+        });
+    match overflow {
+        Some((index, (position, channel, value))) => eprintln!(
+            "prompt 0 ({} tokens): the first non-finite hidden state is {}, position {position}, channel {channel} ({value})",
+            prompt.tokens.len(),
+            hidden_state_label(index, layers)
+        ),
+        None => eprintln!("prompt 0: every hidden state is finite"),
+    }
+    let logits = host(output.logits);
+    let non_finite = logits.iter().filter(|logit| !logit.is_finite()).count();
+    eprintln!(
+        "prompt 0: {non_finite} of {} logits are non-finite",
+        logits.len()
+    );
+    let Some((position, entry, value)) = first_non_finite(&logits, reference.vocabulary) else {
+        panic!(
+            "uncalibrated: every logit of the faithful graph is finite, but no official envelope exists in this dtype to judge them"
+        );
+    };
+    panic!(
+        "prompt 0: the faithful graph's logits hold non-finite values (first {value} at position {position}, vocabulary entry {entry}), as Transformers' own graphs in this dtype do; no official envelope exists, so this run cannot qualify the dtype"
+    );
 }
 
 /// Uploads one row of token IDs.
@@ -590,7 +846,9 @@ fn gap(actual: &[f32], expected: &[f32]) -> f32 {
 
 /// Stateless logits at every prompt position match the reference.
 fn check_prompt_logits<B: Backend>(device: &B::Device) {
-    let (model, reference, tolerance, half) = load::<B>(device);
+    let Some((model, reference, tolerance, half)) = load::<B>(device) else {
+        return;
+    };
     let options = ForwardOptions {
         logits: LogitsSelection::All,
         ..ForwardOptions::default()
@@ -632,7 +890,9 @@ fn check_prompt_logits<B: Backend>(device: &B::Device) {
 /// the prefill against the stateless pass (provisionally) and the longest
 /// prompt decoded token by token ([`check_cached_prompt_decode`]).
 fn check_cached_greedy<B: Backend>(device: &B::Device) {
-    let (model, reference, tolerance, half) = load::<B>(device);
+    let Some((model, reference, tolerance, half)) = load::<B>(device) else {
+        return;
+    };
     let f32_truth = half
         .is_none()
         .then(|| DecodeTruth::read(&directory(SHORT.reference), &directory(SHORT.decode_truth)));
@@ -783,7 +1043,9 @@ fn check_cached_prompt_decode<B: Backend>(
 ///
 /// A half-precision run also checks each row against the stateless pass.
 fn check_batched_prefill<B: Backend>(device: &B::Device) {
-    let (model, reference, tolerance, half) = load::<B>(device);
+    let Some((model, reference, tolerance, half)) = load::<B>(device) else {
+        return;
+    };
     let width = reference
         .prompts
         .iter()
@@ -845,8 +1107,10 @@ type LoadedLong<B> = (
 );
 
 /// Loads the long-context bundle and returns the model, bundle, tolerance, sliding window, and gate.
-fn load_long<B: Backend>(device: &B::Device) -> LoadedLong<B> {
-    let (model, reference, tolerance, half) = load_bundle::<B>(&LONG, long_tolerance, device);
+///
+/// `None` once an expected refusal is verified, as for [`load`].
+fn load_long<B: Backend>(device: &B::Device) -> Option<LoadedLong<B>> {
+    let (model, reference, tolerance, half) = load_bundle::<B>(&LONG, long_tolerance, device)?;
     let AutoCausalLm::Gemma(gemma) = &model else {
         panic!("the checkpoint must load as the Gemma family");
     };
@@ -859,7 +1123,7 @@ fn load_long<B: Backend>(device: &B::Device) -> LoadedLong<B> {
         length >= window + 64,
         "the long prompt ({length} tokens) must cross the {window}-token window"
     );
-    (model, reference, tolerance, window, half)
+    Some((model, reference, tolerance, window, half))
 }
 
 /// Stateless logits at the given prompt positions, as one row per position.
@@ -953,7 +1217,9 @@ fn gaps_around_window(
 /// defined as for the official bundle, and must pass the half-precision rule
 /// with the window and fail it without (see the module documentation).
 fn check_long_context_logits<B: Backend>(device: &B::Device) {
-    let (mut model, reference, tolerance, window, half) = load_long::<B>(device);
+    let Some((mut model, reference, tolerance, window, half)) = load_long::<B>(device) else {
+        return;
+    };
     let tokens = &reference.prompts[0].tokens;
     let positions: Vec<usize> = match half {
         None => (0..4).chain(window - 8..tokens.len()).collect(),
@@ -1051,7 +1317,9 @@ fn check_long_context_logits<B: Backend>(device: &B::Device) {
 /// short cached prefill does; the long logits test ties that stateless pass to
 /// the bundle.
 fn check_long_context_cached<B: Backend>(device: &B::Device) {
-    let (model, reference, tolerance, window, half) = load_long::<B>(device);
+    let Some((model, reference, tolerance, window, half)) = load_long::<B>(device) else {
+        return;
+    };
     let f32_truth = half
         .is_none()
         .then(|| DecodeTruth::read(&directory(LONG.reference), &directory(LONG.decode_truth)));
@@ -1163,6 +1431,81 @@ fn official_graphs_follow_the_run_dtype() {
     }
 }
 
+/// The range-hazard variable accepts exactly `refuse` (or nothing) and `accept`.
+#[test]
+fn the_range_hazard_variable_accepts_two_spellings() {
+    assert_eq!(parse_range_hazard_policy(None), RangeHazardPolicy::Refuse);
+    for (spelling, policy) in [
+        ("refuse", RangeHazardPolicy::Refuse),
+        ("accept", RangeHazardPolicy::Accept),
+    ] {
+        assert_eq!(
+            parse_range_hazard_policy(Some(OsStr::new(spelling))),
+            policy
+        );
+    }
+    for spelling in ["", "Accept", "ACCEPT", "1", "true", " accept", "clamp"] {
+        let refused =
+            std::panic::catch_unwind(|| parse_range_hazard_policy(Some(OsStr::new(spelling))));
+        assert!(refused.is_err(), "{spelling:?} must be refused");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let refused = std::panic::catch_unwind(|| {
+            parse_range_hazard_policy(Some(OsStr::from_bytes(b"acc\xff")))
+        });
+        assert!(refused.is_err(), "non-UTF-8 must be refused");
+    }
+}
+
+/// F16 runs of `gemma3` and `gemma3_text` checkpoints expect the refusal; F32, BF16, and Gemma 2 runs do not.
+///
+/// Reads the committed tiny configurations, wrapping the Gemma 3 one as a
+/// multimodal `gemma3` checkpoint does, so the gate's expectation follows the
+/// library's declarations rather than a model-name list of its own.
+#[test]
+fn f16_runs_of_gemma3_checkpoints_expect_the_refusal() {
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/tiny_goldens");
+    let read =
+        |case: &str| std::fs::read_to_string(fixtures.join(case).join("config.json")).unwrap();
+    let text: Value = serde_json::from_str(&read("gemma3-text")).unwrap();
+    let wrapper = serde_json::json!({
+        "architectures": ["Gemma3ForConditionalGeneration"],
+        "model_type": "gemma3",
+        "text_config": text,
+    })
+    .to_string();
+    for config in [read("gemma3-text"), wrapper] {
+        let hazard = declared_hazard(&config, TensorDType::F16).expect("Gemma 3 declares F16");
+        assert_eq!(hazard, GemmaVariant::Gemma3Text.range_hazards()[0]);
+        assert!(hazard.evidence().contains("73,509.6"));
+        for dtype in [TensorDType::F32, TensorDType::BF16] {
+            assert_eq!(declared_hazard(&config, dtype), None, "{dtype:?}");
+        }
+    }
+    for dtype in [TensorDType::F16, TensorDType::BF16, TensorDType::F32] {
+        assert_eq!(declared_hazard(&read("gemma2"), dtype), None, "{dtype:?}");
+    }
+}
+
+/// Hidden states are labelled embedding, block outputs, and final norm, and the first non-finite entry is located.
+#[test]
+fn overflow_locations_are_labelled_and_found() {
+    assert_eq!(hidden_state_label(0, 34), "the scaled embedding");
+    assert_eq!(hidden_state_label(1, 34), "block 0 output");
+    assert_eq!(hidden_state_label(6, 34), "block 5 output");
+    assert_eq!(hidden_state_label(34, 34), "block 33 output");
+    assert_eq!(hidden_state_label(35, 34), "the final norm");
+    assert_eq!(first_non_finite(&[1.0, 2.0, 3.0, 4.0], 2), None);
+    assert_eq!(first_non_finite(&[], 2), None);
+    let found = first_non_finite(&[1.0, 2.0, 3.0, f32::INFINITY, f32::NAN, 6.0], 3);
+    assert_eq!(found, Some((1, 0, f32::INFINITY)));
+    let (row, column, value) = first_non_finite(&[0.0, f32::NAN], 1).unwrap();
+    assert_eq!((row, column), (1, 0));
+    assert!(value.is_nan());
+}
+
 /// Reads the official envelope of the bundle `variables` names in the run's dtype, from the bundles alone.
 ///
 /// # Panics
@@ -1219,8 +1562,9 @@ fn official_graphs_admit_each_other_leave_one_out() {
 /// Reads the four official F16 graphs named by
 /// `TRANSFORMERS_GEMMA_F16_OFFICIAL_DIRS` and
 /// `TRANSFORMERS_GEMMA_LONG_F16_OFFICIAL_DIRS` and requires the envelope to be
-/// refused as uncalibrated, which is why a `TRANSFORMERS_GEMMA_DTYPE=f16` run
-/// fails before its checkpoint loads (see [F16](self#f16)). Bundles only.
+/// refused as uncalibrated: the measurement behind Gemma 3's declared F16
+/// range hazard, which a `TRANSFORMERS_GEMMA_DTYPE=f16` run expects the
+/// loader to enforce (see [F16](self#f16)). Bundles only.
 #[test]
 #[ignore = "needs the short and long _REFERENCE_DIR, _DECODE_TRUTH_DIR, and _F16_OFFICIAL_DIRS (bundles only)"]
 fn official_f16_graphs_overflow_so_gemma_has_no_f16_envelope() {
@@ -1300,8 +1644,10 @@ mod metal {
     //! Metal counterparts of the Flex checks, run serially by the integrator.
     //!
     //! They run in F32 unless `TRANSFORMERS_GEMMA_DTYPE` selects half
-    //! precision; `f16` fails as uncalibrated ([F16](super#f16)), and Metal
-    //! cannot store BF16 on Burn 0.21.
+    //! precision; `f16` expects the loader's refusal of Gemma 3, or with
+    //! `TRANSFORMERS_GEMMA_RANGE_HAZARDS=accept` fails on the faithful graph's
+    //! non-finite logits ([F16](super#f16)), and Metal cannot store BF16 on
+    //! Burn 0.21.
 
     use burn::backend::Metal;
 
