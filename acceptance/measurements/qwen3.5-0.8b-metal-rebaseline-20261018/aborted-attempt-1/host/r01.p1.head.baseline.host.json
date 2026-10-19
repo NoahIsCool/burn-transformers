@@ -1,0 +1,267 @@
+{
+ "sample": {
+  "index": 0,
+  "round": 1,
+  "position": 1,
+  "label": "head",
+  "benchmark": "baseline",
+  "test": "qwen::qwen35_metal_baseline_benchmark",
+  "source": "fa8426e5dc8cbcb269c29e211b119ea0acd61054 (worktree /Users/nover/repos/transformers-worktrees/tfm-rebaseline, src tree ea9deb1a, cargo +1.92.0)",
+  "binary": "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-head/release/deps/qwen35_benchmarks-ffcc519af7a3b786",
+  "sha256": "cb7bf1b53d045b53a8fadb8cc032c732fc8d40f57ddc347cc8500f1eb0723f99",
+  "argv": [
+   "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-head/release/deps/qwen35_benchmarks-ffcc519af7a3b786",
+   "--ignored",
+   "--exact",
+   "--nocapture",
+   "--test-threads",
+   "1",
+   "qwen::qwen35_metal_baseline_benchmark"
+  ],
+  "artifacts": {
+   "TRANSFORMERS_QWEN35_DIR": "/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17",
+   "TRANSFORMERS_QWEN35_REFERENCE_DIR": "/Volumes/bag of holding/models/transformers-acceptance"
+  },
+  "report": "bench/r01.p1.head.baseline.json",
+  "environment": "env/r01.p1.head.baseline.environment.json",
+  "log": "logs/r01.p1.head.baseline.log",
+  "host": "host/r01.p1.head.baseline.host.json"
+ },
+ "exit": 0,
+ "wall_seconds": 252.938,
+ "admission": {
+  "cooldown_seconds": 120.01,
+  "load_wait_seconds": 720.956,
+  "admitting_load_1m": 3.68
+ },
+ "binary_sha256_before": "cb7bf1b53d045b53a8fadb8cc032c732fc8d40f57ddc347cc8500f1eb0723f99",
+ "binary_sha256_after": "cb7bf1b53d045b53a8fadb8cc032c732fc8d40f57ddc347cc8500f1eb0723f99",
+ "host_before": {
+  "utc": "2026-10-18T23:46:30+00:00",
+  "uptime": "19:46  up 17 days,  5:06, 3 users, load averages: 3.68 13.70 13.90",
+  "loadavg": [
+   3.68,
+   13.7,
+   13.9
+  ],
+  "top_cpu": "  PID  %CPU    RSS     ELAPSED ARGS\n  796  10.6  39648 17-05:04:34 /usr/sbin/coreaudiod\n59357   8.9 719744    22:27:53 /Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Versions/155.0.8059.80/Helpers/Codex (Renderer).app/Contents/MacOS/Codex (Renderer) --type=render\n59299   8.3  76064    22:28:00 /Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Versions/155.0.8059.80/Helpers/Codex (Service).app/Contents/MacOS/Codex (Service) --type=gpu-proc\n39210   8.1 562656    22:58:12 /Applications/Firefox.app/Contents/MacOS/plugin-container.app/Contents/MacOS/plugin-container -isForBrowser -prefsHandle 0:53186 -prefMapHandle 1:303549 -jsInitHandle 2:\n20184   3.3 832272 03-22:45:16 /Users/nover/Library/Application Support/Claude/claude-code/2.1.295/9d6405864fdc/claude.app/Contents/MacOS/claude --output-format stream-json --verbose --input-format st\n 6933   2.5 912368 03-09:26:05 /Applications/Firefox.app/Contents/MacOS/firefox\n 2175   1.6   6608 03-05:04:03 /usr/libexec/sysmond\n73534   1.5 758704 01-03:02:54 /Applications/Firefox.app/Contents/MacOS/plugin-container.app/Contents/MacOS/plugin-container -isForBrowser -prefsHandle 0:53104 -prefMapHandle 1:303549 -jsInitHandle 2:\n  770   1.3  47744 17-05:04:40 /System/Library/DriverExtensions/com.apple.DriverKit-AppleBCMWLAN.dext/com.apple.DriverKit-AppleBCMWLAN com.apple.bcmwlan 0x10000103b com.apple.DriverKit-AppleBCMWLAN\n  978   1.1  15872 17-05:04:21 /System/Library/PrivateFrameworks/CoreSpeech.framework/corespeechd\n59588   1.1 272784    22:27:49 /Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Versions/155.0.8059.80/Helpers/Codex (Renderer).app/Contents/MacOS/Codex (Renderer) --type=render\n23675   0.9 305152 03-02:52:55 /Users/nover/Library/Application Support/Claude/claude-code/2.1.295/9d6405864fdc/claude.app/Contents/MacOS/claude --output-format stream-json --verbose --input-format st",
+  "power": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=37027939)\t100%; charged; 0:00 remaining present: true",
+  "thermal": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+  "memory_pressure": "System-wide memory free percentage: 92%",
+  "metal_cache": {
+   "16777235_419/functions.data": [
+    41779200,
+    1792311563
+   ],
+   "16777235_419/functions.list": [
+    495084,
+    1792316130
+   ],
+   "16777235_419/functions1.data": [
+    13058048,
+    1792272189
+   ],
+   "16777235_419/functions1.list": [
+    166812,
+    1792272190
+   ],
+   "16777235_419/functions2.data": [
+    458752,
+    1783353316
+   ],
+   "16777235_419/functions2.list": [
+    6148,
+    1783353316
+   ],
+   "16777235_419/functions3.data": [
+    65536,
+    1777995204
+   ],
+   "16777235_419/functions3.list": [
+    156,
+    1777995204
+   ],
+   "16777235_419/functions4.data": [
+    65536,
+    1777995204
+   ],
+   "16777235_419/functions4.list": [
+    156,
+    1777995204
+   ],
+   "32023/libraries.data": [
+    55721984,
+    1744978574
+   ],
+   "32023/libraries.list": [
+    111820,
+    1744978656
+   ],
+   "32023/libraries1.data": [
+    16580608,
+    1739292184
+   ],
+   "32023/libraries1.list": [
+    43388,
+    1739292184
+   ],
+   "32024/libraries.data": [
+    369786880,
+    1792316401
+   ],
+   "32024/libraries.list": [
+    1541332,
+    1792316401
+   ],
+   "32024/libraries1.data": [
+    62767104,
+    1792276901
+   ],
+   "32024/libraries1.list": [
+    163844,
+    1792276901
+   ],
+   "32024/libraries2.data": [
+    26755072,
+    1783353316
+   ],
+   "32024/libraries2.list": [
+    13932,
+    1783353316
+   ]
+  }
+ },
+ "host_after": {
+  "utc": "2026-10-18T23:50:43+00:00",
+  "uptime": "19:50  up 17 days,  5:11, 3 users, load averages: 13.60 14.37 14.10",
+  "loadavg": [
+   13.6,
+   14.37,
+   14.1
+  ],
+  "top_cpu": "  PID  %CPU    RSS     ELAPSED ARGS\n69436 164.6  85120       00:01 /Volumes/bag of holding/cargo-targets/tfm-gemma-f16/default/debug/deps/transformers-aba168a587df15ea\n  554   7.8  16304 17-05:08:56 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/FSEvents.framework/Versions/A/Support/fseventsd\n  796   5.3  39648 17-05:08:48 /usr/sbin/coreaudiod\n  579   5.2  82288 17-05:08:56 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mds\n59357   3.6 727632    22:32:07 /Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Versions/155.0.8059.80/Helpers/Codex (Renderer).app/Contents/MacOS/Codex (Renderer) --type=render\n69432   3.2 142464       00:02 /Users/nover/.rustup/toolchains/nightly-aarch64-apple-darwin/bin/cargo test --locked\n  859   3.0 252624 17-05:08:36 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mds_stores\n  712   2.3  63088 17-05:08:55 /usr/libexec/syspolicyd\n 1134   1.7  82928 17-05:08:28 /System/Library/CoreServices/ControlCenter.app/Contents/MacOS/ControlCenter\n  621   1.5 289680 17-05:08:56 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer -daemon\n59299   1.2  76112    22:32:14 /Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Versions/155.0.8059.80/Helpers/Codex (Service).app/Contents/MacOS/Codex (Service) --type=gpu-proc\n20184   0.9 854640 03-22:49:30 /Users/nover/Library/Application Support/Claude/claude-code/2.1.295/9d6405864fdc/claude.app/Contents/MacOS/claude --output-format stream-json --verbose --input-format st",
+  "power": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=37027939)\t100%; charged; 0:00 remaining present: true",
+  "thermal": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+  "memory_pressure": "System-wide memory free percentage: 92%",
+  "metal_cache": {
+   "16777235_419/functions.data": [
+    41779200,
+    1792311563
+   ],
+   "16777235_419/functions.list": [
+    495084,
+    1792367196
+   ],
+   "16777235_419/functions1.data": [
+    13058048,
+    1792272189
+   ],
+   "16777235_419/functions1.list": [
+    166812,
+    1792272190
+   ],
+   "16777235_419/functions2.data": [
+    458752,
+    1783353316
+   ],
+   "16777235_419/functions2.list": [
+    6148,
+    1783353316
+   ],
+   "16777235_419/functions3.data": [
+    65536,
+    1777995204
+   ],
+   "16777235_419/functions3.list": [
+    156,
+    1777995204
+   ],
+   "16777235_419/functions4.data": [
+    65536,
+    1777995204
+   ],
+   "16777235_419/functions4.list": [
+    156,
+    1777995204
+   ],
+   "32023/libraries.data": [
+    55721984,
+    1744978574
+   ],
+   "32023/libraries.list": [
+    111820,
+    1744978656
+   ],
+   "32023/libraries1.data": [
+    16580608,
+    1739292184
+   ],
+   "32023/libraries1.list": [
+    43388,
+    1739292184
+   ],
+   "32024/libraries.data": [
+    370081792,
+    1792367266
+   ],
+   "32024/libraries.list": [
+    1542284,
+    1792367266
+   ],
+   "32024/libraries1.data": [
+    62767104,
+    1792276901
+   ],
+   "32024/libraries1.list": [
+    163844,
+    1792276901
+   ],
+   "32024/libraries2.data": [
+    26755072,
+    1783353316
+   ],
+   "32024/libraries2.list": [
+    13932,
+    1783353316
+   ]
+  }
+ },
+ "metal_cache_growth": {
+  "files": {
+   "16777235_419/functions.list": {
+    "before": [
+     495084,
+     1792316130
+    ],
+    "after": [
+     495084,
+     1792367196
+    ],
+    "growth_bytes": 0
+   },
+   "32024/libraries.data": {
+    "before": [
+     369786880,
+     1792316401
+    ],
+    "after": [
+     370081792,
+     1792367266
+    ],
+    "growth_bytes": 294912
+   },
+   "32024/libraries.list": {
+    "before": [
+     1541332,
+     1792316401
+    ],
+    "after": [
+     1542284,
+     1792367266
+    ],
+    "growth_bytes": 952
+   }
+  },
+  "growth_bytes": 295864
+ }
+}

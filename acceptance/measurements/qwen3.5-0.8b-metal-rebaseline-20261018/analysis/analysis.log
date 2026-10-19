@@ -1,0 +1,41 @@
+== rounds 12; steady state from round 3 (rounds [3, 4, 5, 6, 7, 8, 9, 10, 11, 12]); maximum |drift| 0.0209 (limit 0.025)
+   largest drift head/baseline/strict_load +0.0209
+   largest drift september/baseline/strict_load +0.0169
+   largest drift september/public/strict_load +0.0112
+   largest drift head/baseline/source_32.prefill -0.0095
+   largest drift head/baseline/source_32.first_token_latency -0.0087
+   largest drift september/baseline/source_128.prefill +0.0072
+== after 8 rounds: steady state from round None; drifting at the whole window: ['september/baseline/strict_load', 'september/baseline/source_32.prefill', 'september/baseline/source_32.first_token_latency', 'september/baseline/source_32.decode_model_only', 'september/baseline/source_512.prefill', 'september/baseline/source_512.first_token_latency', 'head/public/strict_load', 'head/public/natural_loop', 'september/public/strict_load']
+== baseline benchmark (steady-state medians in s; approved September 10 values from qwen-controlled-current-summary.json)
+   strict_load: head 0.933538 [0.919094, 1.026705] | september 0.973443 [0.954167, 0.997631] | head/september 0.959 | approved 1.412922: head -33.9%, september -31.1%
+   source_32.prefill: head 0.048583 [0.047318, 0.052933] | september 0.064475 [0.063268, 0.066017] | head/september 0.754 | approved 0.075650: head -35.8%, september -14.8%
+   source_32.first_token_latency: head 0.056545 [0.055208, 0.060632] | september 0.072412 [0.071132, 0.073959] | head/september 0.781 | approved 0.084213: head -32.9%, september -14.0%
+   source_32.decode_model_only: head 3.559923 [3.531514, 3.874706] | september 4.052869 [4.027118, 4.083846] | head/september 0.878 | approved 4.758460: head -25.2%, september -14.8%
+   source_32.decode_including_greedy_readback: head 4.571608 [4.543558, 4.899909] | september 5.067563 [5.038188, 5.094220] | head/september 0.902 | approved 5.815231: head -21.4%, september -12.9%
+   source_128.prefill: head 0.060993 [0.060451, 0.062363] | september 0.148328 [0.143440, 0.149888] | head/september 0.411 | approved 0.178113: head -65.8%, september -16.7%
+   source_128.first_token_latency: head 0.068917 [0.068291, 0.070426] | september 0.156177 [0.151275, 0.157709] | head/september 0.441 | approved 0.187561: head -63.3%, september -16.7%
+   source_128.decode_model_only: head 3.547134 [3.536121, 3.891677] | september 4.049910 [4.012572, 4.075992] | head/september 0.876 | approved 4.747253: head -25.3%, september -14.7%
+   source_128.decode_including_greedy_readback: head 4.560201 [4.547058, 4.915361] | september 5.063716 [5.025103, 5.088503] | head/september 0.901 | approved 5.793577: head -21.3%, september -12.6%
+   source_512.prefill: head 0.161413 [0.160757, 0.161905] | september 0.530376 [0.525953, 0.535716] | head/september 0.304 | approved 0.615804: head -73.8%, september -13.9%
+   source_512.first_token_latency: head 0.169647 [0.168779, 0.171416] | september 0.538401 [0.533884, 0.544571] | head/september 0.315 | approved 0.623614: head -72.8%, september -13.7%
+   source_512.decode_model_only: head 3.541877 [3.517977, 3.573947] | september 4.039418 [4.016386, 4.078619] | head/september 0.877 | approved 4.773886: head -25.8%, september -15.4%
+   source_512.decode_including_greedy_readback: head 4.556832 [4.532622, 4.587470] | september 5.054057 [5.031358, 5.091952] | head/september 0.902 | approved 5.799063: head -21.4%, september -12.8%
+   natural_loop: head 1.110100 [1.102568, 1.120526] | september 1.233049 [1.203365, 1.238727] | head/september 0.900 | approved 1.420816: head -21.9%, september -13.2%
+   cold first token (diagnostic) head: steady median 0.1545 range [0.1196, 0.2269] | all rounds median 0.1618 range [0.1196, 0.2527] | approved 0.167520 (-7.8%) | spearman with shader-cache growth +0.740, with round -0.629
+      per round cold [0.2527, 0.149, 0.2042, 0.2053, 0.127, 0.2269, 0.1747, 0.2241, 0.1272, 0.1255, 0.1343, 0.1196] growth [312360, 246712, 246600, 164512, 164512, 180896, 197336, 197336, 164400, 98696, 115136, 98864]
+   cold first token (diagnostic) september: steady median 0.2600 range [0.1895, 0.4032] | all rounds median 0.2954 range [0.1895, 0.5098] | approved 0.167520 (+55.2%) | spearman with shader-cache growth +0.874, with round -0.839
+      per round cold [0.5098, 0.4754, 0.3663, 0.4032, 0.27, 0.23, 0.3605, 0.2353, 0.2499, 0.3208, 0.1895, 0.2234] growth [658272, 460824, 460768, 411280, 296368, 263208, 427720, 263320, 296200, 312528, 164680, 328688]
+   token and prediction hashes: identical in every run of both binaries and to September 10
+== public benchmark (steady-state medians in s; approved September 10 values from qwen-public-summary.json)
+   strict_load: head 0.936357 [0.922158, 1.011035] | september 0.979434 [0.962605, 1.133809] | head/september 0.956 | approved 1.407921: head -33.5%, september -30.4%
+   natural_loop: head 1.414438 [1.394066, 1.652299] | september 1.577991 [1.560667, 1.836349] | head/september 0.896 | approved 1.751402: head -19.2%, september -9.9%
+   cold first token (diagnostic) head: steady median 0.1610 range [0.1183, 0.3660] | all rounds median 0.1775 range [0.1183, 0.3660] | approved 0.365949 (-56.0%) | spearman with shader-cache growth +0.699, with round -0.769
+      per round cold [0.2733, 0.2982, 0.366, 0.1927, 0.2411, 0.1351, 0.1598, 0.1623, 0.158, 0.2331, 0.1561, 0.1183] growth [197280, 98808, 181008, 197224, 164400, 49656, 131408, 65816, 115080, 98752, 16720, 49432]
+   cold first token (diagnostic) september: steady median 0.2844 range [0.2482, 0.4431] | all rounds median 0.2944 range [0.2482, 0.5194] | approved 0.365949 (-22.3%) | spearman with shader-cache growth +0.725, with round -0.657
+      per round cold [0.5194, 0.46, 0.3721, 0.4431, 0.2811, 0.2539, 0.2546, 0.3032, 0.2832, 0.308, 0.2856, 0.2482] growth [329528, 460432, 328912, 263096, 263152, 197336, 197504, 197280, 164456, 246600, 197280, 131576]
+   token and prediction hashes: identical in every run of both binaries and to September 10
+== contaminated attempt r01.p2.september.baseline.contaminated-2026-10-19T000636+0000.host.json: admitted at load 3.19/4.37, in-run maximum 24.1, wall 266.71 s
+== contaminated attempt r02.p4.head.baseline.contaminated-2026-10-19T003935+0000.host.json: admitted at load 3.33/4.1, in-run maximum 12.05, wall 211.327 s
+== contaminated attempt r09.p1.head.baseline.contaminated-2026-10-19T025336+0000.host.json: admitted at load 1.89/2.31, in-run maximum 8.17, wall 213.624 s
+== contaminated attempt r10.p4.head.baseline.contaminated-2026-10-19T033600+0000.host.json: admitted at load 3.88/4.53, in-run maximum 12.1, wall 206.287 s
+== contaminated attempt r10.p4.head.baseline.contaminated-2026-10-19T034126+0000.host.json: admitted at load 2.99/4.8, in-run maximum 6.12, wall 206.386 s

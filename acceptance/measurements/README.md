@@ -112,6 +112,27 @@ statements of the envelope record, which stays byte-identical with the other
 earlier records. `scripts/tests/test_half_precision_review_record.py`
 recomputes its statuses, figures, and identities. It promotes no checkpoint.
 
+The [Qwen3.5-0.8B re-baseline record](qwen3.5-0.8b-metal-rebaseline-20261018.json)
+carries the maintainer's October 18 decision to re-baseline the Qwen3.5-0.8B
+benchmarks on the current host (Mac15,11, macOS 27.0.1) and to report cold
+first token as a diagnostic rather than a gate. It measures the head
+`fa8426e` against the September source `c70057e`, both rebuilt with rustc
+1.92.0 and the profile's features, under the
+[campaign protocol](../../BENCHMARKS.md#qwen35-08b-benchmark-campaign-protocol):
+12 alternating, counterbalanced rounds of the baseline and public benchmarks
+(48 clean processes, 5 attempts contaminated by other CPU work and rerun, and
+an aborted first attempt kept unused), steady from round 3. Its `reference`
+block, the head's steady-state medians, is what future comparisons are
+judged against; it supersedes the September 10 baseline of the
+[v0.1 release record](v0_1-release-20260910.json) for that purpose without
+editing it or the September summaries. Every sample's raw repetitions are in
+the record, and the campaign directory holds the reports, logs, host
+records, build logs, plans, and harness copies;
+`scripts/tests/test_qwen35_rebaseline_record.py` recomputes every sample,
+the steady state, the reference, and every comparison from them with the
+crate's `scripts/qwen35_benchmark_protocol.py`. It promotes no checkpoint and
+changes no support claim.
+
 ## Published and repository-only records
 
 The crates.io package carries only part of this directory, because the

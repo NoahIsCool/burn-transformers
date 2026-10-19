@@ -1,0 +1,72 @@
+{
+ "head": {
+  "decision_date": "2026-10-18",
+  "maintainer_decision": {
+   "date": "2026-10-18",
+   "quote": "re-baseline the Qwen3.5-0.8B benchmarks on the current host (macOS 27.0.1, same Mac15,11), and report cold first token as a diagnostic rather than a pass/fail gate.",
+   "context": "The half-precision review record left re-baselining Qwen3.5-0.8B's cold first token to the maintainer (its benchmark_breach and its awaiting_maintainer item for decision a). An uncommitted attribution run after it found that the September source c70057e, rebuilt with rustc 1.92.0, exceeded its own September 10 cold first token in 6 of 6 runs, that the head fa8426e was at or below that rebuild, and that cold time tracked Metal shader-cache growth; its review found an order confound, a first round under post-build load, and a series that never converged. This record answers that item; the review record stays byte-identical."
+  }
+ },
+ "performance_policy": {
+  "user_authorized_rebaseline": true,
+  "authorization_date": "2026-10-18",
+  "quoted_reason": "re-baseline the Qwen3.5-0.8B benchmarks on the current host (macOS 27.0.1, same Mac15,11), and report cold first token as a diagnostic rather than a pass/fail gate.",
+  "decision": "Future Qwen3.5-0.8B Metal/F16 comparisons use this record's reference block (label head, source fa8426e, measured on Mac15,11 with macOS 27.0.1 build 26A434 under the campaign protocol). Warm, natural-loop, and strict-load medians are gated at the unchanged thresholds: an alert above a 5% change and a failure above a 10% slowdown confirmed by a controlled rerun. Cold first token is reported as a median and range and never gated.",
+  "historical_measurements_modified": false,
+  "historical_slowdown_explained": false,
+  "reference_block": "reference"
+ },
+ "supersedes": {
+  "scope": "For future Qwen3.5-0.8B comparisons only. The v0.1 release record, its September 10 summaries, their measurements, and the documented historical slowdown keep their bytes and meaning; the September 10 series ran on macOS 15.7.9 build 24G830 (OS-provided Metal 3), a different benchmark series from this host's macOS 27.0.1 build 26A434 (Metal 4).",
+  "superseded_record_modified": false
+ },
+ "host": {
+  "power": "AC power with the battery charged and pmset powermode 0, checked before every sample",
+  "shared_with": "Other sessions' builds and tests ran on the CPU during the campaign. The heavy-model lock was held throughout, so no other real-checkpoint run or benchmark shared the GPU; the admission and in-run load rules kept samples away from that CPU work.",
+  "september_10_series_host": "Mac15,11 on macOS 15.7.9 build 24G830 with OS-provided Metal 3 (the September summaries' recorded environment)"
+ },
+ "tail": {
+  "aborted_attempt": {
+   "directory": "aborted-attempt-1",
+   "protocol_script_sha256": "ea78894d0112a73b5d59cd3230e4e8fb33ab7c2332a08180439c4a85b88101b1",
+   "samples": 1,
+   "used": false,
+   "finding": "The first attempt admitted samples on the 1-minute load alone. Its first sample (head, baseline benchmark) started at a 1-minute load of 3.68 with a 5-minute load of 13.7, between another session's test runs; that work resumed with it, the process took 252.9 s instead of about 210 s, and single decode repetitions reached 15.5 s against about 3.55 s. The campaign was stopped before its second sample, the runner gained the 5-minute admission threshold and the in-run contamination rule, and a new campaign started from round 1 with a new plan. The attempt's sample enters no statistic.",
+   "log": "aborted-attempt-1/logs/r01.p1.head.baseline.log",
+   "quotes": [
+    "== admission cooldown=120.01s load_wait=720.956s load_1m=3.68",
+    "== start 2026-10-18T23:46:30+00:00 loadavg [3.68, 13.7, 13.9]",
+    "== exit=0 wall=252.94s"
+   ]
+  },
+  "extension": "After the planned 8 rounds no window was steady: nine series drifted by more than 2.5% between half-medians. The September binary's warm metrics drifted because its first two rounds ran up to 14% slow (prefill and first-token latency) and up to 9% slow (decode); the strict loads, one observation per process, and the head's public natural loop, whose per-run medians read 1.58 and 1.65 s in rounds 2 and 4 against about 1.41 s later, had not settled to within 2.5%. As the protocol prescribes, one block of four rounds was added (rounds 9 to 12, from a re-plan whose first 32 samples are unchanged; campaign/plan-8-rounds.json keeps the original plan), and the 12-round campaign is steady from round 3. A rule that also required the two halves not to overlap was drafted during the campaign and rejected: it would have declared the 8-round campaign steady from round 3, but it accepted half-medians 4.7% apart after 8 rounds and 5.5% apart after 12, too loose for a reference judged at a 5% alert.",
+  "measured": "48 clean samples (12 rounds, 2 binaries, 2 benchmarks; 5 further attempts contaminated by other CPU work and rerun) between 00:01 and 04:23 UTC on October 19. Steady state from round 3 (maximum half-median drift 2.09%, the head's baseline-benchmark strict load). Head fa8426e reference medians over rounds 3 to 12: model-only decode of 128 forced steps 3.560, 3.547, and 3.542 s at 32, 128, and 512 source tokens (36.0 to 36.1 tokens/s); decode with greedy readback 4.572, 4.560, and 4.557 s; prefill 48.6, 61.0, and 161.4 ms; first-token latency 56.5, 68.9, and 169.6 ms; natural model-API loop 1.110 s and public-coordinator loop 1.414 s for 32 tokens; strict load 0.934 and 0.936 s. Against the September source c70057e rebuilt with the same toolchain and run in the same campaign the head takes 0.30 to 0.75 of its prefill time, 0.88 of its decode, 0.90 of its readback decode and natural loops, and 0.96 of its strict load. Against the approved September 10 values every gated median of both binaries is faster: the head by 19 to 74%, the September source by 10 to 31%. Cold first token (diagnostic): head median 0.1545 s (range 0.1196 to 0.2269 s) in the baseline benchmark and 0.1610 s (0.1183 to 0.3660 s) in the public one; September source 0.2600 s (0.1895 to 0.4032 s) and 0.2844 s (0.2482 to 0.4431 s); over all 12 rounds the ranges reach 0.2527 s and 0.5194 s. Approved September 10 values: 0.167520 s and 0.365949 s. In every cell the cold first token correlates with the Metal shader-cache growth of the same process (Spearman +0.70 to +0.87) and falls with the round number (-0.63 to -0.84). Every run passed the harness's official-reference check before timing (prompt cosine 0.999998486 for the head and 0.999998613 for the September source, all 32 cached greedy decisions), and every token and prediction hash equals the September 10 reports.",
+  "inferred": "Not measured, inferred from the correlations above: cold first token on this host is dominated by Metal pipeline compilation, whose cost shrinks as the per-user shader cache accumulates each binary's pipelines, so a single cold observation measures the cache's state as much as the crate. The September source's own cold first token is 55% above its September 10 value in the baseline benchmark (and 22% below it in the public one) while its warm and natural-loop medians are 10 to 17% below theirs, which fits a host change (macOS 15.7.9 with Metal 3 to macOS 27.0.1 with Metal 4) rather than a source regression; the shader cache was neither cleared nor controlled, so this campaign does not attribute the cold time causally. The head's gains over the September 10 values combine source changes (the head-over-September-source ratios, measured on one host) and the host change (the September source's own gains); the historical approximately 36-to-27 tokens/s slowdown is not explained by this record and remains a documented limitation.",
+  "not_run": [
+   "The long-prefill series qwen::qwen35_metal_long_prefill_benchmark, which the protocol does not cover",
+   "A supervised process-memory run; the campaign's reports carry only boundary RSS snapshots",
+   "FLAN-T5-small benchmarks, whose September 10 baselines this record does not change",
+   "CUDA and ROCm; no benchmark series exists there"
+  ],
+  "quotes": [
+   {
+    "log": "analysis/analysis.log",
+    "quotes": [
+     "== rounds 12; steady state from round 3 (rounds [3, 4, 5, 6, 7, 8, 9, 10, 11, 12]); maximum |drift| 0.0209 (limit 0.025)",
+     "== after 8 rounds: steady state from round None",
+     "source_32.decode_model_only: head 3.559923 [3.531514, 3.874706] | september 4.052869 [4.027118, 4.083846] | head/september 0.878",
+     "cold first token (diagnostic) head: steady median 0.1545 range [0.1196, 0.2269]",
+     "cold first token (diagnostic) september: steady median 0.2600 range [0.1895, 0.4032]",
+     "token and prediction hashes: identical in every run of both binaries and to September 10"
+    ]
+   },
+   {
+    "log": "aborted-attempt-1/logs/r01.p1.head.baseline.log",
+    "quotes": [
+     "== admission cooldown=120.01s load_wait=720.956s load_1m=3.68",
+     "== exit=0 wall=252.94s"
+    ]
+   }
+  ]
+ }
+}

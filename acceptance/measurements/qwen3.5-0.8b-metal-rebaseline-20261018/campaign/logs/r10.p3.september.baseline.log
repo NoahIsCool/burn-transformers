@@ -1,0 +1,74 @@
+== sample 38 round 10 position 3 september baseline
+== source c70057e82510e085bc057910a99886c1ce551567 (temporary detached worktree /Users/nover/repos/transformers-worktrees/tfm-rebaseline-september-c70057e, src tree 097e0f01 as in the September 10 series, cargo +1.92.0)
+== binary /Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-september/release/deps/qwen35_benchmarks-22bed2ca193cb209 sha256 e3f94714fa16f572d9c2fefdbb92aa4a34395300c368a9c891d55b9b63ad2eee
+== env TRANSFORMERS_QWEN35_DIR=/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17
+== env TRANSFORMERS_QWEN35_REFERENCE_DIR=/Volumes/bag of holding/models/transformers-acceptance
+== cwd /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/rebaseline/campaign
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-september/release/deps/qwen35_benchmarks-22bed2ca193cb209 --ignored --exact --nocapture --test-threads 1 qwen::qwen35_metal_baseline_benchmark
+== admission cooldown=120.01s load_wait=525.822s load_1m=2.56 load_5m=5.91
+== start 2026-10-19T03:30:05+00:00 loadavg [2.56, 5.91, 5.6]
+== top processes by CPU at start
+  PID  %CPU    RSS     ELAPSED ARGS
+20184  16.7 878384 04-02:28:51 /Users/nover/Library/Application Support/Claude/claude-code/2.1.295/9d6405864fdc/claude.app/Contents/MacOS/claude --output-format stream-json --verbose --input-format st
+  796  11.4  41440 17-08:48:09 /usr/sbin/coreaudiod
+84982   6.6 779824    03:09:01 /Users/nover/Library/Application Support/Claude/claude-code/2.1.295/9d6405864fdc/claude.app/Contents/MacOS/claude --output-format stream-json --verbose --input-format st
+59357   6.4 733952 01-02:11:28 /Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Versions/155.0.8059.80/Helpers/Codex (Renderer).app/Contents/MacOS/Codex (Renderer) --type=render
+59299   4.3  88672 01-02:11:35 /Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Versions/155.0.8059.80/Helpers/Codex (Service).app/Contents/MacOS/Codex (Service) --type=gpu-proc
+  770   2.5  47744 17-08:48:15 /System/Library/DriverExtensions/com.apple.DriverKit-AppleBCMWLAN.dext/com.apple.DriverKit-AppleBCMWLAN com.apple.bcmwlan 0x10000103b com.apple.DriverKit-AppleBCMWLAN
+ 6933   1.9 986032 03-13:09:40 /Applications/Firefox.app/Contents/MacOS/firefox
+73534   1.8 764768 01-06:46:29 /Applications/Firefox.app/Contents/MacOS/plugin-container.app/Contents/MacOS/plugin-container -isForBrowser -prefsHandle 0:53104 -prefMapHandle 1:303549 -jsInitHandle 2:
+  978   1.3  15968 17-08:47:56 /System/Library/PrivateFrameworks/CoreSpeech.framework/corespeechd
+37884   0.7 371312 03-06:27:02 /System/Library/Frameworks/Virtualization.framework/Versions/A/XPCServices/com.apple.Virtualization.VirtualMachine.xpc/Contents/MacOS/com.apple.Virtualization.VirtualMac
+  634   0.6   3376 17-08:48:16 /usr/libexec/clocksyncd
+    1   0.6  28528 17-08:50:04 /sbin/launchd
+== power Now drawing from 'AC Power'
+ -InternalBattery-0 (id=37027939)	100%; charged; 0:00 remaining present: true
+== thermal Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+== memory System-wide memory free percentage: 92%
+
+
+running 1 test
+test qwen::qwen35_metal_baseline_benchmark ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 26 filtered out; finished in 234.25s
+
+      234.26 real       275.55 user        76.94 sys
+          2647080960  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              251501  page reclaims
+                 175  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                  25  voluntary context switches
+             3255840  involuntary context switches
+       2547579774951  instructions retired
+       1224910067836  cycles elapsed
+          4371777984  peak memory footprint
+
+== end 2026-10-19T03:34:00+00:00 loadavg [4.45, 4.97, 5.23]
+== top processes by CPU at end
+  PID  %CPU    RSS     ELAPSED ARGS
+62694  93.8 115008       00:01 /Library/Frameworks/Python.framework/Versions/3.11/Resources/Python.app/Contents/MacOS/Python -I /Users/nover/.codex/experiments/temporal-full-20261013/receipts/parent-a
+  625  10.2 170752 17-08:52:12 /System/Library/CoreServices/loginwindow.app/Contents/MacOS/loginwindow console
+  796   9.0  41440 17-08:52:04 /usr/sbin/coreaudiod
+59299   4.8  84384 01-02:15:30 /Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Versions/155.0.8059.80/Helpers/Codex (Service).app/Contents/MacOS/Codex (Service) --type=gpu-proc
+  621   4.8 444304 17-08:52:12 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer -daemon
+59357   4.8 727872 01-02:15:23 /Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Versions/155.0.8059.80/Helpers/Codex (Renderer).app/Contents/MacOS/Codex (Renderer) --type=render
+84015   3.0 105744    03:23:35 /System/Applications/Utilities/Activity Monitor.app/Contents/MacOS/Activity Monitor
+  554   2.6  19008 17-08:52:12 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/FSEvents.framework/Versions/A/Support/fseventsd
+ 1134   2.1  92688 17-08:51:44 /System/Library/CoreServices/ControlCenter.app/Contents/MacOS/ControlCenter
+73534   1.1 764768 01-06:50:24 /Applications/Firefox.app/Contents/MacOS/plugin-container.app/Contents/MacOS/plugin-container -isForBrowser -prefsHandle 0:53104 -prefMapHandle 1:303549 -jsInitHandle 2:
+  770   1.0  47744 17-08:52:10 /System/Library/DriverExtensions/com.apple.DriverKit-AppleBCMWLAN.dext/com.apple.DriverKit-AppleBCMWLAN com.apple.bcmwlan 0x10000103b com.apple.DriverKit-AppleBCMWLAN
+ 2175   0.9   7344 03-08:51:33 /usr/libexec/sysmond
+== metal shader cache growth 312528 bytes {"16777235_419/functions.list": {"before": [495084, 1792379933], "after": [495084, 1792380609], "growth_bytes": 0}, "32024/libraries.data": {"before": [380764160, 1792379936], "after": [381075456, 1792380679], "growth_bytes": 311296}, "32024/libraries.list": {"before": [1586580, 1792379936], "after": [1587812, 1792380679], "growth_bytes": 1232}}
+== binary sha256 after e3f94714fa16f572d9c2fefdbb92aa4a34395300c368a9c891d55b9b63ad2eee
+== in-run load_1m maximum 5.08 over 46 observations; limit 6.0; clean
+== exit=0 wall=234.30s

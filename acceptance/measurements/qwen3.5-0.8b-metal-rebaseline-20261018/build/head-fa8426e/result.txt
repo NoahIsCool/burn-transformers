@@ -1,0 +1,8 @@
+== exit 0 seconds 104
+== artifact transformers compiled
+== artifact qwen35_benchmarks compiled
+== executable /Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-head/release/deps/qwen35_benchmarks-ffcc519af7a3b786
+== sha256 cb7bf1b53d045b53a8fadb8cc032c732fc8d40f57ddc347cc8500f1eb0723f99
+== bytes 41160224
+== commit_after fa8426e5dc8cbcb269c29e211b119ea0acd61054
+== dirty_after 0
