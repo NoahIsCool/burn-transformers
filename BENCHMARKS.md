@@ -13,7 +13,13 @@ and stress gates below. The bounded v0.1 profiles and explicit September 10
 performance-baseline decision are recorded in
 [the release record](acceptance/measurements/v0_1-release-20260910.json).
 The prior Qwen slowdown remains unexplained; adopting the controlled baseline
-does not relabel earlier failures as successful measurements.
+does not relabel earlier failures as successful measurements. On October 18
+the maintainer re-baselined the Qwen3.5-0.8B benchmarks on the current host
+and made cold first token a diagnostic: the
+[re-baseline record](acceptance/measurements/qwen3.5-0.8b-metal-rebaseline-20261018.json),
+measured under the [campaign protocol](#qwen35-08b-benchmark-campaign-protocol),
+is the reference for future Qwen comparisons. It supersedes the September 10
+baseline for that purpose only; the September records keep their bytes.
 
 ## Reproducibility record
 
@@ -59,7 +65,10 @@ boundary:
 1. **Strict load:** immediately before local artifact discovery through return
    of `LoadedModel`.
 2. **Cold first token:** first already-loaded prefill and selection, including
-   lazy backend/kernel compilation. Report it separately from strict load.
+   lazy backend/kernel compilation. Report it separately from strict load. It
+   is a diagnostic, not a gate: one observation per process whose cost follows
+   the operating system's shader cache as much as the crate's graph (see the
+   [campaign protocol](#qwen35-08b-benchmark-campaign-protocol)).
 3. **Warm first-token latency:** synchronized prefill plus first token selection
    after all shapes used by the sample have been warmed.
 4. **Warm decode:** single-token cached steps after prefill. Report model-only
@@ -122,7 +131,178 @@ An acceptance checkpoint must meet all of the following before it is advertised:
 On the fixed evaluation corpus, Q8 mean negative log-likelihood may regress by
 at most 1% and Q4 by at most 5% relative to the accepted full-precision run.
 Performance changes above 5% should alert. A greater-than-10% regression fails
-only after a controlled rerun confirms it on the same benchmark series.
+only after a controlled rerun confirms it on the same benchmark series. For
+Qwen3.5-0.8B these thresholds apply to the warm, natural-loop, and strict-load
+medians of a campaign, as the
+[campaign protocol](#qwen35-08b-benchmark-campaign-protocol) defines them; cold
+first token is reported as a median and range and never alerts or fails.
+
+## Qwen3.5-0.8B benchmark campaign protocol
+
+The maintainer adopted this protocol on 2026-10-18, together with the
+re-baseline of Qwen3.5-0.8B on the current host and the decision to report
+cold first token as a diagnostic rather than a pass/fail gate. It replaces
+the ad hoc controlled reruns of the
+[half-precision review](acceptance/measurements/half-precision-review-20261018.json)
+and of an uncommitted attribution run after it, and fixes their weaknesses:
+each binary ran the baseline benchmark and then the public one in every
+round (an order confound), round 1 ran right after the builds under high
+load, and the series never converged.
+[`scripts/qwen35_benchmark_protocol.py`](scripts/qwen35_benchmark_protocol.py)
+plans, runs, summarizes, and judges a campaign; its constants are the
+numbers below, and `scripts/tests/test_qwen35_benchmark_protocol.py` checks
+the design, the host waits, the steady-state rule, and the judging on
+synthetic campaigns.
+
+### Campaign design
+
+A campaign compares two prebuilt `qwen35_benchmarks` release executables
+with the same artifacts on one host. Both are built with the advertised
+profile's features, `std,metal,tokenizers,chat-templates`, and with the same
+toolchain. A round runs each binary's two benchmarks once, four processes in
+all, and every process runs one test (`BINARY --ignored --exact --nocapture
+--test-threads 1 TEST` under `/usr/bin/time -l`):
+
+- the baseline benchmark, `qwen::qwen35_metal_baseline_benchmark`: strict
+  load, cold first token, warm prefill and 128 forced cached decode steps at
+  32, 128, and 512 source tokens, and the natural greedy model-API loop;
+- the public benchmark, `qwen::qwen35_metal_public_causal_greedy_benchmark`:
+  strict load, cold first token, and the public `generate_causal`
+  coordinator's natural greedy loop.
+
+The binaries alternate inside every round (X Y X Y), and the eight round
+layouts form two 4 x 4 Latin squares over the four (binary, benchmark)
+cells. Within each block of four rounds every cell runs once in every
+position, so each binary opens half the rounds and runs each benchmark
+first in half of them, and no cell always follows the same one. With
+binaries A and B and benchmarks b (baseline) and p (public):
+
+| Round (mod 8) | Positions 1-4 | Round (mod 8) | Positions 1-4 |
+| ---: | --- | ---: | --- |
+| 1 | A b, B b, A p, B p | 5 | A b, B p, A p, B b |
+| 2 | B p, A p, B b, A b | 6 | B p, A b, B b, A p |
+| 3 | A p, B p, A b, B b | 7 | A p, B b, A b, B p |
+| 4 | B b, A b, B p, A p | 8 | B b, A p, B p, A b |
+
+A campaign takes whole blocks: at least 8 rounds (32 processes). When the
+gated metrics have not reached steady state after 8 rounds, add blocks of
+four rounds, up to 16; a campaign still not steady then records no
+reference. To extend a campaign, plan it again with more rounds: the plan of
+the earlier rounds is unchanged, and the runner skips every sample that
+already has a host record.
+
+### Host control before every sample
+
+- **Cooldown.** At least 120 s pass between the end of one process and the
+  start of the next, and between the start of the campaign and its first
+  process, so no sample runs right after a build. The 1-minute load average
+  decays with a 60 s time constant, so the previous benchmark contributes
+  less than `e^-2`, about 14% of its own load, when the next one starts.
+- **Load threshold.** After the cooldown the runner polls every 15 s until
+  the 1-minute load average is at most 4.0 and the 5-minute average at most
+  6.0. The first leaves on average at least six of the M3 Max's ten
+  performance cores idle for a benchmark whose decode is bound by one host
+  dispatch thread; the second keeps a short lull between another session's
+  builds from admitting a sample. If the load stays above either threshold
+  for an hour the campaign stops and is resumed later; it never starts a
+  sample above them.
+- **In-run contamination.** While the process runs, the runner reads the
+  1-minute load average every 5 s. A run during which it exceeds 6.0 (the
+  admission threshold plus two for the benchmark's own dispatch and driver
+  threads; the benchmark alone moved the load by about one in the
+  attribution run) was shared with other work: its report, log, and host
+  record are kept under `contaminated` names, and the sample runs again
+  after a new cooldown and admission, at most four attempts in all, after
+  which the campaign stops. Only the clean attempt of each planned sample
+  enters the statistics, so the balanced design is preserved.
+- **Preconditions.** AC power, both external volumes mounted, the host
+  model and OS build of the plan, and the planned executable's SHA-256,
+  before and after the process. The heavy-model lock is held for the whole
+  campaign, so no other real-checkpoint run or benchmark shares the GPU.
+- **Recorded around every process:** the cooldown, the load wait, and the
+  admitting loads; the in-run load series; the load averages and the twelve
+  busiest processes before and after; power, thermal, and memory-pressure
+  state; and the size and
+  modification time of every file in the per-user Metal shader cache
+  (`$(getconf DARWIN_USER_CACHE_DIR)com.apple.metal`). The cache's growth
+  during the process is kept with that process's cold first token.
+
+### Metrics, steady state, and statistics
+
+Gated metrics. For the warm and natural-loop metrics a run's value is the
+median of its ten measured repetitions, recomputed from the raw samples:
+
+- **warm:** prefill, first-token latency, model-only decode, and decode
+  including greedy readback, at 32, 128, and 512 source tokens (twelve, in
+  the baseline benchmark);
+- **natural loop:** the 32-token model-API loop (baseline benchmark) and the
+  32-token public coordinator loop (public benchmark);
+- **strict load:** one observation per process, in both benchmarks.
+
+Diagnostic metric. **Cold first token** is one observation per process. It
+includes lazy CubeCL kernel compilation and Metal pipeline compilation, so
+it depends on the state of the per-user shader cache, which every process
+grows and no benchmark controls. It is reported as a median and a range and
+never alerts or fails.
+
+Every run must reproduce its cell's cold, natural-loop, and warm prediction
+hashes, and every warm repetition the same predictions; a run with other
+tokens is not a timing sample.
+
+**Steady state** is the earliest window of at least six final rounds in
+which, for every binary, benchmark, and gated metric, the median of the
+window's last `n / 2` rounds is within 2.5% of the median of its first
+`n / 2` rounds (an odd window's middle round is in neither half). 2.5% is
+half the alert threshold, so drift alone cannot raise an alert. The rule
+catches trends, such as the slow first rounds of a binary new to the host,
+and, for a metric observed once per process such as strict load, a median
+not yet stable to within 2.5%; both call for more rounds, while an isolated
+outlying round moves neither half's median. Each gated statistic of a cell
+is the median over the steady-state rounds, kept with its minimum, maximum,
+and every per-round value. Cold first token is reported over the same
+rounds and over all rounds, with its Spearman rank correlation with the
+shader-cache growth and with the round number.
+
+### Gates and judging
+
+A candidate is judged against the recorded reference, which since the
+re-baseline is the `head` block of
+[the October 18 record](acceptance/measurements/qwen3.5-0.8b-metal-rebaseline-20261018.json):
+
+- **alert:** a gated median that changes by more than 5% in either
+  direction;
+- **failure candidate:** a gated median more than 10% slower;
+- **failure:** only after a controlled rerun, a campaign of this protocol
+  that alternates the candidate with the reference binary (the recorded
+  executable, identified by its SHA-256, or a rebuild of its source with the
+  same toolchain and features), confirms it: the candidate's median is more
+  than 10% slower than both the recorded reference value and the reference
+  binary's median in that campaign;
+- **series drift:** when the reference binary is itself more than 10% slower
+  than its recorded value, the host or runtime has changed, not the code
+  (the situation that led to this re-baseline); re-baselining is then a
+  maintainer decision, never automatic;
+- **not comparable:** a candidate with another host model, OS build,
+  feature set, timing protocol, checkpoint, or tokens is not judged against
+  the record;
+- **cold first token:** the candidate's median and range are reported beside
+  the reference's; they never alert or fail.
+
+```sh
+python3 scripts/qwen35_benchmark_protocol.py plan CAMPAIGN --rounds 8 \
+  --model-dir DIR --reference-dir DIR --accelerator "GPU" \
+  candidate=SOURCE=BINARY reference=SOURCE=BINARY
+# hold the heavy-model lock, then:
+python3 scripts/qwen35_benchmark_protocol.py run CAMPAIGN
+python3 scripts/qwen35_benchmark_protocol.py judge CAMPAIGN \
+  --record acceptance/measurements/qwen3.5-0.8b-metal-rebaseline-20261018.json \
+  --candidate candidate --reference-binary reference
+```
+
+Run the campaign from a directory without `cubecl.toml` or `burn.toml` on its
+ancestor path, and leave each binary's source tree untouched until the
+campaign ends: the harness checks its own source files and records the tree's
+commit and status at run time.
 
 ## Packed-weight protocol
 
