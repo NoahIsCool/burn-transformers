@@ -157,9 +157,10 @@ are collected in [MIGRATION.md](MIGRATION.md#upgrading-from-010).
   artifact limit), `MAX_EXPERTS` (2^20), and `MAX_CHECKPOINT_TENSORS`
   (10,000,000).
 - Numeric-range hazards: `checkpoint::RangeHazard`, a dtype a family declares
-  its checkpoints are measured to overflow, with the evidence (Gemma 3 declares
-  F16, `GemmaVariant::range_hazards` and
-  `GemmaCheckpointContract::range_hazards`);
+  its checkpoints are measured to overflow, with the evidence and whether the
+  family certifies a packed path for them (`RangeHazard::with_certified_packed_path`,
+  `packed_path_certified`; Gemma 3 declares F16 without one,
+  `GemmaVariant::range_hazards` and `GemmaCheckpointContract::range_hazards`);
   `MappingPlan::declare_range_hazards` and `MappingPlan::range_hazards`, which
   carry a family's declarations to the shared planner (serialization omits
   them, so the plan format is unchanged); the generic `check_range_hazards`
@@ -393,9 +394,10 @@ code written against unreleased sources.
   It used to load and return non-finite logits: the published checkpoints
   overflow F16 in Transformers too (gemma-3-4b-it's block-5 post-MLP residual
   reaches `73,509.6`, beyond `65,504`; 12B and 27B overflow at blocks 6 and 8).
-  The message names the measured overflow, the alternatives (F32, BF16 where
-  the backend can store it, packed Q4/Q8 weights with F32 activations), and
-  the opt-in: `LoadOptions::range_hazards = RangeHazardPolicy::Accept` loads the
+  The message names the measured overflow, the alternatives (F32, and BF16
+  where the backend can store it; packed Q4/Q8 weights with F32 activations
+  are named as not offered, because no Gemma packed path is certified and the
+  automatic loader refuses a Gemma packed sidecar), and the opt-in: `LoadOptions::range_hazards = RangeHazardPolicy::Accept` loads the
   faithful, overflowing graph for experiments. The refusal covers unmeasured
   Gemma 3 sizes too; Gemma 2, F32, and BF16 loads are unchanged. The Gemma
   gate's `TRANSFORMERS_GEMMA_DTYPE=f16` runs now expect the refusal

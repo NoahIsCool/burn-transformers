@@ -325,9 +325,9 @@ fn invalid_configurations_have_no_contract() {
 /// Every Gemma 3 contract carries the variant's F16 declaration, in every namespace; Gemma 2's carry none.
 ///
 /// The declaration names both `model_type` values a Gemma 3 checkpoint can
-/// carry, offers F32 and BF16 instead, and keeps measured and unmeasured
-/// sizes apart in its evidence. The contract's mapping plan carries it, so
-/// the shared planner enforces it.
+/// carry, offers F32 and BF16 instead, certifies no packed path, and keeps
+/// measured and unmeasured sizes apart in its evidence. The contract's
+/// mapping plan carries it, so the shared planner enforces it.
 #[test]
 fn contracts_carry_the_variant_range_hazards() {
     let [hazard] = GemmaVariant::Gemma3Text.range_hazards() else {
@@ -345,6 +345,7 @@ fn contracts_carry_the_variant_range_hazards() {
             crate::checkpoint::TensorDType::BF16
         ]
     );
+    assert!(!hazard.packed_path_certified());
     let evidence = hazard.evidence();
     let unmeasured = evidence.find("Unmeasured:").expect("unmeasured sizes");
     assert!(evidence.starts_with("measured on google/gemma-3-4b-it"));

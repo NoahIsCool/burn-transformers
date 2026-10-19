@@ -346,7 +346,8 @@ pub enum CheckpointError {
     /// matching [`RangeHazard`] and [`super::LoadOptions::range_hazards`] is
     /// [`super::RangeHazardPolicy::Refuse`] (the default). The message names
     /// the checkpoints, the dtype, the declared evidence, the wider dtypes the
-    /// loader can plan instead, and the [`super::RangeHazardPolicy::Accept`]
+    /// loader can plan instead, whether packed weights with F32 activations
+    /// are an alternative, and the [`super::RangeHazardPolicy::Accept`]
     /// opt-in.
     #[error("{}", super::hazard::refusal_message(.hazard, .target, *.parameters))]
     RangeHazard {

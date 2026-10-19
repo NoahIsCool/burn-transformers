@@ -437,8 +437,9 @@ plan whose parameters are F16 (cast, or stored and kept by
 `CheckpointError::RangeHazard`, before any payload is read and, through
 `AutoCausalLm::load_local`, before the graph is allocated. The message names
 Gemma 3, F16, the measured overflow and the unmeasured sizes, the alternatives
-(F32, BF16 where the backend can store it, packed Q4/Q8 weights with F32
-activations), and the opt-in: `LoadOptions::range_hazards =
+(F32, and BF16 where the backend can store it; packed Q4/Q8 weights with F32
+activations are named as not offered, since no Gemma packed path is
+certified), and the opt-in: `LoadOptions::range_hazards =
 RangeHazardPolicy::Accept`, which loads the faithful, overflowing graph for
 experiments. The refusal is family-wide (all `gemma3` and `gemma3_text`
 checkpoints, measured or not); Gemma 2 declares no hazard, because no Gemma 2

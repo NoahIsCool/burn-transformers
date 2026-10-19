@@ -164,7 +164,10 @@ impl GemmaVariant {
     /// declarations, so the shared planner
     /// ([`crate::checkpoint::build_load_plan`]) refuses a matching plan unless
     /// [`LoadOptions::range_hazards`](crate::checkpoint::LoadOptions::range_hazards)
-    /// accepts it ([`crate::checkpoint::check_range_hazards`]).
+    /// accepts it ([`crate::checkpoint::check_range_hazards`]). The
+    /// declaration certifies no packed path, because the automatic loader
+    /// does not accept a packed sidecar for Gemma, so the refusal does not
+    /// offer packed weights.
     #[must_use]
     pub const fn range_hazards(self) -> &'static [RangeHazard] {
         match self {

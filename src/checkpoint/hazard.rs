@@ -49,9 +49,10 @@
 //! [`super::LoadOptions::range_hazards`], a match is
 //! [`CheckpointError::RangeHazard`], whose message names the checkpoints, the
 //! dtype, the measured evidence, the wider dtypes the loader can plan instead
-//! ([`RangeHazard::alternatives`]), and the opt-in.
-//! [`RangeHazardPolicy::Accept`] is that opt-in: the plan is returned
-//! unchanged and the faithful graph runs.
+//! ([`RangeHazard::alternatives`]), whether packed weights with F32
+//! activations are an alternative ([`RangeHazard::packed_path_certified`]),
+//! and the opt-in. [`RangeHazardPolicy::Accept`] is that opt-in: the plan is
+//! returned unchanged and the faithful graph runs.
 //!
 //! The check contains no model names; families decide which hazards they
 //! declare. It does not cover a mapping plan that does not carry the
@@ -85,6 +86,9 @@ use super::{CheckpointError, LoadPlan, Result, TensorDType};
 /// assert!(OVERFLOW.applies_to(TensorDType::F16));
 /// assert!(!OVERFLOW.applies_to(TensorDType::BF16));
 /// assert_eq!(OVERFLOW.alternatives(), [TensorDType::F32, TensorDType::BF16]);
+/// // Packed weights with F32 activations are offered only when the family certifies its packed path.
+/// assert!(!OVERFLOW.packed_path_certified());
+/// assert!(OVERFLOW.with_certified_packed_path().packed_path_certified());
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RangeHazard {
@@ -94,6 +98,8 @@ pub struct RangeHazard {
     dtype: TensorDType,
     /// The measured overflow: where, by how much, which sizes, and the record.
     evidence: &'static str,
+    /// Whether the family certifies packed Q4/Q8 weights over an F32 plan for these checkpoints.
+    packed_path_certified: bool,
 }
 
 impl RangeHazard {
@@ -102,7 +108,10 @@ impl RangeHazard {
     /// `checkpoints` names the family and its `model_type` values (for
     /// example `"Gemma 3 (model_type gemma3 or gemma3_text)"`). `evidence`
     /// should separate measured checkpoints from unmeasured ones, because a
-    /// family-wide declaration also refuses sizes nobody measured.
+    /// family-wide declaration also refuses sizes nobody measured. The
+    /// declaration starts without a certified packed path, so the refusal
+    /// does not offer packed weights; see
+    /// [`Self::with_certified_packed_path`].
     #[must_use]
     pub const fn new(
         checkpoints: &'static str,
@@ -113,7 +122,21 @@ impl RangeHazard {
             checkpoints,
             dtype,
             evidence,
+            packed_path_certified: false,
         }
+    }
+
+    /// Declares that the family's packed Q4/Q8 path with F32 activations is certified for these checkpoints.
+    ///
+    /// A family sets this only when its packed path is certified, which is
+    /// also when the automatic loader accepts a quantized Burnpack sidecar
+    /// for its `model_type`. The refusal then offers packed weights over an
+    /// F32 plan as an alternative whenever it offers F32; without it, the
+    /// refusal says that packed weights are not offered and why.
+    #[must_use]
+    pub const fn with_certified_packed_path(mut self) -> Self {
+        self.packed_path_certified = true;
+        self
     }
 
     /// Returns the checkpoint family the declaration covers.
@@ -132,6 +155,12 @@ impl RangeHazard {
     #[must_use]
     pub const fn evidence(self) -> &'static str {
         self.evidence
+    }
+
+    /// Returns whether the family certifies packed Q4/Q8 weights over an F32 plan for these checkpoints.
+    #[must_use]
+    pub const fn packed_path_certified(self) -> bool {
+        self.packed_path_certified
     }
 
     /// Returns whether a parameter planned in `dtype` executes in the hazard's dtype.
@@ -273,16 +302,20 @@ pub(super) fn refusal_message(hazard: &RangeHazard, target: &str, parameters: us
     )
 }
 
-/// Describes the alternatives of `hazard` as one sentence.
+/// Describes the alternatives of `hazard` in one or two sentences.
 ///
 /// Each wider dtype is named with the [`super::DTypePolicy`] that selects
 /// it. BF16 carries the backend caveat of the pinned Burn 0.21, whose Metal
-/// backend cannot store it. Whenever F32 is offered, packed Q4/Q8 weights
-/// with F32 activations are offered too: they keep the activations in F32,
-/// where a family's packed path is certified.
+/// backend cannot store it. Packed Q4/Q8 weights keep the activations in
+/// F32, so they matter only when F32 is offered: then they are offered when
+/// the family certifies its packed path
+/// ([`RangeHazard::packed_path_certified`]), and otherwise a second sentence
+/// says that they are not offered and that the automatic loader refuses a
+/// quantized Burnpack sidecar for these checkpoints, so a caller does not
+/// meet that refusal as a surprise.
 fn alternatives_text(hazard: &RangeHazard) -> String {
     let alternatives = hazard.alternatives();
-    let mut options: Vec<String> = alternatives
+    let dtypes: Vec<String> = alternatives
         .iter()
         .map(|dtype| {
             let policy = format!("`DTypePolicy::Cast(TensorDType::{dtype})`");
@@ -295,23 +328,30 @@ fn alternatives_text(hazard: &RangeHazard) -> String {
             }
         })
         .collect();
-    if alternatives.contains(&TensorDType::F32) {
-        options.push(
-            "packed Q4/Q8 weights with F32 activations (a quantized Burnpack sidecar over an \
-             F32 plan, where the family's packed path is certified)"
-                .to_owned(),
-        );
-    }
-    match options.as_slice() {
-        [] => format!(
-            "No dtype the loader can cast to is wider than {}.",
-            hazard.dtype()
-        ),
-        [only] => format!("Load the checkpoint in {only} instead."),
-        [first @ .., last] => format!(
-            "Load the checkpoint in {} instead, or with {last}.",
-            first.join(", ")
-        ),
+    let dtypes = match dtypes.as_slice() {
+        [] => {
+            return format!(
+                "No dtype the loader can cast to is wider than {}.",
+                hazard.dtype()
+            );
+        }
+        [only] => only.clone(),
+        [first @ .., last] => format!("{} or {last}", first.join(", ")),
+    };
+    if !alternatives.contains(&TensorDType::F32) {
+        format!("Load the checkpoint in {dtypes} instead.")
+    } else if hazard.packed_path_certified() {
+        format!(
+            "Load the checkpoint in {dtypes} instead, or with packed Q4/Q8 weights with F32 \
+             activations (a quantized Burnpack sidecar over an F32 plan, whose packed path the \
+             family certifies)."
+        )
+    } else {
+        format!(
+            "Load the checkpoint in {dtypes} instead. Packed Q4/Q8 weights with F32 activations \
+             are not offered: the family has not certified a packed path for these checkpoints, \
+             and the automatic loader refuses a quantized Burnpack sidecar for them."
+        )
     }
 }
 

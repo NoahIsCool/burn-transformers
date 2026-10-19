@@ -706,8 +706,13 @@ fn gemma2_declares_no_hazard_and_loads_in_f16() {
 }
 
 /// The refusal names Gemma 3, F16, the measured overflow and the unmeasured sizes, the alternatives, and the opt-in.
+///
+/// Gemma certifies no packed path, so the refusal says that packed weights
+/// with F32 activations are not offered and that the automatic loader
+/// refuses a packed sidecar, instead of suggesting them.
 #[test]
 fn the_gemma3_refusal_names_the_overflow_the_alternatives_and_the_opt_in() {
+    assert!(!GemmaVariant::Gemma3Text.range_hazards()[0].packed_path_certified());
     let root = fixture("gemma3-text");
     let message = graph(&root)
         .load_checkpoint(
@@ -735,7 +740,10 @@ fn the_gemma3_refusal_names_the_overflow_the_alternatives_and_the_opt_in() {
         "F32 (`DTypePolicy::Cast(TensorDType::F32)`)",
         "BF16 (`DTypePolicy::Cast(TensorDType::BF16)`) on a backend that can store it \
          (Burn 0.21's Metal backend cannot)",
-        "packed Q4/Q8 weights with F32 activations",
+        // The packed path is not an alternative for Gemma.
+        "Packed Q4/Q8 weights with F32 activations are not offered: the family has not \
+         certified a packed path for these checkpoints, and the automatic loader refuses a \
+         quantized Burnpack sidecar for them.",
         // The opt-in and its consequence.
         "set `LoadOptions::range_hazards` to `RangeHazardPolicy::Accept`",
         "its logits are expected to be non-finite",
@@ -743,6 +751,51 @@ fn the_gemma3_refusal_names_the_overflow_the_alternatives_and_the_opt_in() {
         assert!(
             message.contains(fragment),
             "missing {fragment:?} in {message}"
+        );
+    }
+    assert!(
+        !message.contains("or with packed Q4/Q8 weights"),
+        "{message}"
+    );
+}
+
+/// The refusal's packed-path statement holds: the automatic loader refuses a packed sidecar for `gemma3` and `gemma3_text`.
+///
+/// The check precedes planning, so a caller following the refusal to a
+/// quantized Burnpack sidecar over an F32 plan meets a
+/// [`crate::Error::BackendCapability`] naming the certified families, which
+/// the refusal already announced. A `gemma3` wrapper is checked as the
+/// `gemma3_text` model its `text_config` names.
+#[test]
+fn the_automatic_loader_refuses_a_gemma3_packed_sidecar_as_the_refusal_says() {
+    let text_only = fixture("gemma3-text");
+    let wrapped = multimodal(
+        "gemma3-text",
+        "model.language_model",
+        &["model.vision_tower.vision_model.post_layernorm.weight"],
+    );
+    wrap_as_gemma3(wrapped.path());
+    for (root, context) in [
+        (text_only.as_path(), "gemma3_text"),
+        (wrapped.path(), "gemma3"),
+    ] {
+        let options = crate::AutoLoadOptions {
+            checkpoint: hazard_options(
+                DTypePolicy::Cast(TensorDType::F32),
+                RangeHazardPolicy::Refuse,
+            ),
+            quantized_burnpack: Some(root.join("weights.bpk")),
+            load_tokenizer: false,
+            ..crate::AutoLoadOptions::default()
+        };
+        let Err(crate::Error::BackendCapability(message)) =
+            crate::AutoCausalLm::<B>::load_local(root, &options, &Default::default())
+        else {
+            panic!("{context}: a packed sidecar must be refused");
+        };
+        assert!(
+            message.contains("packed Burnpack loading for `gemma3_text` is not yet certified"),
+            "{context}: {message}"
         );
     }
 }

@@ -114,12 +114,29 @@ fn manifest_with(
     discover_checkpoint(root, &LoadOptions::default()).unwrap()
 }
 
-/// The declaration keeps its three fields, is usable in constants, and matches exactly its dtype.
+/// The declaration keeps its fields, is usable in constants, and matches exactly its dtype.
 #[test]
 fn a_declaration_exposes_its_fields_and_matches_only_its_dtype() {
     assert_eq!(F16_OVERFLOW.checkpoints(), "Example (model_type example)");
     assert_eq!(F16_OVERFLOW.dtype(), TensorDType::F16);
     assert!(F16_OVERFLOW.evidence().starts_with("measured: block 3"));
+    // A new declaration certifies no packed path; the builder sets only that flag.
+    assert!(!F16_OVERFLOW.packed_path_certified());
+    const CERTIFIED: RangeHazard = F16_OVERFLOW.with_certified_packed_path();
+    assert!(CERTIFIED.packed_path_certified());
+    assert_ne!(CERTIFIED, F16_OVERFLOW);
+    assert_eq!(
+        (
+            CERTIFIED.checkpoints(),
+            CERTIFIED.dtype(),
+            CERTIFIED.evidence()
+        ),
+        (
+            F16_OVERFLOW.checkpoints(),
+            F16_OVERFLOW.dtype(),
+            F16_OVERFLOW.evidence()
+        )
+    );
     for dtype in ALL {
         assert_eq!(
             F16_OVERFLOW.applies_to(dtype),
@@ -303,13 +320,14 @@ fn the_refusal_message_names_everything_a_caller_needs() {
          planned parameters in F16 (first `t0`) is refused: activations take their parameters' \
          dtype, and values beyond F16's largest finite magnitude become infinite and then NaN. \
          Evidence: measured: block 3's residual reaches 9.1e4 in the reference's F16 graph. \
-         Load the checkpoint in F32 (`DTypePolicy::Cast(TensorDType::F32)`), BF16 \
+         Load the checkpoint in F32 (`DTypePolicy::Cast(TensorDType::F32)`) or BF16 \
          (`DTypePolicy::Cast(TensorDType::BF16)`) on a backend that can store it (Burn 0.21's \
-         Metal backend cannot) instead, or with packed Q4/Q8 weights with F32 activations (a \
-         quantized Burnpack sidecar over an F32 plan, where the family's packed path is \
-         certified). To evaluate the faithful F16 graph anyway, for example to study the \
-         overflow, set `LoadOptions::range_hazards` to `RangeHazardPolicy::Accept`; its logits \
-         are expected to be non-finite."
+         Metal backend cannot) instead. Packed Q4/Q8 weights with F32 activations are not \
+         offered: the family has not certified a packed path for these checkpoints, and the \
+         automatic loader refuses a quantized Burnpack sidecar for them. To evaluate the \
+         faithful F16 graph anyway, for example to study the overflow, set \
+         `LoadOptions::range_hazards` to `RangeHazardPolicy::Accept`; its logits are expected \
+         to be non-finite."
     );
     let single = refusal_message(&F16_OVERFLOW, "only", 1);
     assert!(
@@ -318,28 +336,50 @@ fn the_refusal_message_names_everything_a_caller_needs() {
     );
 }
 
-/// The alternatives sentence covers one, several, and no wider dtypes.
+/// The alternatives sentence covers one, several, and no wider dtypes, with and without a certified packed path.
+///
+/// Packed weights keep F32 activations, so they are mentioned exactly when
+/// F32 is offered: as an alternative when the family certifies its packed
+/// path, and otherwise as not offered, naming the automatic loader's refusal.
 #[test]
 fn the_alternatives_sentence_covers_every_count() {
     let text = |dtype| alternatives_text(&RangeHazard::new("c", dtype, "e"));
-    assert_eq!(
-        text(TensorDType::F32),
-        "Load the checkpoint in F64 (`DTypePolicy::Cast(TensorDType::F64)`) instead."
-    );
+    let certified =
+        |dtype| alternatives_text(&RangeHazard::new("c", dtype, "e").with_certified_packed_path());
+    let not_offered = "Packed Q4/Q8 weights with F32 activations are not offered: the family has \
+                       not certified a packed path for these checkpoints, and the automatic \
+                       loader refuses a quantized Burnpack sidecar for them.";
+    let offered = "or with packed Q4/Q8 weights with F32 activations (a quantized Burnpack \
+                   sidecar over an F32 plan, whose packed path the family certifies).";
+    let f64_only = "Load the checkpoint in F64 (`DTypePolicy::Cast(TensorDType::F64)`) instead.";
+    assert_eq!(text(TensorDType::F32), f64_only);
+    assert_eq!(certified(TensorDType::F32), f64_only);
     assert_eq!(
         text(TensorDType::BF16),
-        "Load the checkpoint in F32 (`DTypePolicy::Cast(TensorDType::F32)`) instead, or with \
-         packed Q4/Q8 weights with F32 activations (a quantized Burnpack sidecar over an F32 \
-         plan, where the family's packed path is certified)."
+        format!(
+            "Load the checkpoint in F32 (`DTypePolicy::Cast(TensorDType::F32)`) instead. \
+             {not_offered}"
+        )
     );
     assert_eq!(
-        text(TensorDType::F64),
-        "No dtype the loader can cast to is wider than F64."
+        certified(TensorDType::BF16),
+        format!(
+            "Load the checkpoint in F32 (`DTypePolicy::Cast(TensorDType::F32)`) instead, {offered}"
+        )
     );
-    assert!(
-        text(TensorDType::F16)
-            .contains("BF16 (`DTypePolicy::Cast(TensorDType::BF16)`) on a backend")
-    );
+    let none = "No dtype the loader can cast to is wider than F64.";
+    assert_eq!(text(TensorDType::F64), none);
+    assert_eq!(certified(TensorDType::F64), none);
+    let both = "Load the checkpoint in F32 (`DTypePolicy::Cast(TensorDType::F32)`) or BF16 \
+                (`DTypePolicy::Cast(TensorDType::BF16)`) on a backend that can store it (Burn \
+                0.21's Metal backend cannot) instead";
+    assert_eq!(text(TensorDType::F16), format!("{both}. {not_offered}"));
+    assert_eq!(certified(TensorDType::F16), format!("{both}, {offered}"));
+    for dtype in ALL.into_iter().filter(|dtype| !dtype.is_castable_float()) {
+        let none = format!("No dtype the loader can cast to is wider than {dtype}.");
+        assert_eq!(text(dtype), none);
+        assert_eq!(certified(dtype), none);
+    }
 }
 
 /// Real plans: `Cast(F16)` and F16 storage under `Auto` are refused; F32, BF16, and accepting pass.
