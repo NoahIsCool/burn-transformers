@@ -158,6 +158,42 @@ approximately 25% throughput slowdown is accepted as an unresolved limitation;
 the user approved the controlled September 10 baseline for future comparisons,
 not a claim that the historical regression was explained or repaired.
 
+### Performance gate of the Qwen3.5-0.8B profile
+
+On October 18 the maintainer re-baselined the Qwen3.5-0.8B benchmarks on the
+validated host as it is now (Mac15,11, macOS 27.0.1 build 26A434) and made
+cold first token a diagnostic rather than a pass/fail gate. The profile's
+performance reference is the `reference` block (label `head`) of the
+[re-baseline record](acceptance/measurements/qwen3.5-0.8b-metal-rebaseline-20261018.json),
+measured at `fa8426e` with rustc 1.92.0 and the profile's features under the
+[campaign protocol](BENCHMARKS.md#qwen35-08b-benchmark-campaign-protocol).
+A later source is judged by a campaign of that protocol:
+
+- gated, at the existing thresholds: the warm prefill, first-token, model-only
+  decode, and readback-inclusive decode medians at 32, 128, and 512 source
+  tokens; the 32-token natural model-API and public-coordinator loops; and
+  strict load. A median that changes by more than 5% alerts; one more than 10%
+  slower fails only when a controlled rerun, alternating the candidate with
+  the reference binary, confirms it against both the recorded value and the
+  reference binary's own median. The reference binary is the executable the
+  reference block identifies by its SHA-256, or a build of `fa8426e` from a
+  clean tree with the same rustc, rustup toolchain, features, and profile,
+  and it must reproduce the reference's tokens; the protocol refuses any
+  other binary in that role;
+- reported, never gated: cold first token, as a median and range. It is one
+  observation per process and includes lazy kernel and Metal pipeline
+  compilation, whose cost also depends on the operating system's shader
+  cache;
+- not comparable: a run on another host model or OS build, built with another
+  compiler (rustc or rustup toolchain), with other features, or with other
+  tokens. When the reference binary is itself more
+  than 10% slower than its recorded value, the series has changed, and a new
+  reference is again a maintainer decision.
+
+The re-baseline changes no support claim. It supersedes the September 10
+baseline for future comparisons only; the release record, the September
+summaries, and the historical slowdown stay as recorded.
+
 ## Artifact and provenance boundary
 
 The runtime reads local files only. It does not download models, resolve moving

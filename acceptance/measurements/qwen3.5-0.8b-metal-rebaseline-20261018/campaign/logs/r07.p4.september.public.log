@@ -1,0 +1,74 @@
+== sample 27 round 7 position 4 september public
+== source c70057e82510e085bc057910a99886c1ce551567 (temporary detached worktree /Users/nover/repos/transformers-worktrees/tfm-rebaseline-september-c70057e, src tree 097e0f01 as in the September 10 series, cargo +1.92.0)
+== binary /Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-september/release/deps/qwen35_benchmarks-22bed2ca193cb209 sha256 e3f94714fa16f572d9c2fefdbb92aa4a34395300c368a9c891d55b9b63ad2eee
+== env TRANSFORMERS_QWEN35_DIR=/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17
+== env TRANSFORMERS_QWEN35_REFERENCE_DIR=/Volumes/bag of holding/models/transformers-acceptance
+== cwd /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/rebaseline/campaign
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-september/release/deps/qwen35_benchmarks-22bed2ca193cb209 --ignored --exact --nocapture --test-threads 1 qwen::qwen35_metal_public_causal_greedy_benchmark
+== admission cooldown=120.01s load_wait=0.021s load_1m=1.97 load_5m=2.33
+== start 2026-10-19T02:33:28+00:00 loadavg [1.97, 2.33, 2.49]
+== top processes by CPU at start
+  PID  %CPU    RSS     ELAPSED ARGS
+  796  10.6  41440 17-07:51:32 /usr/sbin/coreaudiod
+84982   7.6 751696    02:12:24 /Users/nover/Library/Application Support/Claude/claude-code/2.1.295/9d6405864fdc/claude.app/Contents/MacOS/claude --output-format stream-json --verbose --input-format st
+59357   5.5 723968 01-01:14:51 /Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Versions/155.0.8059.80/Helpers/Codex (Renderer).app/Contents/MacOS/Codex (Renderer) --type=render
+59299   3.5  84304 01-01:14:58 /Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Versions/155.0.8059.80/Helpers/Codex (Service).app/Contents/MacOS/Codex (Service) --type=gpu-proc
+20184   1.6 877424 04-01:32:14 /Users/nover/Library/Application Support/Claude/claude-code/2.1.295/9d6405864fdc/claude.app/Contents/MacOS/claude --output-format stream-json --verbose --input-format st
+76983   1.5  56176    02:38:54 /Library/Frameworks/Python.framework/Versions/3.11/Resources/Python.app/Contents/MacOS/Python -I /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f
+ 6933   1.5 986800 03-12:13:03 /Applications/Firefox.app/Contents/MacOS/firefox
+73534   1.4 762320 01-05:49:52 /Applications/Firefox.app/Contents/MacOS/plugin-container.app/Contents/MacOS/plugin-container -isForBrowser -prefsHandle 0:53104 -prefMapHandle 1:303549 -jsInitHandle 2:
+66947   1.4 295072 03-06:22:17 /Users/nover/Library/Application Support/Claude/claude-code/2.1.295/9d6405864fdc/claude.app/Contents/MacOS/claude --output-format stream-json --verbose --input-format st
+  978   1.0  15984 17-07:51:19 /System/Library/PrivateFrameworks/CoreSpeech.framework/corespeechd
+84015   0.9 105424    02:23:03 /System/Applications/Utilities/Activity Monitor.app/Contents/MacOS/Activity Monitor
+59276   0.6 387088 01-01:15:00 /Applications/ChatGPT.app/Contents/MacOS/ChatGPT
+== power Now drawing from 'AC Power'
+ -InternalBattery-0 (id=37027939)	100%; charged; 0:00 remaining present: true
+== thermal Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+== memory System-wide memory free percentage: 92%
+
+
+running 1 test
+test qwen::qwen35_metal_public_causal_greedy_benchmark ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 26 filtered out; finished in 30.89s
+
+       30.90 real        29.02 user         7.03 sys
+          2491383808  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              219599  page reclaims
+                  46  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                  10  voluntary context switches
+              311323  involuntary context switches
+        315412184824  instructions retired
+        126758751323  cycles elapsed
+          4309616824  peak memory footprint
+
+== end 2026-10-19T02:33:59+00:00 loadavg [2.03, 2.31, 2.47]
+== top processes by CPU at end
+  PID  %CPU    RSS     ELAPSED ARGS
+  796   9.5  41440 17-07:52:03 /usr/sbin/coreaudiod
+59357   4.8 734304 01-01:15:22 /Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Versions/155.0.8059.80/Helpers/Codex (Renderer).app/Contents/MacOS/Codex (Renderer) --type=render
+59299   2.2  88544 01-01:15:29 /Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Versions/155.0.8059.80/Helpers/Codex (Service).app/Contents/MacOS/Codex (Service) --type=gpu-proc
+ 2175   1.5   7344 03-07:51:32 /usr/libexec/sysmond
+  591   1.1  15008 17-07:52:11 /usr/libexec/opendirectoryd
+59276   1.0 386160 01-01:15:31 /Applications/ChatGPT.app/Contents/MacOS/ChatGPT
+73534   0.9 762304 01-05:50:23 /Applications/Firefox.app/Contents/MacOS/plugin-container.app/Contents/MacOS/plugin-container -isForBrowser -prefsHandle 0:53104 -prefMapHandle 1:303549 -jsInitHandle 2:
+ 6933   0.7 986784 03-12:13:34 /Applications/Firefox.app/Contents/MacOS/firefox
+  615   0.6   6112 17-07:52:11 /usr/sbin/notifyd
+  978   0.5  15984 17-07:51:50 /System/Library/PrivateFrameworks/CoreSpeech.framework/corespeechd
+  770   0.5  47744 17-07:52:09 /System/Library/DriverExtensions/com.apple.DriverKit-AppleBCMWLAN.dext/com.apple.DriverKit-AppleBCMWLAN com.apple.bcmwlan 0x10000103b com.apple.DriverKit-AppleBCMWLAN
+49125   0.5 303760 04-13:47:24 /Users/nover/Library/Application Support/Claude/claude-code/2.1.295/9d6405864fdc/claude.app/Contents/MacOS/claude --output-format stream-json --verbose --input-format st
+== metal shader cache growth 197504 bytes {"16777235_419/functions.list": {"before": [495084, 1792376884], "after": [495084, 1792377212], "growth_bytes": 0}, "32024/libraries.data": {"before": [378519552, 1792376947], "after": [378716160, 1792377215], "growth_bytes": 196608}, "32024/libraries.list": {"before": [1577620, 1792376947], "after": [1578516, 1792377215], "growth_bytes": 896}}
+== binary sha256 after e3f94714fa16f572d9c2fefdbb92aa4a34395300c368a9c891d55b9b63ad2eee
+== in-run load_1m maximum 2.14 over 6 observations; limit 6.0; clean
+== exit=0 wall=30.93s

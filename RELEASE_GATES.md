@@ -1015,6 +1015,143 @@ worktree, under the heavy-model lock except for the bundle-only tests.
   recomputes every status, quote, benchmark figure, and identity from the
   committed evidence.
 
+### Qwen3.5-0.8B benchmark re-baseline (October 18)
+
+On October 18 the maintainer decided to "re-baseline the Qwen3.5-0.8B
+benchmarks on the current host (macOS 27.0.1, same Mac15,11), and report cold
+first token as a diagnostic rather than a pass/fail gate." This answers the
+benchmark item the review round above left to the maintainer. The
+[re-baseline record](acceptance/measurements/qwen3.5-0.8b-metal-rebaseline-20261018.json)
+carries the decision, and `scripts/tests/test_qwen35_rebaseline_record.py`
+recomputes every sample, statistic, and identity in it from the committed
+reports.
+
+- Protocol: the [campaign protocol](BENCHMARKS.md#qwen35-08b-benchmark-campaign-protocol)
+  replaces the review's confounded reruns. The two binaries alternate inside
+  every round, and two 4 x 4 Latin squares counterbalance the binary and
+  benchmark order. Every sample waits out a 120 s cooldown and is admitted at
+  1- and 5-minute loads of at most 4.0 and 6.0; a sample whose in-run load
+  exceeds 6.0 is rerun. Load and Metal shader-cache growth are recorded
+  around every process. A campaign takes at least 8 rounds and must reach a
+  steady state: since the review amendment below, a window of whole blocks
+  in which no block's gated medians differ from the later rounds' by more
+  than 2.5% and three standard errors of their noise.
+  `scripts/qwen35_benchmark_protocol.py` implements it, with
+  synthetic-campaign tests.
+- Binaries: the head `fa8426e`, built from its worktree, and the September
+  source `c70057e` (the September 10 series' `src` tree), rebuilt in a
+  temporary detached worktree that was then removed. Both were built with
+  rustc 1.92.0, `std,metal,tokenizers,chat-templates`, and the release
+  profile, and ran under the heavy-model lock on the Mac15,11 with macOS
+  27.0.1 (26A434) on AC power. The September 10 series ran on macOS 15.7.9
+  (Metal 3), a different series.
+- Execution: a first attempt, which admitted samples on the 1-minute load
+  alone, ran one contaminated sample and was stopped; it is kept and unused.
+  The campaign then ran 48 clean processes in 12 rounds. Five attempts
+  contaminated by other CPU work (in-run loads 6.1 to 24.1) were rerun. The
+  planned 8 rounds were not steady, so one block was added. Under the
+  corrected rule rounds 5 to 12 are steady, two whole blocks in which every
+  cell ran twice in every position; the record's first version, under the
+  original rule, reported rounds 3 to 12.
+- Reference (head, medians over rounds 5 to 12): model-only decode of 128
+  steps `3.557`, `3.545`, and `3.537` s at 32, 128, and 512 source tokens;
+  prefill `48.6`, `61.0`, and `161.3` ms; natural loops `1.110` s (model API)
+  and `1.413` s (public coordinator); strict load `0.940` and `0.934` s. On the
+  same host the head takes 0.30 to 0.96 of the September source's time on
+  every gated metric. Every gated median of both binaries is below its
+  September 10 value, and every token hash is unchanged. These medians, not
+  the September 10 summaries, are what later sources are judged against, at
+  the unchanged 5% alert and confirmed 10% failure thresholds.
+- Cold first token (diagnostic, not gated): head median `0.131` s (range
+  `0.120` to `0.227` s) in the baseline benchmark and `0.159` s (`0.118` to
+  `0.241` s) in the public one; September source `0.243` s and `0.282` s.
+  In every cell it correlates with the shader-cache growth of the same
+  process (Spearman +0.70 to +0.87) and falls over the rounds. The five
+  contaminated attempts ran the same binary and benchmark as their reruns
+  and grew the shader cache by 82,368 to 724,816 bytes just before them, so
+  those reruns started warmer. The head's baseline cell has two such reruns
+  in rounds 5 to 12; without them its median is `0.155` s. The record
+  keeps the measured correlations, with and without those rounds, apart
+  from the inferred explanation (Metal pipeline compilation against a
+  growing shader cache).
+- Unchanged: the v0.1 release record, the September 10 summaries, and the
+  earlier rounds' records keep their bytes (`tests/acceptance_records.rs`
+  pins the release record's digest), the support claims, and the documented
+  historical slowdown. Not run: the long-prefill series, a supervised memory
+  run, the FLAN-T5-small benchmarks, and CUDA/ROCm.
+- Source validation at `0d3bba6` (no library source, Cargo manifest, or
+  lockfile changed in this round) passes: formatting; warning-denied Clippy
+  of all targets on nightly and on 1.99.1 with all features and with
+  `std,flex,cpu,cuda,rocm,tokenizers,chat-templates,autodiff,train`, and on
+  1.99.1 for `qwen35_benchmarks` and `acceptance_records` with the Metal
+  profile's features (the only build that compiles the edited Metal module);
+  `cargo test --locked` with default features (3,734 passed, 83 ignored) and
+  with `std,flex,tokenizers,chat-templates,autodiff,train` (4,037 passed, 113
+  ignored); the Rust 1.92.0 check of all targets with the latter features;
+  warning-denied private rustdoc; the documentation audit (0 gaps in 23,657
+  authored items); and the 632 Python tests (14 opt-in native fixtures
+  skipped). Not run: `check_release.py --gate source`, coverage, and the
+  Metal checkpoint gates, which no change here reaches.
+
+### Re-baseline review amendment (October 19)
+
+The PR #1 review of the re-baseline found five faults, each verified against
+the committed campaign before any change. The record was rebuilt from the
+unchanged evidence, and its `review_amendment` block says what changed.
+No benchmark ran again and no support claim changed.
+
+- Steady state: the original rule (the earliest window of at least six
+  final rounds whose half-medians agree within 2.5%) was ill-conditioned.
+  Only the window from round 3 passed; those from rounds 1, 2, and 4 to 7
+  each failed on a single strict load, and that window was not whole
+  Latin-square blocks (per-position counts 2/3/3/2 or 3/2/2/3). The
+  [corrected rule](BENCHMARKS.md#metrics-steady-state-and-statistics) scans
+  whole blocks back from the end and requires a drift to exceed both 2.5% and
+  three standard errors of the later rounds' robust noise. The campaign is
+  steady from round 5, and the 8-round campaign is still not steady. The
+  head's reference medians move by at most 0.65%. Synthetic tests cover a
+  later block that drifts after an earlier window passed, noise against
+  shift, outliers and trends among the later rounds, and seeded random
+  campaigns.
+- Reference binary: the reference and control blocks now record their
+  executable's SHA-256, source commit, tree status, rustc, rustup toolchain,
+  features, and profile, and `tests/acceptance_records.rs` requires them.
+  A controlled rerun must run that executable or a clean build of that
+  commit with the same compiler, features, and profile that reproduces the
+  reference tokens; any other label is refused, with tests for each
+  mismatch.
+- Compiler: rustc and the rustup toolchain are part of the series identity,
+  so a campaign that mixes compilers is refused and a candidate built with
+  another compiler is not comparable.
+- Cold first token: contaminated attempts warmed the shader cache before
+  their reruns. Each cell now names those reruns and their attempts' growth
+  and repeats its statistics and correlations without them.
+- Evidence: every measurement file of the record's first version keeps its
+  bytes (the record test pins their combined digest). `analysis/analysis.log`
+  is kept as the original rule's analysis, and `analysis/analysis-20261019.log`
+  is the corrected one.
+- Process: the earlier commit `4fd7942` was staged with `git commit -a`,
+  which AGENTS.md forbids. It contains only this file's validation note, so
+  nothing unrelated was swept in. The commit is kept as it is, because
+  rewriting it would change no content, and this round stages explicit
+  paths.
+- Source validation of the tree committed as `33c33ff` passes. This round
+  changed the protocol script, its Python tests, the record and its
+  harness, `tests/acceptance_records.rs`, and documentation; no library
+  source, Cargo manifest, or lockfile changed. The checks were:
+  formatting; warning-denied Clippy of all targets on the default nightly
+  (1.94.0-nightly 2025-12-22) and on 1.99.1, with all features and with
+  `std,flex,cpu,cuda,rocm,tokenizers,chat-templates,autodiff,train`;
+  `cargo test --locked` with default features (3,734 passed, 83 ignored) and
+  with `std,flex,tokenizers,chat-templates,autodiff,train` (4,037 passed, 113
+  ignored); the Rust 1.92.0 check of all targets with the latter features;
+  warning-denied private rustdoc; the documentation audit (0 gaps in 23,659
+  authored items); and the 645 Python tests (14 opt-in native fixtures
+  skipped). Not run: `check_release.py --gate source`; coverage; the
+  Metal-feature Clippy of `qwen35_benchmarks`, which this round does not
+  touch; and every benchmark and Metal checkpoint gate, since no
+  measurement was repeated.
+
 Record each replay as a new measurement with its exact source identity; do not
 overwrite the historical records below.
 
@@ -1026,7 +1163,11 @@ Metal/F32 profiles. On September 10 the user explicitly approved the controlled
 Qwen measurements as the v0.1 baseline, while retaining the unexplained
 historical slowdown. This changes the baseline policy, not the measured results
 or the future 5% alert / confirmed 10% failure thresholds. No new benchmark is
-claimed by that approval. Larger families, quantized quality and real-weight
+claimed by that approval. On October 18 the maintainer re-baselined
+Qwen3.5-0.8B on the current host and made cold first token a diagnostic; the
+[re-baseline record](acceptance/measurements/qwen3.5-0.8b-metal-rebaseline-20261018.json)
+is now the reference for future Qwen comparisons, and the release record is
+unchanged. Larger families, quantized quality and real-weight
 MTP remain experimental.
 
 The [`b4d6410` source-gate record](acceptance/measurements/v0_1-source-gates-20260910.json)

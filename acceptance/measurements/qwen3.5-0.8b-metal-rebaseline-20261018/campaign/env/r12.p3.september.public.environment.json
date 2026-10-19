@@ -1,0 +1,12 @@
+{
+ "machine_model": "Mac15,11",
+ "cpu": "Apple M3 Max (10 performance + 4 efficiency cores)",
+ "accelerator": "Apple M3 Max GPU (30 cores, Metal 4)",
+ "physical_memory_bytes": 103079215104,
+ "operating_system": "macOS 27.0.1 (26A434)",
+ "driver_runtime": "OS-provided Metal (macOS 27.0.1 26A434)",
+ "power_mode": "Now drawing from 'AC Power'  -InternalBattery-0 (id=37027939)\t100%; charged; 0:00 remaining present: true; powermode            0",
+ "accelerator_exclusive": true,
+ "other_workloads": "shared host: other sessions' processes may run; the heavy-model lock is held for the whole campaign; load averages at admission [2.14, 2.5, 2.73] (thresholds 4.0 for 1 minute, 6.0 for 5 minutes; a run whose 1-minute load exceeds 6.0 is discarded and repeated)",
+ "command": "/usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-september/release/deps/qwen35_benchmarks-22bed2ca193cb209 --ignored --exact --nocapture --test-threads 1 qwen::qwen35_metal_public_causal_greedy_benchmark"
+}

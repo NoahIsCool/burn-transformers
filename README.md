@@ -286,9 +286,14 @@ change, Qwen3.5-0.8B's parity and memory gates passed again at `f9f78b5` in the
 [official-envelope round](RELEASE_GATES.md#official-envelope-round-october-18),
 and its benchmarks kept their tokens and every warm median. Their single-sample
 cold first token breaches the approved September 10 baseline, and so does the
-pre-change binary's: not attributable to this branch; the breach of the
-approved baseline awaits the maintainer
+pre-change binary's: not attributable to this branch
 ([review record](acceptance/measurements/half-precision-review-20261018.json)).
+On October 18 the maintainer re-baselined the Qwen3.5-0.8B benchmarks on the
+current host and made cold first token a diagnostic rather than a gate: the
+[re-baseline record](acceptance/measurements/qwen3.5-0.8b-metal-rebaseline-20261018.json),
+measured at `fa8426e` under the
+[campaign protocol](BENCHMARKS.md#qwen35-08b-benchmark-campaign-protocol), is
+the timing reference for later sources.
 
 ### Shared mechanisms
 

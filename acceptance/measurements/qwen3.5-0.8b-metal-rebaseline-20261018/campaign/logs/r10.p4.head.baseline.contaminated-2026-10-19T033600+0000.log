@@ -1,0 +1,74 @@
+== sample 39 round 10 position 4 head baseline
+== source fa8426e5dc8cbcb269c29e211b119ea0acd61054 (worktree /Users/nover/repos/transformers-worktrees/tfm-rebaseline, src tree ea9deb1a, cargo +1.92.0)
+== binary /Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-head/release/deps/qwen35_benchmarks-ffcc519af7a3b786 sha256 cb7bf1b53d045b53a8fadb8cc032c732fc8d40f57ddc347cc8500f1eb0723f99
+== env TRANSFORMERS_QWEN35_DIR=/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17
+== env TRANSFORMERS_QWEN35_REFERENCE_DIR=/Volumes/bag of holding/models/transformers-acceptance
+== cwd /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/rebaseline/campaign
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-head/release/deps/qwen35_benchmarks-ffcc519af7a3b786 --ignored --exact --nocapture --test-threads 1 qwen::qwen35_metal_baseline_benchmark
+== admission cooldown=120.01s load_wait=0.005s load_1m=3.88 load_5m=4.53
+== start 2026-10-19T03:36:00+00:00 loadavg [3.88, 4.53, 5.02]
+== top processes by CPU at start
+  PID  %CPU    RSS     ELAPSED ARGS
+  554 175.0  18896 17-08:54:12 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/FSEvents.framework/Versions/A/Support/fseventsd
+  859  20.4 333600 17-08:53:52 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mds_stores
+  579  15.3  77664 17-08:54:12 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mds
+  625   7.1 170768 17-08:54:12 /System/Library/CoreServices/loginwindow.app/Contents/MacOS/loginwindow console
+59643   5.1  30544 01-02:17:14 /Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex -c forced_login_method="chatgpt" exec-server --remote https://codex-cloud-enviro
+59356   4.9 254944 01-02:17:23 /Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex -c features.code_mode_host=true app-server --analytics-default-enabled -c plugin
+  796   4.9  41440 17-08:54:04 /usr/sbin/coreaudiod
+ 1350   4.5  76688 17-08:53:28 /System/Library/CoreServices/Finder.app/Contents/MacOS/Finder
+59357   3.5 730800 01-02:17:23 /Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Versions/155.0.8059.80/Helpers/Codex (Renderer).app/Contents/MacOS/Codex (Renderer) --type=render
+  621   3.4 444304 17-08:54:12 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer -daemon
+26275   3.4  34240 03-08:12:12 /System/Library/Frameworks/AppKit.framework/Versions/C/XPCServices/com.apple.appkit.xpc.openAndSavePanelService.xpc/Contents/MacOS/com.apple.appkit.xpc.openAndSavePanelS
+73638   1.8  33632 03-07:19:49 /System/Library/Frameworks/AppKit.framework/Versions/C/XPCServices/com.apple.appkit.xpc.openAndSavePanelService.xpc/Contents/MacOS/com.apple.appkit.xpc.openAndSavePanelS
+== power Now drawing from 'AC Power'
+ -InternalBattery-0 (id=37027939)	100%; charged; 0:00 remaining present: true
+== thermal Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+== memory System-wide memory free percentage: 92%
+
+
+running 1 test
+test qwen::qwen35_metal_baseline_benchmark ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 26 filtered out; finished in 206.27s
+
+      206.27 real       240.63 user        64.68 sys
+          2647916544  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              244483  page reclaims
+                 116  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                  33  voluntary context switches
+             2790083  involuntary context switches
+       2162025919746  instructions retired
+       1069771933612  cycles elapsed
+          3667511576  peak memory footprint
+
+== end 2026-10-19T03:39:26+00:00 loadavg [6.22, 5.84, 5.49]
+== top processes by CPU at end
+  PID  %CPU    RSS     ELAPSED ARGS
+  554 157.0  19040 17-08:57:38 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/FSEvents.framework/Versions/A/Support/fseventsd
+71137  97.2  47104       00:04 /Library/Frameworks/Python.framework/Versions/3.11/Resources/Python.app/Contents/MacOS/Python -I /Users/nover/.codex/experiments/temporal-full-20261013/receipts/parent-t
+  859  18.9 376000 17-08:57:18 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mds_stores
+  579  14.0  77760 17-08:57:38 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mds
+20184   6.2 878416 04-02:38:12 /Users/nover/Library/Application Support/Claude/claude-code/2.1.295/9d6405864fdc/claude.app/Contents/MacOS/claude --output-format stream-json --verbose --input-format st
+  796   5.0  41440 17-08:57:30 /usr/sbin/coreaudiod
+59643   4.9  30544 01-02:20:40 /Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex -c forced_login_method="chatgpt" exec-server --remote https://codex-cloud-enviro
+59356   4.6 254912 01-02:20:49 /Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex -c features.code_mode_host=true app-server --analytics-default-enabled -c plugin
+ 1350   4.5  76688 17-08:56:54 /System/Library/CoreServices/Finder.app/Contents/MacOS/Finder
+26275   3.5  34240 03-08:15:38 /System/Library/Frameworks/AppKit.framework/Versions/C/XPCServices/com.apple.appkit.xpc.openAndSavePanelService.xpc/Contents/MacOS/com.apple.appkit.xpc.openAndSavePanelS
+59357   3.5 736928 01-02:20:49 /Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Versions/155.0.8059.80/Helpers/Codex (Renderer).app/Contents/MacOS/Codex (Renderer) --type=render
+25337   2.8 356320 02-14:45:56 /Users/nover/Library/Application Support/Claude/claude-code/2.1.295/9d6405864fdc/claude.app/Contents/MacOS/claude --output-format stream-json --verbose --input-format st
+== metal shader cache growth 82368 bytes {"16777235_419/functions.list": {"before": [495084, 1792380609], "after": [495084, 1792380964], "growth_bytes": 0}, "32024/libraries.data": {"before": [381075456, 1792380679], "after": [381157376, 1792381026], "growth_bytes": 81920}, "32024/libraries.list": {"before": [1587812, 1792380679], "after": [1588260, 1792381026], "growth_bytes": 448}}
+== binary sha256 after cb7bf1b53d045b53a8fadb8cc032c732fc8d40f57ddc347cc8500f1eb0723f99
+== in-run load_1m maximum 12.1 over 41 observations; limit 6.0; CONTAMINATED
+== exit=0 wall=206.29s
