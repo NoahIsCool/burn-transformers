@@ -4,16 +4,26 @@ Usage: python3 -I build_record.py WORKTREE
 
 Reads this campaign directory (the bundle-only run and the source-validation
 logs at the documentation commit) and the envelope round's committed evidence
-(its record, gate log, derivation, control manifest, and generator logs), and
-writes the decision record with every campaign file's SHA-256. Prose is the
-round's account; every status, digest, figure, and quote is read from those
-files (a quote is a whole line, or a part of one), so the record's Python test
-can recompute them. The envelope record is never modified.
+(its record, gate log, derivation, graph and control manifests, and generator
+logs), and writes the decision record with every campaign file's SHA-256.
+Prose is the round's account; every status, digest, figure, and quote is read
+from those files (a quote is a whole line, or a part of one), or from Git
+objects of fixed commits, so the record's Python test can recompute them. The
+envelope record is never modified.
+
+Revision: the record was first committed at ``665762c``. A review found two
+undisclosed facts, so this builder now also writes, from the same committed
+evidence, the official F16 rows that fall below the restored floors (next to
+the verdict), two corrections (the floor wording and the derivation tool's
+digest drift), and a ``revision`` block naming the first version's commit and
+SHA-256. Every other value of the first version is written unchanged; no log
+or measurement changes.
 """
 
 import hashlib
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -25,6 +35,16 @@ ENVELOPE_COMMIT = "995ae022fd4358f33432b5f7a0605ac8352d5136"
 GATE_COMMIT = "a5d4d86eace4c447a28ad5bf35c89ac54bfcc644"
 CODE_HEAD = "530a82a1f5714a5a1f7eb8425b1a53d8e5dcd166"
 DOCS = "603ec5c41d4fcb8b4895010157f347dda4f57e26"
+#: The commit that first added this record, whose bytes the revision block pins.
+FIRST_VERSION_COMMIT = "665762c7d2973aaae9bf850d6e6b5d79a160a1e6"
+#: The commit whose documentation the revision's floor-wording correction points to.
+REVISION_DOCS = "fee841386292750fcfb9634275a9efda4ab43b2f"
+#: The derivation tool whose bytes changed after the envelope round's derivation ran.
+DERIVATION_TOOL = "scripts/derive_nemotron_h_envelope.py"
+#: The commit whose comment-only edit changed the derivation tool's bytes.
+TOOL_EDIT_COMMIT = CODE_HEAD
+#: The two official F16 evaluations whose worst rows are the gate's floors.
+FLOOR_GRAPHS = ("mps-eager", "cpu-eager")
 #: The decision exactly as the task relayed it to this session.
 DECISION_QUOTE = ("the Nemotron-H official-precision gate stays an open finding. Do NOT adopt the four-graph "
                   "envelope rule. Its slack is 1.1 only because leave-one-out ratios of at most 1.0046 round up, "
@@ -35,6 +55,9 @@ HISTORICAL = ["half-precision-calibration-20261017.json", "mac-validation-202610
               ENVELOPE_RECORD, "../nemotron-3.5-lightning-30b-a3b-a9904d24bcc1d289a1950fa9d2b978c47cf903b9.json"]
 BUNDLE_LOG = "logs/bundles.reports_official_f16_floors_and_four_graph_envelope.log"
 GATE_LOG = f"{ENVELOPE_CAMPAIGN}/gates/logs/nemotron-h.f16.metal.official-precision.log"
+#: The gate test and parity sources whose documentation the floor-wording correction names.
+ARTIFACTS = "tests/nemotron_h_artifacts.rs"
+PARITY = "tests/support/nemotron_h_parity.rs"
 #: Source checks, in run order: (name, log, purpose).
 CHECKS = [
     ("fmt", "validation/fmt.log", "formatting"),
@@ -57,6 +80,12 @@ CHECKS = [
 def sha256(data):
     """Hexadecimal SHA-256 of ``data``."""
     return hashlib.sha256(data).hexdigest()
+
+
+def git_show(worktree, commit, path):
+    """Bytes of ``path`` at ``commit`` in the worktree's Git repository."""
+    return subprocess.run(["git", "-C", str(worktree), "show", f"{commit}:{path}"], capture_output=True,
+                          check=True).stdout
 
 
 def line(text, pattern):
@@ -141,6 +170,35 @@ def main():
     hidden = {key: float(value) for key, value in re.findall(
         r"(stateless_hidden|cached_prefill_hidden|cached_decode_hidden)_minimum_cosine=([0-9.]+)@", summary_line)}
 
+    # Official F16 rows outside the two calibrating evaluations that fall below a restored floor: the SDPA
+    # graphs' rows from the derivation, the control's from its manifest (the derivation keeps only its worst).
+    tables_log = f"{ENVELOPE_CAMPAIGN}/derivation/envelope.txt"
+    manifests = {name: json.loads(text(f"{ENVELOPE_CAMPAIGN}/bundles/f16-{name}/reference.json"))
+                 for name in ("cpu-sdpa", "mps-sdpa", "mps-eager-control")}
+    official_below = []
+    for kind in ("prompt", "teacher", "cached"):
+        candidates = {name: (graph["cosines"], "derivation/envelope.json")
+                      for name, graph in paths[kind]["graphs"].items() if name not in FLOOR_GRAPHS}
+        candidates["mps-eager-control"] = (manifests["mps-eager-control"]["comparisons"]["float32"][kind]["cosines"],
+                                           "bundles/f16-mps-eager-control/reference.json")
+        for name, (cosines, source) in candidates.items():
+            official_below += [{"graph": name, "path": kind, "decision": decision, "cosine": cosine,
+                                "floor": floors[kind], "miss": round(floors[kind] - cosine, 12), "source": source}
+                               for decision, cosine in enumerate(cosines) if cosine < floors[kind]]
+    top1 = {name: {kind: [manifest["comparisons"]["float32"][kind]["top1_agreements"],
+                          manifest["comparisons"]["float32"][kind]["rows"]] for kind in ("prompt", "teacher", "cached")}
+            for name, manifest in manifests.items()}
+
+    # The derivation tool's digest: the one the derivation's header records, and the one after the comment edit.
+    tables = text(tables_log)
+    recorded_commit, tool, recorded = re.search(r"^== source ([0-9a-f]{40}) tool (\S+) sha256 ([0-9a-f]{64})$",
+                                                tables, re.M).groups()
+    if tool != DERIVATION_TOOL or sha256(git_show(worktree, recorded_commit, DERIVATION_TOOL)) != recorded:
+        raise SystemExit("the recorded derivation tool digest does not match its commit")
+    edited = sha256(git_show(worktree, TOOL_EDIT_COMMIT, DERIVATION_TOOL))
+    if edited != sha256(git_show(worktree, DOCS, DERIVATION_TOOL)) or edited == recorded:
+        raise SystemExit("the derivation tool changed again after its comment edit, or never changed")
+
     checks = []
     for name, relative, purpose in CHECKS:
         body = text(f"{CAMPAIGN}/{relative}")
@@ -176,6 +234,19 @@ def main():
                     "note": ("The envelope record stays byte-identical. Its gate pass is a pass of the proposed rule, "
                              "which was not adopted; its measurements stand as diagnostic evidence, and the "
                              "statements listed under corrections are corrected here.")},
+        "revision": {
+            "first_version_commit": FIRST_VERSION_COMMIT,
+            "first_version_sha256": sha256(git_show(worktree, FIRST_VERSION_COMMIT,
+                                                    f"acceptance/measurements/{RECORD}")),
+            "documentation_commit": REVISION_DOCS,
+            "added": ["revision", "verdict.official_f16_rows_below_floors",
+                      "corrections[floor-is-two-evaluations-worst-row]", "corrections[derivation-tool-digest]"],
+            "note": ("Revised before integration in response to review. The additions are computed from the envelope "
+                     "round's committed evidence and from Git objects of fixed commits. Every other value of the "
+                     "first version is unchanged except the builder's own digest under files; no log, "
+                     "measurement, status, or verdict changes. The source checks below remain those run at "
+                     f"{DOCS[:7]}; the revision's own checks are listed in its commit message."),
+        },
         "decision": {
             "date": "2026-10-18",
             "by": "the maintainer",
@@ -231,6 +302,22 @@ def main():
             "top1": "32/32 on the teacher and cached paths and 1/1 on the prompt row at 2cf83d7",
             "evidence": [evidence(GATE_LOG, "Cached: 32 rows, minimum cosine", "Teacher: 32 rows, minimum cosine",
                                   "Prompt: 1 rows, minimum cosine")],
+            "official_f16_rows_below_floors": {
+                "basis": "measured",
+                "status": "diagnostic context; the rule is unchanged",
+                "note": ("The floors are the worst rows of the two evaluations the gate is calibrated on (the MPS/F16 "
+                         "oracle and the precision bundle's CPU/F16 rows), not of every official F16 graph. Measured "
+                         "by the envelope round's derivation from the authenticated bundles, three other official "
+                         "F16 evaluations fall below a restored floor, each at one row and each with exact top-1 on "
+                         "every row: CPU SDPA at teacher decision 18, MPS SDPA at cached decision 22, and the MPS "
+                         "eager control, a repeat of the oracle's own graph, at cached decision 22. The restored "
+                         "criterion would reject all three. This is diagnostic context and does not change the "
+                         "rule."),
+                "rows": official_below,
+                "top1": top1,
+                "evidence": [evidence(tables_log, *(f"at decision {row['decision']} (cosine {row['cosine']:.9f})"
+                                                    for row in official_below))],
+            },
         },
         "diagnostic": {
             "status": "printed, not adopted",
@@ -304,6 +391,41 @@ def main():
                                "generator's SHA-256 (81f5bd77...), so its bytes must not change. The gate's bound is "
                                "the two-graph floors; the derivation tool's docstring was corrected in "
                                f"{CODE_HEAD[:7]}."),
+            },
+            {
+                "id": "floor-is-two-evaluations-worst-row",
+                "corrects": [f"{ARTIFACTS} compares_pinned_nemotron_f16_with_official_base_reference documentation "
+                             f"at {DOCS[:7]}",
+                             f"{PARITY} module documentation at {DOCS[:7]}",
+                             f"NEMOTRON_H_ACCEPTANCE.md First official comparison at {DOCS[:7]}"],
+                "statement": "the worst official F16 row",
+                "correction": ("The floor is the worst row of the two official F16 evaluations the gate is calibrated "
+                               "on, the MPS/F16 oracle and the CPU/F16 rows, not of every official F16 graph: three "
+                               "other official F16 evaluations fall below a restored floor "
+                               "(verdict.official_f16_rows_below_floors). The three descriptions were reworded in "
+                               f"{REVISION_DOCS[:7]}; the rule is unchanged."),
+                "reworded_in": REVISION_DOCS,
+            },
+            {
+                "id": "derivation-tool-digest",
+                "corrects": [f"{RECORD} corrections[generator-docstring-not-corrected].correction as first committed",
+                             f"NEMOTRON_H_ACCEPTANCE.md reproduction commands at {DOCS[:7]}"],
+                "statement": "the derivation tool's docstring was corrected in",
+                "correction": ("That correction changed the derivation tool's bytes, in comments and docstrings only, "
+                               f"which the first version did not say: from {TOOL_EDIT_COMMIT[:7]} on, including this "
+                               f"record's source commit {DOCS[:7]}, its SHA-256 is {edited[:8]}..., while the envelope "
+                               f"round's derivation/envelope.txt names {recorded[:8]}..., the tool as of "
+                               f"{recorded_commit[:7]}. A derivation rerun at a later source therefore reports a "
+                               "different tool digest from the evidence; reproducing the recorded digest needs the "
+                               f"tool as of {recorded_commit[:7]} (git show {recorded_commit[:7]}:{DERIVATION_TOOL}). "
+                               "Without docstrings the two versions' code is identical, so the derivation computes "
+                               "the same result."),
+                "tool": DERIVATION_TOOL,
+                "recorded_commit": recorded_commit,
+                "recorded_sha256": recorded,
+                "edit_commit": TOOL_EDIT_COMMIT,
+                "sha256_from_edit_commit": edited,
+                "evidence": [evidence(tables_log, f"tool {DERIVATION_TOOL} sha256 {recorded}")],
             },
         ],
         "runs": [{

@@ -13,8 +13,16 @@ changes cannot invalidate the record) to judge by the two-graph floors without
 compiled slacks; require that commit's library code to equal the envelope
 round's gate source; and require the envelope record and the earlier records
 to keep their bytes.
+
+The record was revised once, before integration: the revision tests require
+the first version's bytes (read from Git) to have the pinned digest and every
+first-version value to survive except the declared additions, recompute the
+official F16 rows below the restored floors from the derivation and the
+control manifest, and show from Git objects that the derivation tool's digest
+changed only through a comment and docstring edit.
 """
 
+import ast
 import functools
 import hashlib
 import json
@@ -47,6 +55,13 @@ HISTORICAL = frozenset({
 PATHS = ("prompt", "teacher", "cached")
 #: The two official F16 evaluations whose worst rows are the gate's floors.
 FLOOR_GRAPHS = ("mps-eager", "cpu-eager")
+#: The derivation tool whose recorded digest the revision discloses as superseded.
+DERIVATION_TOOL = "scripts/derive_nemotron_h_envelope.py"
+#: Official F16 evaluations outside the floor pair that the revision reports, with their manifests' bundle names.
+OTHER_OFFICIAL = {"cpu-sdpa": "f16-cpu-sdpa", "mps-sdpa": "f16-mps-sdpa", "mps-eager-control": "f16-mps-eager-control"}
+#: Values the revision adds, as its ``added`` list names them.
+REVISION_ADDED = ["revision", "verdict.official_f16_rows_below_floors",
+                  "corrections[floor-is-two-evaluations-worst-row]", "corrections[derivation-tool-digest]"]
 #: Source checks the standard validation requires, by record name.
 REQUIRED_CHECKS = frozenset({
     "fmt", "clippy-default-all-features", "clippy-1.99.1-all-features", "clippy-1.99.1-backends",
@@ -72,6 +87,23 @@ def quoted_entries(value):
             yield from quoted_entries(child)
 
 
+def code_without_docstrings(source):
+    """``ast.dump`` of Python ``source`` with every module, class, and function docstring removed (comments never parse)."""
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and node.body:
+            first = node.body[0]
+            if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) and isinstance(first.value.value, str):
+                node.body = node.body[1:]
+    return ast.dump(tree)
+
+
+def documentation_text(source):
+    """Rust or Markdown ``source`` with ``///`` and ``//!`` markers removed and whitespace collapsed."""
+    stripped = (re.sub(r"^\s*//[/!] ?", "", line) for line in source.splitlines())
+    return " ".join(" ".join(stripped).split())
+
+
 def git(*arguments):
     """Output of a Git command in the repository; skips where no Git checkout exists (the published crate)."""
     if PACKAGE_CONTENTS.is_packaged_archive(ROOT):
@@ -80,6 +112,21 @@ def git(*arguments):
     if result.returncode:
         raise AssertionError(f"git {' '.join(arguments)} failed: {result.stderr.strip()}")
     return result.stdout
+
+
+def git_bytes(commit, path):
+    """Bytes of ``path`` at ``commit``; skips where no Git checkout exists (the published crate)."""
+    if PACKAGE_CONTENTS.is_packaged_archive(ROOT):
+        raise unittest.SkipTest("this check needs the Git history of the repository")
+    result = subprocess.run(["git", "-C", str(ROOT), "show", f"{commit}:{path}"], capture_output=True, check=False)
+    if result.returncode:
+        raise AssertionError(f"git show {commit}:{path} failed: {result.stderr.decode().strip()}")
+    return result.stdout
+
+
+def docstring_first_line(source):
+    """First line of Python ``source``'s module docstring, which the derivation tool's argument parser prints."""
+    return ast.get_docstring(ast.parse(source)).splitlines()[0]
 
 
 class NemotronEnvelopeDecisionRecordTests(unittest.TestCase):
@@ -388,6 +435,123 @@ class NemotronEnvelopeDecisionRecordTests(unittest.TestCase):
         for name, digest in self.envelope["historical_records"].items():
             with self.subTest(earlier=name):
                 self.assertEqual(self.record["historical_records"][name], digest)
+
+    def corrections(self):
+        """The record's corrections by id."""
+        return {entry["id"]: entry for entry in self.record["corrections"]}
+
+    def test_revision_keeps_every_first_version_value(self):
+        """The first version's bytes have the pinned digest, and every value of it survives except the declared additions."""
+        revision = self.record["revision"]
+        self.assertEqual(revision["added"], REVISION_ADDED)
+        data = git_bytes(revision["first_version_commit"], RECORD.relative_to(ROOT).as_posix())
+        self.assertEqual(sha256(data), revision["first_version_sha256"])
+        first = json.loads(data)
+        self.assertEqual(set(self.record) - set(first), {"revision"})
+        self.assertEqual(set(first) - set(self.record), set())
+        for key, value in first.items():
+            with self.subTest(key=key):
+                current = self.record[key]
+                if key == "verdict":
+                    self.assertEqual(set(current) - set(value), {"official_f16_rows_below_floors"})
+                    current = {name: item for name, item in current.items() if name != "official_f16_rows_below_floors"}
+                elif key == "corrections":
+                    self.assertEqual([entry["id"] for entry in current[len(value):]],
+                                     ["floor-is-two-evaluations-worst-row", "derivation-tool-digest"])
+                    current = current[:len(value)]
+                elif key == "files":
+                    self.assertEqual(set(current), set(value))
+                    self.assertEqual({name for name in value if value[name] != current[name]}, {"record/build_record.py"})
+                    continue
+                self.assertEqual(current, value)
+        git("cat-file", "-e", f"{revision['documentation_commit']}^{{commit}}")
+        git("merge-base", "--is-ancestor", revision["first_version_commit"], revision["documentation_commit"])
+        self.assertIn(self.record["source_commit"][:7], revision["note"])
+
+    def test_official_rows_below_the_floors_recompute(self):
+        """Exactly CPU SDPA's teacher row 18 and the cached row 22 of MPS SDPA and the control miss a floor, with full top-1."""
+        block = self.record["verdict"]["official_f16_rows_below_floors"]
+        self.assertEqual(block["basis"], "measured")
+        self.assertIn("does not change the rule", block["note"])
+        derivation = self.derivation()
+        rule = self.record["rule"]
+        manifests = {name: json.loads(self.text(f"{self.envelope['campaign_directory']}/bundles/{bundle}/reference.json"))
+                     for name, bundle in OTHER_OFFICIAL.items()}
+        expected = []
+        for kind in PATHS:
+            rows = {name: graph["cosines"] for name, graph in derivation["paths"][kind]["graphs"].items()
+                    if name not in FLOOR_GRAPHS}
+            self.assertEqual(set(rows), {"cpu-sdpa", "mps-sdpa"})
+            rows["mps-eager-control"] = manifests["mps-eager-control"]["comparisons"]["float32"][kind]["cosines"]
+            for name, cosines in rows.items():
+                below = [(name, kind, decision, cosine) for decision, cosine in enumerate(cosines)
+                         if cosine < rule["floors"][kind]]
+                exact = [(name, kind, decision, cosine) for decision, cosine in enumerate(cosines)
+                         if cosine < rule["floor_rows"][kind]["cosine"]]
+                self.assertEqual(below, exact, "the printed and the unrounded floors must reject the same rows")
+                expected += below
+        self.assertEqual([(row["graph"], row["path"], row["decision"], row["cosine"]) for row in block["rows"]], expected)
+        self.assertEqual([entry[:3] for entry in expected], [("cpu-sdpa", "teacher", 18), ("mps-sdpa", "cached", 22),
+                                                              ("mps-eager-control", "cached", 22)])
+        self.assertEqual({row["graph"]: f"{row['cosine']:.9f}" for row in block["rows"]},
+                         {"cpu-sdpa": "0.994420097", "mps-sdpa": "0.998622490", "mps-eager-control": "0.998595604"})
+        for row in block["rows"]:
+            with self.subTest(graph=row["graph"]):
+                self.assertEqual(row["floor"], rule["floors"][row["path"]])
+                self.assertAlmostEqual(row["miss"], row["floor"] - row["cosine"], places=12)
+                self.assertGreater(row["miss"], 0.0)
+        control = derivation["controls_reported_not_adopted"][0]
+        self.assertEqual(control["repeats"], "mps-eager")
+        self.assertEqual(control["paths"]["cached"]["control"]["decision"], 22)
+        self.assertEqual(f"{control['paths']['cached']['control']['minimum_cosine']:.9f}", "0.998595604")
+        for name, manifest in manifests.items():
+            for kind in PATHS:
+                with self.subTest(graph=name, path=kind):
+                    comparison = manifest["comparisons"]["float32"][kind]
+                    self.assertEqual(block["top1"][name][kind], [comparison["top1_agreements"], comparison["rows"]])
+                    self.assertEqual(comparison["top1_agreements"], comparison["rows"])
+        burn_miss = -self.record["verdict"]["paths"]["cached"]["margin"]
+        self.assertTrue(all(row["miss"] < burn_miss for row in block["rows"] if row["path"] == "cached"))
+        self.assertEqual(self.record["verdict"]["failing_rows"][0]["decision"], 22)
+
+    def test_derivation_tool_digest_changed_only_by_a_comment_edit(self):
+        """envelope.txt names the tool at its source commit; one docstring-and-comment edit gives the later digest."""
+        correction = self.corrections()["derivation-tool-digest"]
+        tables = self.text(f"{self.envelope['campaign_directory']}/derivation/envelope.txt")
+        commit, tool, digest = re.search(r"^== source ([0-9a-f]{40}) tool (\S+) sha256 ([0-9a-f]{64})$", tables,
+                                         re.M).groups()
+        self.assertEqual((tool, commit, digest),
+                         (DERIVATION_TOOL, correction["recorded_commit"], correction["recorded_sha256"]))
+        self.assertEqual(correction["tool"], DERIVATION_TOOL)
+        recorded = git_bytes(commit, DERIVATION_TOOL)
+        self.assertEqual(sha256(recorded), digest)
+        self.assertEqual(sha256(git_bytes(self.envelope["derivation"]["commit"], DERIVATION_TOOL)), digest)
+        edits = git("log", "--format=%H", f"{commit}..{self.record['source_commit']}", "--", DERIVATION_TOOL).split()
+        self.assertEqual(edits, [correction["edit_commit"]])
+        self.assertEqual(correction["edit_commit"], self.record["code_head"])
+        edited = git_bytes(correction["edit_commit"], DERIVATION_TOOL)
+        self.assertEqual(sha256(edited), correction["sha256_from_edit_commit"])
+        self.assertEqual(sha256(git_bytes(self.record["source_commit"], DERIVATION_TOOL)),
+                         correction["sha256_from_edit_commit"])
+        self.assertNotEqual(sha256(edited), digest)
+        self.assertEqual(code_without_docstrings(recorded), code_without_docstrings(edited))
+        self.assertEqual(docstring_first_line(recorded), docstring_first_line(edited))
+        for value in (digest[:8], correction["sha256_from_edit_commit"][:8], commit[:7], correction["edit_commit"][:7]):
+            self.assertIn(value, correction["correction"])
+        self.assertIn(correction["statement"], self.corrections()["generator-docstring-not-corrected"]["correction"])
+
+    def test_floor_wording_correction_names_the_reworded_sources(self):
+        """The corrected phrase is in the gate, parity, and protocol documentation at the source commit, and gone at the rewording."""
+        correction = self.corrections()["floor-is-two-evaluations-worst-row"]
+        self.assertEqual(correction["reworded_in"], self.record["revision"]["documentation_commit"])
+        self.assertIn(correction["reworded_in"][:7], correction["correction"])
+        for path in (ARTIFACTS, PARITY, "NEMOTRON_H_ACCEPTANCE.md"):
+            with self.subTest(path=path):
+                self.assertTrue(any(entry.startswith(path) for entry in correction["corrects"]))
+                before = documentation_text(git("show", f"{self.record['source_commit']}:{path}"))
+                after = documentation_text(git("show", f"{correction['reworded_in']}:{path}"))
+                self.assertIn(correction["statement"], before)
+                self.assertNotIn(correction["statement"], after)
 
 
 if __name__ == "__main__":

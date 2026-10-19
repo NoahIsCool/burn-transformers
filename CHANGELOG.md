@@ -809,7 +809,13 @@ earlier row-by-row or per-chunk algorithm, which each test keeps as an oracle.
   budget statements, checked by
   `scripts/tests/test_nemotron_h_envelope_decision_record.py`
   ([record](acceptance/measurements/nemotron-h-envelope-decision-20261018.json)).
-  No checkpoint is promoted.
+  A revision of that record, before integration, lists the three other
+  official F16 rows below a restored floor (CPU SDPA at teacher decision 18,
+  MPS SDPA and the MPS eager control at cached decision 22) as diagnostic
+  context, and discloses the derivation tool's comment-only digest change at
+  `530a82a`; the floor descriptions now name only the two calibrating
+  evaluations, and the model tables say the current-source verdict is
+  inferred. No checkpoint is promoted.
 - The configuration fuzz target covers all eleven family parsers without
   count filters, and the modular-spec generator draws clamped experts,
   embedding scales, and logit caps.

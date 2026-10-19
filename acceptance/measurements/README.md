@@ -133,8 +133,14 @@ decision 22 (`0.998558` against `0.998635`), an open finding inferred from
 the rows the envelope record measured, and the four-graph envelope is a
 printed diagnostic. It holds the bundle-only run that recomputes the floors
 and the envelope at the new source, the source checks, and corrections of
-four envelope-record statements. The envelope record and the earlier records
-stay byte-identical, and
+four envelope-record statements. It was revised once before integration (its
+first version, committed at `665762c`, is pinned by digest): next to the
+verdict it lists the three other official F16 rows that fall below a restored
+floor (CPU SDPA at teacher decision 18; MPS SDPA and the MPS eager control at
+cached decision 22), diagnostic context that leaves the rule unchanged, and
+it discloses that the derivation tool's digest changed with a comment-only
+edit at `530a82a`; every other value is unchanged. The envelope record and
+the earlier records stay byte-identical, and
 `scripts/tests/test_nemotron_h_envelope_decision_record.py` recomputes the
 decision record's verdict, figures, quotes, and identities. It promotes no
 checkpoint.

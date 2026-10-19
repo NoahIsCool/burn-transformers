@@ -1079,6 +1079,17 @@ Burn's cached decision 22 lies at `1.023` of the envelope.
   attention path alone; the hidden traces' minimum against the F16 oracle is
   `0.99999496`, not at least `0.999995`; and the MPS SDPA graph ran with the
   16 GiB block budget that the reproduction command omitted.
+- Revision before integration (the first version, committed at `665762c`, is
+  pinned by digest and otherwise unchanged): next to the verdict, the record
+  lists the official F16 rows outside the floor pair that fall below a
+  restored floor, measured by the envelope round's derivation (CPU SDPA at
+  teacher decision 18, MPS SDPA and the MPS eager control at cached decision
+  22; diagnostic context, the rule unchanged), and corrects two statements:
+  the floor descriptions that called it the worst official F16 row, and its
+  own correction of the derivation tool's docstring, which did not say that
+  the edit at `530a82a` changed the tool's SHA-256 from the `2c4b5fc1...`
+  that `derivation/envelope.txt` records to `b8a487bd...`, comments and
+  docstrings only.
 - The record lists the source checks run at its documentation commit, the
   checks not run, and their results;
   `scripts/tests/test_nemotron_h_envelope_decision_record.py` recomputes its

@@ -11,6 +11,18 @@
   "sha256": "7bdc8c606c7c4c79a2c89fc2231861ff3451c533e85a1ed10612aff07ec572af",
   "note": "The envelope record stays byte-identical. Its gate pass is a pass of the proposed rule, which was not adopted; its measurements stand as diagnostic evidence, and the statements listed under corrections are corrected here."
  },
+ "revision": {
+  "first_version_commit": "665762c7d2973aaae9bf850d6e6b5d79a160a1e6",
+  "first_version_sha256": "4d7d300baa933205620f18fd95b13250e179713d51c37a7f3f3221cd0f095a93",
+  "documentation_commit": "fee841386292750fcfb9634275a9efda4ab43b2f",
+  "added": [
+   "revision",
+   "verdict.official_f16_rows_below_floors",
+   "corrections[floor-is-two-evaluations-worst-row]",
+   "corrections[derivation-tool-digest]"
+  ],
+  "note": "Revised before integration in response to review. The additions are computed from the envelope round's committed evidence and from Git objects of fixed commits. Every other value of the first version is unchanged except the builder's own digest under files; no log, measurement, status, or verdict changes. The source checks below remain those run at 603ec5c; the revision's own checks are listed in its commit message."
+ },
  "decision": {
   "date": "2026-10-18",
   "by": "the maintainer",
@@ -131,7 +143,95 @@
      "Nemotron Burn F16 against the F32 truth Prompt: 1 rows, minimum cosine 0.999200341318 at decision 0 (delta 3.999147e-2, 0.9961 of the envelope, 0.9056 of the bound 4.416071e-2; floor 0.999024916)"
     ]
    }
-  ]
+  ],
+  "official_f16_rows_below_floors": {
+   "basis": "measured",
+   "status": "diagnostic context; the rule is unchanged",
+   "note": "The floors are the worst rows of the two evaluations the gate is calibrated on (the MPS/F16 oracle and the precision bundle's CPU/F16 rows), not of every official F16 graph. Measured by the envelope round's derivation from the authenticated bundles, three other official F16 evaluations fall below a restored floor, each at one row and each with exact top-1 on every row: CPU SDPA at teacher decision 18, MPS SDPA at cached decision 22, and the MPS eager control, a repeat of the oracle's own graph, at cached decision 22. The restored criterion would reject all three. This is diagnostic context and does not change the rule.",
+   "rows": [
+    {
+     "graph": "cpu-sdpa",
+     "path": "teacher",
+     "decision": 18,
+     "cosine": 0.9944200973425317,
+     "floor": 0.994466421,
+     "miss": 4.6323657e-05,
+     "source": "derivation/envelope.json"
+    },
+    {
+     "graph": "mps-sdpa",
+     "path": "cached",
+     "decision": 22,
+     "cosine": 0.9986224898590363,
+     "floor": 0.998635047,
+     "miss": 1.2557141e-05,
+     "source": "derivation/envelope.json"
+    },
+    {
+     "graph": "mps-eager-control",
+     "path": "cached",
+     "decision": 22,
+     "cosine": 0.9985956044836493,
+     "floor": 0.998635047,
+     "miss": 3.9442516e-05,
+     "source": "bundles/f16-mps-eager-control/reference.json"
+    }
+   ],
+   "top1": {
+    "cpu-sdpa": {
+     "prompt": [
+      1,
+      1
+     ],
+     "teacher": [
+      32,
+      32
+     ],
+     "cached": [
+      32,
+      32
+     ]
+    },
+    "mps-sdpa": {
+     "prompt": [
+      1,
+      1
+     ],
+     "teacher": [
+      32,
+      32
+     ],
+     "cached": [
+      32,
+      32
+     ]
+    },
+    "mps-eager-control": {
+     "prompt": [
+      1,
+      1
+     ],
+     "teacher": [
+      32,
+      32
+     ],
+     "cached": [
+      32,
+      32
+     ]
+    }
+   },
+   "evidence": [
+    {
+     "log": "nemotron-h-envelope-20261018/derivation/envelope.txt",
+     "quotes": [
+      "- cpu-sdpa: max delta 1.056400e-01 at decision 18 (cosine 0.994420097), mean delta 2.886415e-02; leave-one-out 1.0042 (deficit 1.0084, mean 1.5945)",
+      "- mps-sdpa: max delta 5.248829e-02 at decision 22 (cosine 0.998622490), mean delta 1.718501e-02; leave-one-out 1.0046 (deficit 1.0092, mean 0.9706)",
+      "- cached: max delta 5.299803e-02 at decision 22 (cosine 0.998595604); minimum cosine to mps-eager 0.999869702, bitwise equal False"
+     ]
+    }
+   ]
+  }
  },
  "diagnostic": {
   "status": "printed, not adopted",
@@ -270,6 +370,39 @@
    ],
    "statement": "Its bound is the envelope of the official float16 graphs",
    "correction": "Not corrected in place: the two graph bundles and the strict reader pin the generator's SHA-256 (81f5bd77...), so its bytes must not change. The gate's bound is the two-graph floors; the derivation tool's docstring was corrected in 530a82a."
+  },
+  {
+   "id": "floor-is-two-evaluations-worst-row",
+   "corrects": [
+    "tests/nemotron_h_artifacts.rs compares_pinned_nemotron_f16_with_official_base_reference documentation at 603ec5c",
+    "tests/support/nemotron_h_parity.rs module documentation at 603ec5c",
+    "NEMOTRON_H_ACCEPTANCE.md First official comparison at 603ec5c"
+   ],
+   "statement": "the worst official F16 row",
+   "correction": "The floor is the worst row of the two official F16 evaluations the gate is calibrated on, the MPS/F16 oracle and the CPU/F16 rows, not of every official F16 graph: three other official F16 evaluations fall below a restored floor (verdict.official_f16_rows_below_floors). The three descriptions were reworded in fee8413; the rule is unchanged.",
+   "reworded_in": "fee841386292750fcfb9634275a9efda4ab43b2f"
+  },
+  {
+   "id": "derivation-tool-digest",
+   "corrects": [
+    "nemotron-h-envelope-decision-20261018.json corrections[generator-docstring-not-corrected].correction as first committed",
+    "NEMOTRON_H_ACCEPTANCE.md reproduction commands at 603ec5c"
+   ],
+   "statement": "the derivation tool's docstring was corrected in",
+   "correction": "That correction changed the derivation tool's bytes, in comments and docstrings only, which the first version did not say: from 530a82a on, including this record's source commit 603ec5c, its SHA-256 is b8a487bd..., while the envelope round's derivation/envelope.txt names 2c4b5fc1..., the tool as of b4e2bdb. A derivation rerun at a later source therefore reports a different tool digest from the evidence; reproducing the recorded digest needs the tool as of b4e2bdb (git show b4e2bdb:scripts/derive_nemotron_h_envelope.py). Without docstrings the two versions' code is identical, so the derivation computes the same result.",
+   "tool": "scripts/derive_nemotron_h_envelope.py",
+   "recorded_commit": "b4e2bdbeb6e011d77ba29b0e10903593bf59925c",
+   "recorded_sha256": "2c4b5fc1143a0b067670d4bb2645db896b2f37df823954ea6eb5d63431c8e498",
+   "edit_commit": "530a82a1f5714a5a1f7eb8425b1a53d8e5dcd166",
+   "sha256_from_edit_commit": "b8a487bdce771d9dbf0b59dc213449bdec73f13e212c62c6e028b27ba3c6d438",
+   "evidence": [
+    {
+     "log": "nemotron-h-envelope-20261018/derivation/envelope.txt",
+     "quotes": [
+      "== source b4e2bdbeb6e011d77ba29b0e10903593bf59925c tool scripts/derive_nemotron_h_envelope.py sha256 2c4b5fc1143a0b067670d4bb2645db896b2f37df823954ea6eb5d63431c8e498"
+     ]
+    }
+   ]
   }
  ],
  "runs": [
@@ -401,7 +534,7 @@
  },
  "files": {
   "logs/bundles.reports_official_f16_floors_and_four_graph_envelope.log": "3fb658463d649580b528353b8ea913804ee337baa90ea9d76f2022634e4bb3bc",
-  "record/build_record.py": "f3e059250a49fd66e8616c84ce2c1dca97c526ab5ce82a9ffdedcac646a7b5ad",
+  "record/build_record.py": "b7cfacd5bfc0a9f8d06a126863183d477e8ff5e2fa99d1db17109b9c0fbd1405",
   "run_check.py": "98a4f26b3312027166567343cf7a3d166559d32dba5375656f4e99df1c3847b3",
   "validation/clippy-1.99.1-all-features.log": "1d477d5a7c3c8fc8c5aee4bc51a2553c46bf3b595ca793cfa2815a9e938de119",
   "validation/clippy-1.99.1-backends.log": "b39469abef6fb0f575e76c95d6fc2cd28aa1d17987b66655ab1deaf4a5363fe7",
