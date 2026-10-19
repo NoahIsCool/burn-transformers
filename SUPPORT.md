@@ -123,10 +123,12 @@ with `CheckpointError::RangeHazard` (through `AutoCausalLm::load_local`,
 `Error::CheckpointPlan`). The refusal is family-wide: it also covers the
 unmeasured sizes (such as 1B and 270M) and fine-tunes. Load these checkpoints
 in F32, or in BF16 on a backend that can store it (Burn 0.21's Metal backend
-cannot). Packed Q4/Q8 weights with F32 activations keep the residual stream
-in F32 as well (llama.cpp keeps activations in F32 for 4-bit GGUF files,
-which is why those run), but this crate's automatic packed path is not
-certified for Gemma. Setting
+cannot). Packed Q4/Q8 weights with F32 activations would keep the residual
+stream in F32 as well (llama.cpp reportedly does so for 4-bit GGUF files;
+neither llama.cpp nor GGUF has been measured here), but this crate's
+automatic packed path is not certified for Gemma: the refusal says so
+instead of offering it, and `AutoCausalLm::load_local` rejects a quantized
+Burnpack sidecar for Gemma with `Error::BackendCapability`. Setting
 `LoadOptions::range_hazards` to `RangeHazardPolicy::Accept` is the explicit
 opt-in for experiments that need the faithful F16 graph (studying the
 overflow, truncated stacks, interventions); its logits are expected to be
