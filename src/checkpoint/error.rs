@@ -340,9 +340,10 @@ pub enum CheckpointError {
     },
     /// A planned parameter takes a dtype the family's checkpoints are measured to overflow.
     ///
-    /// Raised by [`super::check_range_hazards`] after strict planning and
-    /// before any payload is read, when the family declares a matching
-    /// [`RangeHazard`] and [`super::LoadOptions::range_hazards`] is
+    /// Raised by [`super::build_load_plan`] (through
+    /// [`super::check_range_hazards`]) after strict planning and before any
+    /// payload is read, when the family's [`super::MappingPlan`] declares a
+    /// matching [`RangeHazard`] and [`super::LoadOptions::range_hazards`] is
     /// [`super::RangeHazardPolicy::Refuse`] (the default). The message names
     /// the checkpoints, the dtype, the declared evidence, the wider dtypes the
     /// loader can plan instead, and the [`super::RangeHazardPolicy::Accept`]

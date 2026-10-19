@@ -160,8 +160,9 @@ impl GemmaVariant {
     /// overflow F16 in Transformers too (see the evidence the declaration
     /// carries). Gemma 2 declares none, because no Gemma 2 checkpoint has
     /// been measured in F16; that is an absence of evidence, not a
-    /// measurement. The checkpoint contract carries these declarations, so
-    /// strict loading refuses a matching plan unless
+    /// measurement. The checkpoint contract's mapping plan carries these
+    /// declarations, so the shared planner
+    /// ([`crate::checkpoint::build_load_plan`]) refuses a matching plan unless
     /// [`LoadOptions::range_hazards`](crate::checkpoint::LoadOptions::range_hazards)
     /// accepts it ([`crate::checkpoint::check_range_hazards`]).
     #[must_use]

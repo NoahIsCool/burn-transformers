@@ -34,9 +34,15 @@
 //!
 //! # The check
 //!
-//! [`check_range_hazards`] compares a strict [`LoadPlan`] with the declared
-//! hazards after planning, so it runs before any payload is read and before
-//! the automatic loader allocates the graph. It matches when any planned
+//! A family declares its hazards on its [`super::MappingPlan`]
+//! ([`super::MappingPlan::declare_range_hazards`]), the plan the shared
+//! planner [`super::build_load_plan`] reads. The planner applies the dtype
+//! policy and then runs [`check_range_hazards`] on the finished strict
+//! [`LoadPlan`], so the check runs before any payload is read and before the
+//! automatic loader allocates the graph, and every caller planning with the
+//! family's mapping plan inherits it: the family's contract method, the
+//! automatic loader, and a caller passing the contract's expected tensors
+//! and mappings to the shared planner. It matches when any planned
 //! parameter takes a hazard's dtype, whether [`super::DTypePolicy::Cast`]
 //! selected it or the checkpoint stores it and [`super::DTypePolicy::Auto`]
 //! kept it. Under [`RangeHazardPolicy::Refuse`], the default of
@@ -48,10 +54,14 @@
 //! unchanged and the faithful graph runs.
 //!
 //! The check contains no model names; families decide which hazards they
-//! declare. It does not cover random initialization, Burn records loaded
-//! outside the checkpoint planner, or inputs that overflow a dtype for which
-//! no hazard was measured. Refusing is a default policy for experiments that
-//! cannot use the result, not a numerical fix: nothing is clamped or widened.
+//! declare. It does not cover a mapping plan that does not carry the
+//! family's declarations (one built from scratch, from another plan's
+//! operations, or by deserialization, which drops them), random
+//! initialization, Burn records loaded outside the checkpoint planner, or
+//! inputs that overflow a dtype for which no hazard was measured. A caller
+//! with such a plan can run [`check_range_hazards`] itself. Refusing is a
+//! default policy for experiments that cannot use the result, not a
+//! numerical fix: nothing is clamped or widened.
 
 use serde::{Deserialize, Serialize};
 
@@ -189,8 +199,11 @@ pub enum RangeHazardPolicy {
 ///
 /// Every planned (storage-owning) parameter is compared with every hazard,
 /// in declaration order; aliases take their owner's dtype, so they add
-/// nothing. The check reads only the plan, so a caller runs it after strict
-/// planning and before execution.
+/// nothing. The check reads only the plan. [`super::build_load_plan`] runs
+/// it for the hazards its [`super::MappingPlan`] declares, under
+/// [`super::LoadOptions::range_hazards`]; call it directly only for a plan
+/// whose mapping plan does not carry the declarations, after strict planning
+/// and before execution.
 ///
 /// # Errors
 ///

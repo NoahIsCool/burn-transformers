@@ -326,7 +326,8 @@ fn invalid_configurations_have_no_contract() {
 ///
 /// The declaration names both `model_type` values a Gemma 3 checkpoint can
 /// carry, offers F32 and BF16 instead, and keeps measured and unmeasured
-/// sizes apart in its evidence.
+/// sizes apart in its evidence. The contract's mapping plan carries it, so
+/// the shared planner enforces it.
 #[test]
 fn contracts_carry_the_variant_range_hazards() {
     let [hazard] = GemmaVariant::Gemma3Text.range_hazards() else {
@@ -363,6 +364,11 @@ fn contracts_carry_the_variant_range_hazards() {
                 .checkpoint_contract(GemmaCheckpointOptions { source })
                 .unwrap();
             assert_eq!(contract.range_hazards(), expected, "{variant:?} {source:?}");
+            assert_eq!(
+                contract.mappings().range_hazards(),
+                expected,
+                "{variant:?} {source:?}: the shared planner reads the mapping plan's declarations"
+            );
         }
     }
 }

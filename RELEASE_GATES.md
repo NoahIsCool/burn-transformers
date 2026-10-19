@@ -429,9 +429,11 @@ backend-erased tensor API) would revisit.
 
 Following the maintainer's decision (d) of October 18, Gemma 3 declares F16 a
 numeric-range hazard (`GemmaVariant::range_hazards`, a `RangeHazard` with the
-measured evidence), and the generic check `check_range_hazards`, run by the
-Gemma contract after strict planning, refuses any plan whose parameters are
-F16 (cast, or stored and kept by `DTypePolicy::Auto`) with
+measured evidence) on the Gemma contract's `MappingPlan`, and the generic
+check `check_range_hazards`, which the shared planner `build_load_plan` runs
+after strict planning for the hazards a mapping plan declares, refuses any
+plan whose parameters are F16 (cast, or stored and kept by
+`DTypePolicy::Auto`) with
 `CheckpointError::RangeHazard`, before any payload is read and, through
 `AutoCausalLm::load_local`, before the graph is allocated. The message names
 Gemma 3, F16, the measured overflow and the unmeasured sizes, the alternatives

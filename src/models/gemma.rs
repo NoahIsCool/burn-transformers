@@ -85,9 +85,11 @@
 //! Transformers' CPU and MPS F16 graphs as in this crate's, and the logits
 //! are non-finite (gemma-3-12b-it and 27b-it overflow at blocks 6 and 8).
 //! [`GemmaVariant::range_hazards`] therefore declares F16 for `gemma3_text`
-//! (which a multimodal `gemma3` checkpoint's `text_config` names), and strict
-//! loading, direct or automatic, refuses a plan whose parameters are F16
-//! with [`CheckpointError::RangeHazard`](crate::checkpoint::CheckpointError::RangeHazard)
+//! (which a multimodal `gemma3` checkpoint's `text_config` names) on the
+//! contract's mapping plan, and the shared planner
+//! ([`build_load_plan`](crate::checkpoint::build_load_plan)), which direct
+//! and automatic strict loading both use, refuses a plan whose parameters
+//! are F16 with [`CheckpointError::RangeHazard`](crate::checkpoint::CheckpointError::RangeHazard)
 //! before any payload is read. Load Gemma 3 in F32, in BF16 where the backend
 //! can store it (not Metal on Burn 0.21), or set
 //! [`LoadOptions::range_hazards`](crate::checkpoint::LoadOptions::range_hazards)

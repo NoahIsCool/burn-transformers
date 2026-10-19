@@ -11,6 +11,12 @@
 //! These operations are planned before materialization, so a malformed mapping
 //! cannot allocate or mutate model parameters. Tied aliases resolve to one owner,
 //! while dtype conversion follows each architecture's precision contract.
+//!
+//! A mapping plan also carries the numeric-range hazards its family declares
+//! ([`super::RangeHazard`]). The planner checks the finished plan's dtypes
+//! against them under the caller's [`super::RangeHazardPolicy`], so the
+//! refusal lives where the dtype policy is applied, not in one family's
+//! wrapper, and every caller of [`build_load_plan`] inherits it.
 
 mod aliases;
 mod ledger;
@@ -25,7 +31,8 @@ use ledger::{TargetLedger, TargetState, open_ledger};
 use super::{
     AliasRecord, ArtifactSource, CheckpointEquivalenceRecord, CheckpointError, CheckpointManifest,
     DTypeConversion, DTypePolicy, IndexAliasSizeAccounting, IndexTensorAlias, LoadOptions,
-    LoadReport, MemoryEstimate, Result, TensorDType, TensorInventory, TransformRecord,
+    LoadReport, MemoryEstimate, RangeHazard, Result, TensorDType, TensorInventory, TransformRecord,
+    check_range_hazards,
     layout::{ConcatError, SectionError, extend_concatenation, section_starts},
 };
 
@@ -181,11 +188,29 @@ pub enum TensorOperation {
     },
 }
 
-/// Architecture-owned sequence of explicit mapping operations.
+/// Architecture-owned sequence of explicit mapping operations, with the family's range hazards.
+///
+/// Besides its operations, a plan carries the [`RangeHazard`]s the owning
+/// family declares for its checkpoints ([`Self::declare_range_hazards`]).
+/// [`build_load_plan`] checks every strict plan against them under
+/// [`LoadOptions::range_hazards`], so any caller that plans with a family's
+/// mapping plan inherits the family's refusal, whether through the family's
+/// contract method or by passing the contract's parts to the shared planner.
+///
+/// Hazards are family code, not mapping data: serialization writes only the
+/// operations (the format is unchanged), so a deserialized plan declares no
+/// hazards, and a family's plan rebuilt that way compares unequal to the
+/// original.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct MappingPlan {
     /// Ordered transformations and aliases requested by the architecture.
     operations: Vec<TensorOperation>,
+    /// Dtypes the family's checkpoints are measured to overflow, in declaration order.
+    ///
+    /// Skipped by serde: a [`RangeHazard`]'s text is `'static` family code
+    /// that deserialized data cannot provide.
+    #[serde(skip)]
+    range_hazards: Vec<RangeHazard>,
 }
 
 impl MappingPlan {
@@ -199,6 +224,27 @@ impl MappingPlan {
     #[must_use]
     pub fn operations(&self) -> &[TensorOperation] {
         &self.operations
+    }
+
+    /// Returns the declared range hazards in declaration order.
+    #[must_use]
+    pub fn range_hazards(&self) -> &[RangeHazard] {
+        &self.range_hazards
+    }
+
+    /// Appends range hazards the owning family declares for its checkpoints.
+    ///
+    /// [`build_load_plan`] refuses a strict plan in which some planned
+    /// parameter takes a declared dtype, unless
+    /// [`LoadOptions::range_hazards`] accepts it (see
+    /// [`super::check_range_hazards`]); the first matching declaration, in
+    /// declaration order, is reported.
+    pub fn declare_range_hazards(
+        &mut self,
+        hazards: impl IntoIterator<Item = RangeHazard>,
+    ) -> &mut Self {
+        self.range_hazards.extend(hazards);
+        self
     }
 
     /// Appends a fully specified operation.
@@ -481,6 +527,18 @@ impl PlannedTensor {
 ///
 /// Every observed tensor must be consumed once or explicitly allowlisted. Every
 /// expected model parameter must be produced once or explicitly allowlisted.
+/// The strict plan is then checked against the range hazards `mappings`
+/// declares ([`MappingPlan::range_hazards`]) under
+/// [`LoadOptions::range_hazards`], before any payload is read: a plan in
+/// which some planned parameter takes a declared dtype is refused unless the
+/// policy is [`super::RangeHazardPolicy::Accept`].
+///
+/// # Errors
+///
+/// Returns the planning error for an invalid option, mapping, or manifest,
+/// [`CheckpointError::StrictValidation`] for unexplained missing or
+/// unexpected tensors, and [`CheckpointError::RangeHazard`] for a refused
+/// range hazard ([`check_range_hazards`]).
 pub fn build_load_plan(
     manifest: &CheckpointManifest,
     expected: &[ExpectedTensor],
@@ -591,13 +649,17 @@ fn build_load_plan_with_policy(
     aliases.sort_by(|left, right| left.target.cmp(&right.target));
     let memory = estimate_memory(manifest, &primary, &aliases, &equivalences)?;
     report.memory = Some(memory);
-    Ok(LoadPlan {
+    let plan = LoadPlan {
         equivalences,
         tensors: primary,
         aliases,
         report,
         memory,
-    })
+    };
+    // The planned dtypes are final here, so the family's declared range
+    // hazards are checked once, for every contract built on this planner.
+    check_range_hazards(&plan, mappings.range_hazards(), options.range_hazards)?;
+    Ok(plan)
 }
 
 /// Temporary state while compiling mapping operations into planned tensors.

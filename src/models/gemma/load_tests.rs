@@ -792,3 +792,41 @@ fn automatic_loading_applies_the_gemma3_policy() {
     load(&gemma2, TensorDType::F16, RangeHazardPolicy::Refuse)
         .unwrap_or_else(|error| panic!("gemma2 in F16: {error}"));
 }
+
+/// The shared planner refuses Gemma 3 in F16 when given the contract's own parts, not just the contract method.
+///
+/// `build_load_plan` over [`GemmaCheckpointContract::expected_tensors`] and
+/// [`GemmaCheckpointContract::mappings`] is a public path to a plan that
+/// [`execute_local_load_plan`] streams into the graph, so the declaration
+/// must ride on the mapping plan the shared planner reads. Accepting the
+/// overflow plans and installs the faithful F16 graph through the same path.
+#[test]
+fn the_shared_planner_refuses_gemma3_f16_from_the_contract_parts() {
+    let root = fixture("gemma3-text");
+    let manifest = CheckpointManifest::discover(&root, &LoadOptions::default()).unwrap();
+    let source =
+        GemmaCheckpointSource::detect(manifest.tensors.keys().map(String::as_str)).unwrap();
+    let contract = graph(&root)
+        .config()
+        .checkpoint_contract(GemmaCheckpointOptions { source })
+        .unwrap();
+    assert_eq!(
+        contract.mappings().range_hazards(),
+        GemmaVariant::Gemma3Text.range_hazards()
+    );
+    let plan = |policy: RangeHazardPolicy| {
+        crate::checkpoint::build_load_plan(
+            &manifest,
+            contract.expected_tensors(),
+            contract.mappings(),
+            &hazard_options(DTypePolicy::Cast(TensorDType::F16), policy),
+        )
+    };
+    let error = plan(RangeHazardPolicy::default()).unwrap_err();
+    assert_gemma3_f16_refusal(&error, planned_parameters(&root), "shared planner");
+    let accepted = plan(RangeHazardPolicy::Accept).unwrap();
+    let mut model = graph(&root);
+    let outcome = execute_local_load_plan(&manifest, &accepted, &mut model).unwrap();
+    assert!(outcome.report.is_strictly_valid());
+    assert_eq!(model.model.embed_tokens.weight.val().dtype(), DType::F16);
+}

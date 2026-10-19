@@ -41,7 +41,8 @@
 //!   [`CheckpointError::AmbiguousLanguageEmbedding`]. A plan that executes a
 //!   dtype the family declares its checkpoints overflow (Gemma 3 in F16) is
 //!   [`CheckpointError::RangeHazard`] unless [`LoadOptions::range_hazards`]
-//!   accepts it ([`RangeHazard`], [`check_range_hazards`]);
+//!   accepts it: the family declares the [`RangeHazard`] on its
+//!   [`MappingPlan`], and [`build_load_plan`] runs [`check_range_hazards`];
 //! - family-specific preconditions: GPT-2 reports a failed layout detection
 //!   as `Namespace` and rejects non-floating storage as `NonFloatParameter`,
 //!   and Qwen3.5 rejects MTP options that disagree with the model's MTP graph

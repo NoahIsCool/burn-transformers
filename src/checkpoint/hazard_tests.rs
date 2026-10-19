@@ -383,6 +383,165 @@ fn planned_dtypes_decide_whatever_policy_chose_them() {
     assert!(!refused(&plan(TensorDType::F32, DTypePolicy::Auto)));
 }
 
+/// The shared planner refuses a plan in a dtype its mapping plan declares, under the caller's policy.
+///
+/// This is the load path every family contract builds on, so a declaration
+/// on the mapping plan is enforced however the planner is reached. The
+/// refusal equals the direct check's, accepting returns the plan the
+/// undeclared mapping plan yields, and strict-validation failures still take
+/// precedence over the hazard.
+#[test]
+fn the_planner_enforces_the_hazards_its_mapping_plan_declares() {
+    let expected = [
+        ExpectedTensor::new("a", [1_u64]),
+        ExpectedTensor::new("b", [1_u64]),
+    ];
+    let undeclared = MappingPlan::identity(&expected);
+    let mut declared = undeclared.clone();
+    declared.declare_range_hazards([F16_OVERFLOW]);
+    assert_eq!(declared.range_hazards(), [F16_OVERFLOW]);
+    assert!(undeclared.range_hazards().is_empty());
+    assert_eq!(declared.operations(), undeclared.operations());
+    let root = tempfile::TempDir::new().unwrap();
+    let manifest = manifest_with(
+        root.path(),
+        &[("a", TensorDType::F32), ("b", TensorDType::F16)],
+    );
+    let options = |dtype_policy: DTypePolicy, range_hazards: RangeHazardPolicy| LoadOptions {
+        dtype_policy,
+        range_hazards,
+        ..LoadOptions::default()
+    };
+    let cast = DTypePolicy::Cast(TensorDType::F16);
+    let reference = build_load_plan(
+        &manifest,
+        &expected,
+        &undeclared,
+        &options(cast, RangeHazardPolicy::Refuse),
+    )
+    .unwrap();
+    for (dtype_policy, parameters, first) in [
+        (cast, 2, "a"),
+        (DTypePolicy::Auto, 1, "b"),
+        (DTypePolicy::Preserve, 1, "b"),
+    ] {
+        let refused = build_load_plan(
+            &manifest,
+            &expected,
+            &declared,
+            &options(dtype_policy, RangeHazardPolicy::default()),
+        )
+        .unwrap_err();
+        let CheckpointError::RangeHazard {
+            hazard,
+            target,
+            parameters: count,
+        } = &refused
+        else {
+            panic!("{dtype_policy:?}: expected a range-hazard refusal, got {refused:?}");
+        };
+        assert_eq!(
+            (*hazard, target.as_str(), *count),
+            (F16_OVERFLOW, first, parameters),
+            "{dtype_policy:?}"
+        );
+    }
+    let direct = check_range_hazards(&reference, &[F16_OVERFLOW], RangeHazardPolicy::Refuse)
+        .unwrap_err()
+        .to_string();
+    let planned = build_load_plan(
+        &manifest,
+        &expected,
+        &declared,
+        &options(cast, RangeHazardPolicy::Refuse),
+    )
+    .unwrap_err()
+    .to_string();
+    assert_eq!(planned, direct);
+    let accepted = build_load_plan(
+        &manifest,
+        &expected,
+        &declared,
+        &options(cast, RangeHazardPolicy::Accept),
+    )
+    .unwrap();
+    assert_eq!(accepted, reference);
+    // Planning away from the declared dtype is not refused.
+    build_load_plan(
+        &manifest,
+        &expected,
+        &declared,
+        &options(
+            DTypePolicy::Cast(TensorDType::F32),
+            RangeHazardPolicy::Refuse,
+        ),
+    )
+    .unwrap();
+    // A strict-validation failure is reported before the hazard is checked.
+    let extra = tempfile::TempDir::new().unwrap();
+    let unexpected = manifest_with(
+        extra.path(),
+        &[
+            ("a", TensorDType::F16),
+            ("b", TensorDType::F16),
+            ("extra", TensorDType::F16),
+        ],
+    );
+    assert!(matches!(
+        build_load_plan(
+            &unexpected,
+            &expected,
+            &declared,
+            &options(cast, RangeHazardPolicy::Refuse),
+        ),
+        Err(CheckpointError::StrictValidation {
+            missing: 0,
+            unexpected: 1,
+            ..
+        })
+    ));
+}
+
+/// Declarations accumulate in order, and the first matching one is the one the planner reports.
+#[test]
+fn declarations_accumulate_in_order() {
+    let bf16 = RangeHazard::new("Other", TensorDType::BF16, "other evidence");
+    let expected = [ExpectedTensor::new("a", [1_u64])];
+    let mut mappings = MappingPlan::identity(&expected);
+    mappings
+        .declare_range_hazards([bf16])
+        .declare_range_hazards([F16_OVERFLOW, bf16]);
+    assert_eq!(mappings.range_hazards(), [bf16, F16_OVERFLOW, bf16]);
+    let root = tempfile::TempDir::new().unwrap();
+    let manifest = manifest_with(root.path(), &[("a", TensorDType::F16)]);
+    let Err(CheckpointError::RangeHazard { hazard, .. }) =
+        build_load_plan(&manifest, &expected, &mappings, &LoadOptions::default())
+    else {
+        panic!("F16 storage under Auto must be refused");
+    };
+    assert_eq!(hazard, F16_OVERFLOW);
+}
+
+/// Serialization writes only the operations, so a deserialized plan declares no hazards.
+///
+/// The serialized format is the one written before plans carried hazards,
+/// and a round trip that drops a family's declarations is visible as an
+/// unequal plan rather than a silent copy.
+#[test]
+fn serialized_mapping_plans_carry_no_hazards() {
+    let expected = [ExpectedTensor::new("a", [1_u64])];
+    let undeclared = MappingPlan::identity(&expected);
+    let mut declared = undeclared.clone();
+    declared.declare_range_hazards([F16_OVERFLOW]);
+    let json = serde_json::to_string(&declared).unwrap();
+    assert_eq!(json, serde_json::to_string(&undeclared).unwrap());
+    assert!(!json.contains("range_hazards"), "{json}");
+    let restored: MappingPlan = serde_json::from_str(&json).unwrap();
+    assert!(restored.range_hazards().is_empty());
+    assert_eq!(restored, undeclared);
+    assert_ne!(restored, declared);
+}
+
 proptest! {
     /// A refusal happens exactly when some parameter has the hazard's dtype, with the right count.
     #[test]

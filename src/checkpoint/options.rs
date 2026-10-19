@@ -174,10 +174,13 @@ pub struct LoadOptions {
     pub index_alias_size_accounting: IndexAliasSizeAccounting,
     /// Whether a load may execute a dtype the family's checkpoints are measured to overflow.
     ///
-    /// Families declare such measurements as [`super::RangeHazard`]s (Gemma 3
-    /// declares F16). The default, [`RangeHazardPolicy::Refuse`], fails
-    /// strict planning with [`super::CheckpointError::RangeHazard`] when a
-    /// planned parameter takes a declared dtype, before any payload is read.
+    /// Families declare such measurements as [`super::RangeHazard`]s on their
+    /// [`super::MappingPlan`] (Gemma 3 declares F16), and the shared planner
+    /// [`super::build_load_plan`] applies this policy to them, so every
+    /// caller planning with the family's mapping plan is covered. The
+    /// default, [`RangeHazardPolicy::Refuse`], fails strict planning with
+    /// [`super::CheckpointError::RangeHazard`] when a planned parameter takes
+    /// a declared dtype, before any payload is read.
     /// [`RangeHazardPolicy::Accept`] is the explicit opt-in that loads and
     /// evaluates the faithful graph, whose logits are then expected to be
     /// non-finite; see its documentation. Absent from serialized options, it
