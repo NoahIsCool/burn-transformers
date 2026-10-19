@@ -800,7 +800,13 @@ earlier row-by-row or per-chunk algorithm, which each test keeps as an oracle.
   steady-state rule; synthetic-campaign tests cover it. Its first campaign
   re-baselines Qwen3.5-0.8B: the head `fa8426e` against the September
   source `c70057e`, both rebuilt with rustc 1.92.0, in 12 rounds (48 clean
-  processes, steady from round 3). It is checked by
+  processes). Review replaced the steady-state rule, which had taken the
+  earliest window whose half-medians agreed within 2.5%, with a monotone,
+  noise-aware rule over whole blocks. Under it the campaign is steady from
+  round 5, not round 3. The reference block names its executable and
+  compiler, a controlled rerun must run that binary, the compiler is part of
+  the series, and cold first token is also reported without the reruns that
+  followed contaminated attempts. It is checked by
   `scripts/tests/test_qwen35_rebaseline_record.py` and
   `tests/acceptance_records.rs`
   ([record](acceptance/measurements/qwen3.5-0.8b-metal-rebaseline-20261018.json)).

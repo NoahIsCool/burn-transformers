@@ -146,13 +146,18 @@ A later source is judged by a campaign of that protocol:
   strict load. A median that changes by more than 5% alerts; one more than 10%
   slower fails only when a controlled rerun, alternating the candidate with
   the reference binary, confirms it against both the recorded value and the
-  reference binary's own median;
+  reference binary's own median. The reference binary is the executable the
+  reference block identifies by its SHA-256, or a build of `fa8426e` from a
+  clean tree with the same rustc, rustup toolchain, features, and profile,
+  and it must reproduce the reference's tokens; the protocol refuses any
+  other binary in that role;
 - reported, never gated: cold first token, as a median and range. It is one
   observation per process and includes lazy kernel and Metal pipeline
   compilation, whose cost also depends on the operating system's shader
   cache;
-- not comparable: a run on another host model or OS build, with other
-  features, or with other tokens. When the reference binary is itself more
+- not comparable: a run on another host model or OS build, built with another
+  compiler (rustc or rustup toolchain), with other features, or with other
+  tokens. When the reference binary is itself more
   than 10% slower than its recorded value, the series has changed, and a new
   reference is again a maintainer decision.
 

@@ -121,9 +121,12 @@ first token as a diagnostic rather than a gate. It measures the head
 [campaign protocol](../../BENCHMARKS.md#qwen35-08b-benchmark-campaign-protocol):
 12 alternating, counterbalanced rounds of the baseline and public benchmarks
 (48 clean processes, 5 attempts contaminated by other CPU work and rerun, and
-an aborted first attempt kept unused), steady from round 3. Its `reference`
-block, the head's steady-state medians, is what future comparisons are
-judged against; it supersedes the September 10 baseline of the
+an aborted first attempt kept unused). It is steady from round 5 under the
+steady-state rule as corrected on October 19; the record's `review_amendment`
+says what changed from its first version, which reported round 3 under the
+original rule, and every measurement file keeps its bytes. Its `reference`
+block, the head's steady-state medians with the executable's identity, is
+what future comparisons are judged against; it supersedes the September 10 baseline of the
 [v0.1 release record](v0_1-release-20260910.json) for that purpose without
 editing it or the September summaries. Every sample's raw repetitions are in
 the record, and the campaign directory holds the reports, logs, host

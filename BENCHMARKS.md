@@ -159,7 +159,10 @@ synthetic campaigns.
 A campaign compares two prebuilt `qwen35_benchmarks` release executables
 with the same artifacts on one host. Both are built with the advertised
 profile's features, `std,metal,tokenizers,chat-templates`, and with the same
-toolchain. A round runs each binary's two benchmarks once, four processes in
+toolchain. The compiler is part of the benchmark series: every report
+records the `rustc -vV` text and the rustup toolchain that built its
+executable, and the script refuses a campaign whose binaries disagree on
+them. A round runs each binary's two benchmarks once, four processes in
 all, and every process runs one test (`BINARY --ignored --exact --nocapture
 --test-threads 1 TEST` under `/usr/bin/time -l`):
 
@@ -214,7 +217,10 @@ already has a host record.
   record are kept under `contaminated` names, and the sample runs again
   after a new cooldown and admission, at most four attempts in all, after
   which the campaign stops. Only the clean attempt of each planned sample
-  enters the statistics, so the balanced design is preserved.
+  enters the statistics, so the balanced design is preserved. A discarded
+  attempt still runs its binary and benchmark, and so grows the shader cache
+  just before its rerun; the cold-first-token diagnostic therefore names
+  those reruns and is repeated without them (see below).
 - **Preconditions.** AC power, both external volumes mounted, the host
   model and OS build of the plan, and the planned executable's SHA-256,
   before and after the process. The heavy-model lock is held for the whole
@@ -249,19 +255,46 @@ Every run must reproduce its cell's cold, natural-loop, and warm prediction
 hashes, and every warm repetition the same predictions; a run with other
 tokens is not a timing sample.
 
-**Steady state** is the earliest window of at least six final rounds in
-which, for every binary, benchmark, and gated metric, the median of the
-window's last `n / 2` rounds is within 2.5% of the median of its first
-`n / 2` rounds (an odd window's middle round is in neither half). 2.5% is
-half the alert threshold, so drift alone cannot raise an alert. The rule
-catches trends, such as the slow first rounds of a binary new to the host,
-and, for a metric observed once per process such as strict load, a median
-not yet stable to within 2.5%; both call for more rounds, while an isolated
-outlying round moves neither half's median. Each gated statistic of a cell
-is the median over the steady-state rounds, kept with its minimum, maximum,
-and every per-round value. Cold first token is reported over the same
-rounds and over all rounds, with its Spearman rank correlation with the
-shader-cache growth and with the round number.
+**Steady state** is assessed over whole blocks, working back from the end of
+the campaign. Candidate windows start at a block boundary (round 1, 5, 9, or
+13) and span at least two blocks. For each candidate, its first block is
+compared with all later rounds, for every binary, benchmark, and gated
+metric:
+
+- the drift is `median(later) / median(block) - 1`;
+- the noise `s` is the later rounds' relative round-to-round noise, the
+  smaller of two robust standard deviations divided by their median: the
+  median absolute deviation over 0.6745, which one outlier cannot inflate,
+  and the median absolute difference between consecutive rounds over
+  `0.6745 * sqrt(2)`, which a trend or a step cannot inflate;
+- the standard error of the log ratio of the two medians is
+  `sqrt(pi / 2) * s * sqrt(1/4 + 1/m)` for `m` later rounds;
+- the block **drifts** when the drift exceeds 2.5% in either direction and
+  its log ratio exceeds three standard errors.
+
+The window starts at the earliest candidate from which no candidate block
+drifts. If the second-to-last block already drifts against the last, there
+is no steady state and the campaign needs more rounds. 2.5% is half the
+alert threshold, so drift alone cannot raise an alert; the three-standard-
+error limit keeps the noise of a metric observed once per process, such as
+strict load, from counting as drift, which would make the window depend on
+which outlying rounds fall where; the backward scan makes the rule
+monotone, so a window is accepted only when every later candidate passes
+too; and windows of whole blocks keep every cell equally often in every
+position. The noise comes from the later rounds alone, which the scan has
+already accepted (it starts with the last block as its reference), so a
+transient block's own spread cannot widen its limit.
+The limit has a price, derived from the formula: three standard errors of a
+block against four later rounds are 2.66 times their noise, so with the
+2% noise of a strict load a drift of about 5% can pass as noise, and a
+single-observation metric's steady-state median is only as stable as its
+noise. Each gated statistic of a cell is the median over the steady-state
+rounds, kept with its minimum, maximum, every per-round value, and that
+noise. Cold first token is reported over the same rounds and over all
+rounds, with its Spearman rank correlation with the shader-cache growth and
+with the round number; the same statistics are repeated without the rounds
+whose sample followed a discarded attempt, and the correlation with growth
+is also given with each attempt's growth counted with its rerun's.
 
 ### Gates and judging
 
@@ -273,18 +306,23 @@ re-baseline is the `reference` block (label `head`) of
   direction;
 - **failure candidate:** a gated median more than 10% slower;
 - **failure:** only after a controlled rerun, a campaign of this protocol
-  that alternates the candidate with the reference binary (the recorded
-  executable, identified by its SHA-256, or a rebuild of its source with the
-  same toolchain and features), confirms it: the candidate's median is more
-  than 10% slower than both the recorded reference value and the reference
-  binary's median in that campaign;
+  that alternates the candidate with the reference binary, confirms it: the
+  candidate's median is more than 10% slower than both the recorded
+  reference value and the reference binary's median in that campaign. The
+  reference block records the binary's identity, and the judge accepts as
+  the reference binary only the executable with that SHA-256 or a build of
+  the same source commit from a clean tree with the same `rustc`, rustup
+  toolchain, features, and profile, and only if it reproduces the
+  reference's tokens; any other label is refused, so pairing a slowed
+  candidate with some other slow binary cannot turn a failure into series
+  drift;
 - **series drift:** when the reference binary is itself more than 10% slower
   than its recorded value, the host or runtime has changed, not the code
   (the situation that led to this re-baseline); re-baselining is then a
   maintainer decision, never automatic;
 - **not comparable:** a candidate with another host model, OS build,
-  feature set, timing protocol, checkpoint, or tokens is not judged against
-  the record;
+  compiler (`rustc` or rustup toolchain), feature set, timing protocol,
+  checkpoint, or tokens is not judged against the record;
 - **cold first token:** the candidate's median and range are reported beside
   the reference's; they never alert or fail.
 
@@ -326,28 +364,48 @@ this protocol it is a different series.
   24.1) were rerun. After the planned 8 rounds no window was steady: nine
   series drifted, among them the September binary's warm metrics, whose
   first two rounds ran up to 14% slow, and the strict loads. One block was
-  added, and rounds 3 to 12 are steady (largest half-median drift 2.1%, the
-  head's strict load in the baseline benchmark).
+  added. Under the steady-state rule above the campaign is steady from
+  round 5 (rounds 5 to 12, two whole blocks, so every cell ran twice in
+  every position). The first block drifts against rounds 5 to 12 in nine
+  series, by 2.9 to 7.8% and 5.4 to 19.6 standard errors; the second block
+  differs from the third by more than 2.5% only in the head's strict load in
+  the baseline benchmark, by +3.4%, which is 0.95 standard errors of those
+  noisy loads. The 8-round campaign is not steady under this rule either:
+  the same nine series drift, by 7.5 to 57.5 standard errors.
+- The record's first version used the original rule, the earliest window of
+  at least six final rounds whose half-medians agree within 2.5%, and
+  reported rounds 3 to 12. Review showed that rule to be ill-conditioned.
+  Only the window from round 3 passed; those from rounds 1, 2, and 4 to 7
+  each failed on a single strict load (-5.6% to +3.4%), so the choice
+  depended on where outlying loads fell. That window also used layouts 3
+  and 4 twice, so each cell ran 2, 3, 3, and 2 (or 3, 2, 2, and 3) times in
+  positions 1 to 4. On October 19 the record was rebuilt from the unchanged
+  evidence under the rule above (its `review_amendment`). The head's medians
+  over rounds 5 to 12 differ from those over rounds 3 to 12 by at most 0.65%
+  (strict load in the baseline benchmark, 0.934 s before).
 
-Steady-state medians over rounds 3 to 12, in seconds unless noted. The head
+Steady-state medians over rounds 5 to 12, in seconds unless noted. The head
 column is the reference for future comparisons; the September 10 values are
 single-run medians on macOS 15.7.9:
 
 | Metric (baseline benchmark unless noted) | Head `fa8426e` | September source `c70057e` | Head / September | September 10 approved |
 | --- | ---: | ---: | ---: | ---: |
-| Strict load, baseline / public benchmark | 0.934 / 0.936 | 0.973 / 0.979 | 0.96 / 0.96 | 1.413 / 1.408 |
-| Prefill at 32 / 128 / 512 tokens (ms) | 48.6 / 61.0 / 161.4 | 64.5 / 148.3 / 530.4 | 0.75 / 0.41 / 0.30 | 75.7 / 178.1 / 615.8 |
-| First-token latency at 32 / 128 / 512 (ms) | 56.5 / 68.9 / 169.6 | 72.4 / 156.2 / 538.4 | 0.78 / 0.44 / 0.32 | 84.2 / 187.6 / 623.6 |
-| Model-only decode, 128 steps, at 32 / 128 / 512 | 3.560 / 3.547 / 3.542 | 4.053 / 4.050 / 4.039 | 0.88 / 0.88 / 0.88 | 4.758 / 4.747 / 4.774 |
-| Decode with greedy readback at 32 / 128 / 512 | 4.572 / 4.560 / 4.557 | 5.068 / 5.064 / 5.054 | 0.90 / 0.90 / 0.90 | 5.815 / 5.794 / 5.799 |
-| Natural loop, model API / public coordinator | 1.110 / 1.414 | 1.233 / 1.578 | 0.90 / 0.90 | 1.421 / 1.751 |
-| Cold first token (diagnostic), baseline / public: median | 0.155 / 0.161 | 0.260 / 0.284 | 0.59 / 0.57 | 0.168 / 0.366 |
-| Cold first token (diagnostic), baseline / public: range | 0.120-0.227 / 0.118-0.366 | 0.190-0.403 / 0.248-0.443 | | |
+| Strict load, baseline / public benchmark | 0.940 / 0.934 | 0.977 / 0.979 | 0.96 / 0.95 | 1.413 / 1.408 |
+| Prefill at 32 / 128 / 512 tokens (ms) | 48.6 / 61.0 / 161.3 | 64.5 / 148.9 / 531.2 | 0.75 / 0.41 / 0.30 | 75.7 / 178.1 / 615.8 |
+| First-token latency at 32 / 128 / 512 (ms) | 56.5 / 69.0 / 169.6 | 72.4 / 156.7 / 539.3 | 0.78 / 0.44 / 0.31 | 84.2 / 187.6 / 623.6 |
+| Model-only decode, 128 steps, at 32 / 128 / 512 | 3.557 / 3.545 / 3.537 | 4.057 / 4.053 / 4.043 | 0.88 / 0.87 / 0.87 | 4.758 / 4.747 / 4.774 |
+| Decode with greedy readback at 32 / 128 / 512 | 4.569 / 4.558 / 4.551 | 5.071 / 5.066 / 5.059 | 0.90 / 0.90 / 0.90 | 5.815 / 5.794 / 5.799 |
+| Natural loop, model API / public coordinator | 1.110 / 1.413 | 1.232 / 1.577 | 0.90 / 0.90 | 1.421 / 1.751 |
+| Cold first token (diagnostic), baseline / public: median | 0.131 / 0.159 | 0.243 / 0.282 | 0.54 / 0.56 | 0.168 / 0.366 |
+| The same without rounds after discarded attempts | 0.155 / 0.159 | 0.243 / 0.282 | 0.64 / 0.56 | |
+| Cold first token (diagnostic), baseline / public: range | 0.120-0.227 / 0.118-0.241 | 0.190-0.361 / 0.248-0.308 | | |
 
-Measured: the head's model-only decode is 36.0 to 36.1 tokens/s. Every gated
+Measured: the head's model-only decode is 36.0 to 36.2 tokens/s. Every gated
 median of both binaries is below its September 10 value, the head's by 19 to
 74% and the September source's by 10 to 31%. On this host the head takes
-0.30 to 0.96 of the September source's time on every gated metric. In every
+0.30 to 0.96 of the September source's time on every gated metric. The gated
+series' round-to-round noise over rounds 5 to 12 is 0.10 to 2.27%, the
+largest being the head's strict load in the baseline benchmark. In every
 (binary, benchmark) cell the cold first token correlates with the Metal
 shader-cache growth of the same process (Spearman +0.70 to +0.87) and falls
 with the round number (-0.63 to -0.84). Over all 12 rounds its maximum is
@@ -356,16 +414,36 @@ with the round number (-0.63 to -0.84). Over all 12 rounds its maximum is
 hash equals the September 10 reports, and every run passed the harness's
 official-reference check before timing.
 
+Measured, discarded attempts: each of the five contaminated attempts ran the
+same binary and benchmark as the clean rerun after it and grew the shader
+cache by 82,368 to 724,816 bytes before that rerun. They preceded the
+September source's baseline benchmark in round 1 and the head's in rounds 2,
+9, and 10 (two attempts in round 10). The head's reruns read 0.149, 0.127,
+and 0.126 s, against 0.362, 0.209, 0.177, and 0.208 s for their attempts.
+Without its reruns the head's baseline-benchmark cell has a steady-state
+median of 0.155 s over 6 rounds instead of 0.131 s over 8, and its
+correlations become +0.71 with cache growth and -0.57 with the round number
+(+0.74 and -0.63 with them). The September cell's steady-state statistics
+are unchanged, since its rerun is in round 1. Counting each attempt's growth
+with its rerun's lowers the head's baseline-cell correlation with growth to
++0.15. The campaign's first sample also followed the aborted attempt's
+sample of the same binary and benchmark, which grew the cache by 295,864
+bytes.
+
 Inferred, not measured: the cold first token on this host is dominated by
 Metal pipeline compilation, which shrinks as the per-user shader cache
-accumulates each binary's pipelines. The September source's own cold first
-token reads 55% above its September 10 value in the baseline benchmark (22%
-below it in the public one) while its warm and natural-loop medians read 10
-to 17% below theirs, which fits the operating-system change rather than a
-source regression; the cache was neither cleared nor controlled, so the
-campaign does not attribute the cold time causally. The historical
-approximately 36-to-27 tokens/s slowdown is not explained by this record and
-remains a documented limitation.
+accumulates each binary's pipelines. A rerun after a discarded attempt
+starts with most of its pipelines already compiled, so the reruns pull the
+head's baseline-cell cold statistics down and strengthen its round trend;
+the correlation with each process's own cache growth survives without them.
+The September source's own steady-state cold first token reads 45% above
+its September 10 value in the baseline benchmark (23% below it in the public
+one) while its warm and natural-loop medians read 10 to 17% below theirs,
+which fits the operating-system change rather than a source regression; the
+cache was neither cleared nor controlled, so the campaign does not
+attribute the cold time causally. The historical approximately 36-to-27
+tokens/s slowdown is not explained by this record and remains a documented
+limitation.
 
 ## Packed-weight protocol
 

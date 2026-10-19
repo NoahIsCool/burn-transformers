@@ -1008,8 +1008,11 @@ reports.
   1- and 5-minute loads of at most 4.0 and 6.0; a sample whose in-run load
   exceeds 6.0 is rerun. Load and Metal shader-cache growth are recorded
   around every process. A campaign takes at least 8 rounds and must reach a
-  steady state (half-medians within 2.5%). `scripts/qwen35_benchmark_protocol.py`
-  implements it, with synthetic-campaign tests.
+  steady state: since the review amendment below, a window of whole blocks
+  in which no block's gated medians differ from the later rounds' by more
+  than 2.5% and three standard errors of their noise.
+  `scripts/qwen35_benchmark_protocol.py` implements it, with
+  synthetic-campaign tests.
 - Binaries: the head `fa8426e`, built from its worktree, and the September
   source `c70057e` (the September 10 series' `src` tree), rebuilt in a
   temporary detached worktree that was then removed. Both were built with
@@ -1021,24 +1024,31 @@ reports.
   alone, ran one contaminated sample and was stopped; it is kept and unused.
   The campaign then ran 48 clean processes in 12 rounds. Five attempts
   contaminated by other CPU work (in-run loads 6.1 to 24.1) were rerun. The
-  planned 8 rounds were not steady, so one block was added, and rounds 3 to
-  12 are steady.
-- Reference (head, steady-state medians): model-only decode of 128 steps
-  `3.560`, `3.547`, and `3.542` s at 32, 128, and 512 source tokens; prefill
-  `48.6`, `61.0`, and `161.4` ms; natural loops `1.110` s (model API) and
-  `1.414` s (public coordinator); strict load `0.934` and `0.936` s. On the
+  planned 8 rounds were not steady, so one block was added. Under the
+  corrected rule rounds 5 to 12 are steady, two whole blocks in which every
+  cell ran twice in every position; the record's first version, under the
+  original rule, reported rounds 3 to 12.
+- Reference (head, medians over rounds 5 to 12): model-only decode of 128
+  steps `3.557`, `3.545`, and `3.537` s at 32, 128, and 512 source tokens;
+  prefill `48.6`, `61.0`, and `161.3` ms; natural loops `1.110` s (model API)
+  and `1.413` s (public coordinator); strict load `0.940` and `0.934` s. On the
   same host the head takes 0.30 to 0.96 of the September source's time on
   every gated metric. Every gated median of both binaries is below its
   September 10 value, and every token hash is unchanged. These medians, not
   the September 10 summaries, are what later sources are judged against, at
   the unchanged 5% alert and confirmed 10% failure thresholds.
-- Cold first token (diagnostic, not gated): head median `0.155` s (range
-  `0.120` to `0.227` s) in the baseline benchmark and `0.161` s (`0.118` to
-  `0.366` s) in the public one; September source `0.260` s and `0.284` s.
+- Cold first token (diagnostic, not gated): head median `0.131` s (range
+  `0.120` to `0.227` s) in the baseline benchmark and `0.159` s (`0.118` to
+  `0.241` s) in the public one; September source `0.243` s and `0.282` s.
   In every cell it correlates with the shader-cache growth of the same
-  process (Spearman +0.70 to +0.87) and falls over the rounds. The record
-  keeps the measured correlations apart from the inferred explanation
-  (Metal pipeline compilation against a growing shader cache).
+  process (Spearman +0.70 to +0.87) and falls over the rounds. The five
+  contaminated attempts ran the same binary and benchmark as their reruns
+  and grew the shader cache by 82,368 to 724,816 bytes just before them, so
+  those reruns started warmer. The head's baseline cell has two such reruns
+  in rounds 5 to 12; without them its median is `0.155` s. The record
+  keeps the measured correlations, with and without those rounds, apart
+  from the inferred explanation (Metal pipeline compilation against a
+  growing shader cache).
 - Unchanged: the v0.1 release record, the September 10 summaries, and the
   earlier rounds' records keep their bytes (`tests/acceptance_records.rs`
   pins the release record's digest), the support claims, and the documented
@@ -1057,6 +1067,49 @@ reports.
   authored items); and the 632 Python tests (14 opt-in native fixtures
   skipped). Not run: `check_release.py --gate source`, coverage, and the
   Metal checkpoint gates, which no change here reaches.
+
+### Re-baseline review amendment (October 19)
+
+The PR #1 review of the re-baseline found five faults, each verified against
+the committed campaign before any change. The record was rebuilt from the
+unchanged evidence, and its `review_amendment` block says what changed.
+No benchmark ran again and no support claim changed.
+
+- Steady state: the original rule (the earliest window of at least six
+  final rounds whose half-medians agree within 2.5%) was ill-conditioned.
+  Only the window from round 3 passed; those from rounds 1, 2, and 4 to 7
+  each failed on a single strict load, and that window was not whole
+  Latin-square blocks (per-position counts 2/3/3/2 or 3/2/2/3). The
+  [corrected rule](BENCHMARKS.md#metrics-steady-state-and-statistics) scans
+  whole blocks back from the end and requires a drift to exceed both 2.5% and
+  three standard errors of the later rounds' robust noise. The campaign is
+  steady from round 5, and the 8-round campaign is still not steady. The
+  head's reference medians move by at most 0.65%. Synthetic tests cover a
+  later block that drifts after an earlier window passed, noise against
+  shift, outliers and trends among the later rounds, and seeded random
+  campaigns.
+- Reference binary: the reference and control blocks now record their
+  executable's SHA-256, source commit, tree status, rustc, rustup toolchain,
+  features, and profile, and `tests/acceptance_records.rs` requires them.
+  A controlled rerun must run that executable or a clean build of that
+  commit with the same compiler, features, and profile that reproduces the
+  reference tokens; any other label is refused, with tests for each
+  mismatch.
+- Compiler: rustc and the rustup toolchain are part of the series identity,
+  so a campaign that mixes compilers is refused and a candidate built with
+  another compiler is not comparable.
+- Cold first token: contaminated attempts warmed the shader cache before
+  their reruns. Each cell now names those reruns and their attempts' growth
+  and repeats its statistics and correlations without them.
+- Evidence: every measurement file of the record's first version keeps its
+  bytes (the record test pins their combined digest). `analysis/analysis.log`
+  is kept as the original rule's analysis, and `analysis/analysis-20261019.log`
+  is the corrected one.
+- Process: the earlier commit `4fd7942` was staged with `git commit -a`,
+  which AGENTS.md forbids. It contains only this file's validation note, so
+  nothing unrelated was swept in. The commit is kept as it is, because
+  rewriting it would change no content, and this round stages explicit
+  paths.
 
 Record each replay as a new measurement with its exact source identity; do not
 overwrite the historical records below.
