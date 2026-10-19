@@ -122,6 +122,7 @@ fn a_declaration_exposes_its_fields_and_matches_only_its_dtype() {
     assert!(F16_OVERFLOW.evidence().starts_with("measured: block 3"));
     // A new declaration certifies no packed path; the builder sets only that flag.
     assert!(!F16_OVERFLOW.packed_path_certified());
+    /// The same declaration with a certified packed path, built in a constant because the builder is a `const fn`.
     const CERTIFIED: RangeHazard = F16_OVERFLOW.with_certified_packed_path();
     assert!(CERTIFIED.packed_path_certified());
     assert_ne!(CERTIFIED, F16_OVERFLOW);
