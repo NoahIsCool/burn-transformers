@@ -12,7 +12,9 @@ cargo run --release --locked --example activation_workbench
 
 The fragments below assume an initialized model, an input, and a backend `B`;
 the workbench supplies the complete setup. For a trained circuit, read the
-[grokking experiment](examples/mechanistic/grokking.md).
+[grokking experiment](examples/mechanistic/grokking.md). In your own project,
+depend on the package `burn-transformers`; its library is imported as
+`transformers`, as below ([adding the dependency](README.md#adding-the-dependency)).
 
 <!-- Maintainers: `python3 scripts/check_release.py --gate guides` compiles
 every Rust block in this guide. A fragment names the hidden context it compiles
@@ -739,6 +741,39 @@ full-sequence execution. Recurrent architectures keep their explicit
 capability restrictions. Inside a Nemotron-H transaction, multi-token steps
 follow token-by-token decode semantics, which can differ from a multi-token
 prefill outside one where the reference clamps prefill time steps.
+
+Half-precision runs follow the references' numerics, including their range.
+gemma-3-4b-it (and its 12B and 27B siblings) overflows F16 in Transformers
+too: the residual addition after block 5's MLP at the BOS position exceeds
+F16's `65,504`, and every logit after it is NaN. The crate therefore refuses
+to load Gemma 3 in F16 by default (`CheckpointError::RangeHazard`); use BF16
+or F32 instead. An experiment that needs the faithful F16 graph, to study the
+overflow, run a truncated stack whose blocks stay in range (gemma-3-4b-it's
+blocks 0 to 4 are finite), or test an intervention that keeps activations
+finite, opts in explicitly:
+
+```rust
+use transformers::checkpoint::{DTypePolicy, LoadOptions, RangeHazardPolicy, TensorDType};
+
+let options = transformers::AutoLoadOptions {
+    checkpoint: LoadOptions {
+        dtype_policy: DTypePolicy::Cast(TensorDType::F16),
+        range_hazards: RangeHazardPolicy::Accept,
+        ..LoadOptions::default()
+    },
+    ..transformers::AutoLoadOptions::default()
+};
+assert_eq!(options.checkpoint.range_hazards, RangeHazardPolicy::Accept);
+```
+
+Pass these options to `AutoCausalLm::load_local`. The loaded graph is the
+reference's, so expect non-finite logits from the full stack. No
+hook point exposes the residual between a block's attention and MLP
+additions, which itself exceeds F16's range in 28 of gemma-3-4b-it's 34
+blocks, so a clamped F16 variant cannot be built from hooks alone; the
+T5-style clamp, applied at the points that do exist, gives finite logits but
+moves positions after BOS by up to `19.7` (official BF16: `0.75`), a
+different model.
 
 The v0.2 interfaces passed their [recorded validation](acceptance/measurements/v0_2-interface-validation-20260910-retry/README.md).
 The v0.3 [training contract](TRAINING.md) identifies gradient, mode, record,

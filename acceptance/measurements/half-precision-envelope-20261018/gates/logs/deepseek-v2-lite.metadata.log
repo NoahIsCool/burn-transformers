@@ -1,0 +1,33 @@
+== source f9f78b5fc7cca9d1a8afaf29f8f9df04fe7c3008 (git archive export /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src)
+== binary /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/deepseek_v2_artifacts-e5795b3d2098c1d7 sha256 c3264271cb894b29b30e907544f7ee3d2c733328adcabfe895d3ec3ca3b143b5 build B
+== host validates_pinned_deepseek_v2_lite_config_headers_plan_memory_and_tokenizer
+== env TRANSFORMERS_DEEPSEEK_V2_DIR=/Volumes/bag of holding/models/deepseek-ai/DeepSeek-V2-Lite-604d5664dddd88a0433dbae533b7fe9472482de0
+== cwd /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/deepseek_v2_artifacts-e5795b3d2098c1d7 --ignored --exact --nocapture --test-threads 1 validates_pinned_deepseek_v2_lite_config_headers_plan_memory_and_tokenizer
+== start 2026-10-18T01:47:29+00:00 load 3.72 5.04 6.57 free 83%
+
+running 1 test
+test validates_pinned_deepseek_v2_lite_config_headers_plan_memory_and_tokenizer ... DeepSeek-V2-Lite header gate: repository=deepseek-ai/DeepSeek-V2-Lite, revision=604d5664dddd88a0433dbae533b7fe9472482de0, shards=4, tensors=5291, tensor_bytes=31412968448, header_inventory_sha256=08f26cb4a2c6c5899e65ba3976a45a537b8811e312319f4945aa3ac95fe33e60, f16_plan_sha256=af3bb522e5a1d498cf1979978ab553d3ce53db088e74447997b33a914466ab2b, f16_target_bytes=31412968448, peak_host_staging_bytes=9014317808, prompt_ids=[17464, 1843, 11, 25890, 39671, 13], elapsed_seconds=0.148
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.15s
+
+        0.56 real         0.13 user         0.02 sys
+            81920000  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                5501  page reclaims
+                   2  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                  18  voluntary context switches
+                 108  involuntary context switches
+          1663287137  instructions retired
+           505458736  cycles elapsed
+            74121792  peak memory footprint
+== exit=0 wall=1.0s min_free_pct=90 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0

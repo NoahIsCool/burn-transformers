@@ -1,8 +1,9 @@
 # Release checklist
 
-This checklist prepares a source release of the standalone `transformers`
-crate. Completing it does not publish to a registry, create a Git tag, or make
-an unsupported checkpoint claim.
+This checklist prepares a source release of the standalone `burn-transformers`
+package, whose library is imported as `transformers`. Completing it does not
+publish to a registry, create a Git tag, or make an unsupported checkpoint
+claim.
 
 ## 1. Establish the release scope
 
@@ -71,6 +72,10 @@ cargo +stable package --manifest-path Cargo.toml --locked --list
 cargo +stable package --manifest-path Cargo.toml --locked
 ```
 
+Cargo names the archive after the package, not the library:
+`target/package/burn-transformers-0.1.0.crate` for version 0.1.0, extracted
+for verification into `target/package/burn-transformers-0.1.0/`.
+
 The list may contain source, examples, compact test fixtures, reference scripts,
 documentation, and the published acceptance records. It must not contain
 `models/`, `target/`, SafeTensors or PyTorch weights, Burnpack sidecars,
@@ -97,18 +102,26 @@ the `package.name` in `Cargo.toml` is unclaimed on crates.io or already owned
 by the publishing account, and record the answer with the release evidence:
 
 ```text
-curl -sS -A "<project> release check" https://crates.io/api/v1/crates/<package-name>/owners
+curl -sS -A "burn-transformers release check" https://crates.io/api/v1/crates/burn-transformers/owners
 ```
 
 A 404 response means the name is unclaimed; otherwise the publishing account
-must appear among the returned owners. (`cargo owner --list <package-name>`
+must appear among the returned owners. (`cargo owner --list burn-transformers`
 answers the same question but needs `cargo login` first.) The name
 `transformers` is registered to another publisher (sole owner `ljt019` when
-checked on 2026-10-16), so this crate cannot be uploaded under it without that
-owner's consent. A rename keeps the library's import path
-by setting `[lib] name = "transformers"` beside the new `[package] name`;
-path dependencies on the crate (the README example, `fuzz/Cargo.toml`) then
-also need `package = "<package-name>"`.
+checked on 2026-10-16), so the package was renamed `burn-transformers`, after
+the [GitHub repository](https://github.com/NoahIsCool/burn-transformers),
+before any registry release. `[lib] name = "transformers"` beside the
+`[package] name` keeps the library's import path, so doctests, examples,
+integration tests, and dependents' `use transformers::…` are unchanged. Only
+manifests that name the package change: a dependency is
+`burn-transformers = { git = "…", … }` (the [README
+example](README.md#adding-the-dependency)), or keeps the key with
+`transformers = { package = "burn-transformers", … }` as `fuzz/Cargo.toml`
+does, and a `cargo -p` selector names `burn-transformers`. That name was
+unclaimed when checked on 2026-10-18 (the owners query above returned 404,
+"crate `burn-transformers` does not exist"); repeat the check immediately
+before the first publish, since anyone may claim it in the meantime.
 
 Package from the clean, committed transformer source tree. Preserve unrelated
 changes outside this standalone crate. Record the commit ID and archive checksum

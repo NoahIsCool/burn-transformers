@@ -743,6 +743,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "burn-transformers"
+version = "0.1.0"
+dependencies = [
+ "burn",
+ "burn-flex",
+ "burn-store",
+ "minijinja",
+ "safetensors 0.7.0",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.20",
+ "tokenizers",
+]
+
+[[package]]
 name = "burn-vision"
 version = "0.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5282,32 +5298,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "transformers"
-version = "0.1.0"
-dependencies = [
- "burn",
- "burn-flex",
- "burn-store",
- "minijinja",
- "safetensors 0.7.0",
- "serde",
- "serde_json",
- "sha2",
- "thiserror 2.0.20",
- "tokenizers",
-]
-
-[[package]]
 name = "transformers-fuzz"
 version = "0.0.0"
 dependencies = [
  "burn",
+ "burn-transformers",
  "libfuzzer-sys",
  "safetensors 0.7.0",
  "serde",
  "serde_json",
  "tempfile",
- "transformers",
 ]
 
 [[package]]

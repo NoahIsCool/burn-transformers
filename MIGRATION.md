@@ -15,6 +15,35 @@ every public 0.1.0 path, and each fix below compiles against the current
 source. APIs added after 0.1.0 that changed during this cycle are listed
 separately under [unreleased sources](#if-you-built-on-unreleased-sources).
 
+### Dependency
+
+The Cargo package is renamed from `transformers` to `burn-transformers`,
+because the crates.io name `transformers` belongs to another publisher. The
+library keeps the name `transformers` (`[lib] name = "transformers"`), so no
+`use transformers::…` path changes; only manifests and Cargo commands that
+name the package do. Change a 0.1.0 dependency on this repository even where
+Cargo still accepts it:
+
+- A path dependency, `transformers = { path = "…" }`, fails: Cargo reads only
+  the manifest at that path and reports
+  ``no matching package named `transformers` found``.
+- A git dependency, `transformers = { git = "…" }`, is not rejected, because
+  the historical acceptance snapshots
+  `acceptance/measurements/v0_3-*/executed-source/` keep that name and Cargo
+  searches every manifest in the checkout, and the path dependencies those
+  manifests name, for the package. On the machine that recorded the
+  acceptance harnesses, their absolute path dependencies can lead Cargo to
+  another checkout, which it builds however stale, with only a
+  `skipping duplicate package` warning. Elsewhere it picks a snapshot, which
+  has no library target, so `use transformers::…` fails as an unresolved
+  import.
+
+| If your project | Change it to |
+| --- | --- |
+| Depends on `transformers = { path = "…" }` or `transformers = { git = "…" }` | Rename the key, keeping the other options: `burn-transformers = { path = "…" }` or `burn-transformers = { git = "…" }`. To keep the key, add the package instead: `transformers = { package = "burn-transformers", path = "…" }`, or the same with `git = "…"`. |
+| Runs `cargo … -p transformers` or `--package transformers` | Use `-p burn-transformers`. |
+| Looks for the archive `transformers-VERSION.crate` | Cargo now writes `burn-transformers-VERSION.crate`. |
+
 ### Compilation
 
 | If your code | Change it to |
@@ -29,6 +58,7 @@ separately under [unreleased sources](#if-you-built-on-unreleased-sources).
 | Reads `hidden_size`/`intermediate_size` of `nemotron_h::model::NemotronHDense` | It is an alias of `feed_forward::DenseFeedForward`; read the projection shapes. |
 | Names `DeepseekV2MoeRecord`, `NemotronHDenseRecord`, `NemotronMamba2Record`, or `NemotronGroupedGatedRmsNormRecord` (or their `…Item` types) | Use `<DeepseekV2Moe<B> as Module<B>>::Record`, `feed_forward::DenseFeedForwardRecord`, `mamba2::Mamba2Record`, or `mamba2::GatedGroupRmsNormRecord`. |
 | Builds `GenerationConfig`, `ChatTemplateOptions`, `SpecialTokens`, `QuantizedCheckpointOptions`, or `RopeParameters` with exhaustive literals | Add `..Default::default()`. |
+| Builds `checkpoint::LoadOptions` with an exhaustive literal | Add `range_hazards: RangeHazardPolicy::Refuse` (the default) or `..LoadOptions::default()`. Serialized options without the field still deserialize, with the default. |
 | Builds `ChatMessage`, `SparseMoeConfig`, `GroupedQueryAttentionConfig`, or `GatedDeltaNetConfig` with exhaustive literals | Start from `ChatMessage::new(role, content)`, `SparseMoeConfig::new`, `GroupedQueryAttentionConfig::new`, or `GatedDeltaNetConfig::new` and assign the fields you change. |
 | Builds `MlaSpec`, `MixtureOfExpertsSpec`, `Seq2SeqSpec`, or `DecoderSpec` with exhaustive literals (they have no `Default`) | Add the new fields with their serialized defaults: `MlaSpec` `score_scale: ScoreScale::Auto, connectivity: AttentionConnectivity::default()`; `MixtureOfExpertsSpec` `routing: RoutingPolicy::default(), shared_expert_gate: false, expert_bias: false`; `Seq2SeqSpec` `cross_attention_options: AttentionOptions::default()`; `DecoderSpec` `embedding_scale: None, final_logit_softcap: None`. Serialized JSON is unchanged: absent fields take these defaults, and `None` is not written. |
 | Builds `NemotronHConfig` with an exhaustive literal | Add `attention_window: None` or use `..Default::default()`. |
@@ -43,6 +73,7 @@ separately under [unreleased sources](#if-you-built-on-unreleased-sources).
 | What changed | What to do |
 | --- | --- |
 | Presence and frequency penalties count only generated tokens | Set `additive_penalty_scope: PenaltyScope::PromptAndGenerated` to keep counting the prompt. |
+| Loading a Gemma 3 checkpoint (`gemma3` or `gemma3_text`) in F16, by `DTypePolicy::Cast(TensorDType::F16)` or by keeping F16 storage under `DTypePolicy::Auto`, fails before any weight is read with `CheckpointError::RangeHazard` (`Error::CheckpointPlan` from `AutoCausalLm::load_local`, `GemmaCheckpointLoadError::Checkpoint` from `GemmaForCausalLm::load_checkpoint`); it used to load and return non-finite logits, because these checkpoints overflow F16 in Transformers too | Load in F32 (`DTypePolicy::Cast(TensorDType::F32)`), or in BF16 on a backend that can store it (not Metal on Burn 0.21). To keep the old behavior for experiments, set `LoadOptions::range_hazards` to `RangeHazardPolicy::Accept`; the logits are then expected to be non-finite, as before. Gemma 2 and other families are unaffected. |
 | Greedy decoding ignores temperature, top-k, top-p, and min-p; its log probabilities come from the untruncated distribution | Compare greedy log probabilities against Transformers' `normalize_logits=True`. |
 | F16/BF16 logits are processed in F32 and selected log probabilities are F32 | Expect `DType::F32` log probabilities from half-precision models. |
 | Top-k keeps every token tied with the k-th score | Seeded samples can differ only where boundary logits tie. |
@@ -160,8 +191,9 @@ python3 scripts/check_release.py --gate source --offline
 
 The manifest, registry dependencies, nested fuzz package, and coverage helper
 package are already standalone. Consumer path dependencies must point at this
-checkout, for example `../transformers` from a sibling project. HMM itself has
-no dependency on this crate.
+checkout, for example `../transformers` from a sibling project, and now name
+the package `burn-transformers` ([Dependency](#dependency)). HMM itself has no
+dependency on this crate.
 
 ### Historical reproduction
 

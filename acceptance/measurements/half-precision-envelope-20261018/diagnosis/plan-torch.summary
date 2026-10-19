@@ -1,0 +1,6 @@
+2026-10-18T03:29:00+00:00 lock acquired
+torch-float32-cpu-eager.log: == exit=0 wall=9.2s end=2026-10-18T03:29:09+00:00 load_end 3.49 min_free_pct=90 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+torch-float16-cpu-eager.log: == exit=0 wall=13.3s end=2026-10-18T03:29:23+00:00 load_end 3.10 min_free_pct=90 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+torch-float16-cpu-sdpa.log: == exit=0 wall=12.2s end=2026-10-18T03:29:35+00:00 load_end 2.71 min_free_pct=90 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+torch-float16-mps-eager.log: == exit=0 wall=14.3s end=2026-10-18T03:29:49+00:00 load_end 2.62 min_free_pct=74 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+2026-10-18T03:29:49+00:00 lock released

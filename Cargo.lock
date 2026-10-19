@@ -947,6 +947,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "burn-transformers"
+version = "0.1.0"
+dependencies = [
+ "burn",
+ "burn-flex",
+ "burn-std",
+ "burn-store",
+ "minijinja",
+ "proptest",
+ "safetensors 0.7.0",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokenizers",
+ "tracing",
+]
+
+[[package]]
 name = "burn-vision"
 version = "0.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5882,26 +5902,6 @@ dependencies = [
  "tracing",
  "tracing-core",
  "tracing-log",
-]
-
-[[package]]
-name = "transformers"
-version = "0.1.0"
-dependencies = [
- "burn",
- "burn-flex",
- "burn-std",
- "burn-store",
- "minijinja",
- "proptest",
- "safetensors 0.7.0",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror 2.0.20",
- "tokenizers",
- "tracing",
 ]
 
 [[package]]

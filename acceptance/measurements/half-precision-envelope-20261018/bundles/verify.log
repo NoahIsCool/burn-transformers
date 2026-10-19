@@ -1,0 +1,520 @@
+== SmolLM-135M: truth SmolLM-135M-1d461723 sha256 3d3235dc28250bf45284bcf16cb8525db6b1f800f7ec700286909e4afea05010
+ok   SmolLM-135M-1d461723-bf16-cpu-eager-7a50e44: provenance bfloat16/cpu/eager script a4ed0db4
+ok   SmolLM-135M-1d461723-bf16-cpu-eager-7a50e44: token IDs equal the truth's
+ok   SmolLM-135M-1d461723-bf16-cpu-eager-7a50e44: decode tokens_source is the truth
+ok   SmolLM-135M-1d461723-bf16-cpu-eager-7a50e44: decode feeds the truth's tokens
+ok   SmolLM-135M-1d461723-bf16-cpu-eager-7a50e44: prompt_decode present=True
+     SmolLM-135M-1d461723-bf16-cpu-eager-7a50e44: finite=True greedy=32 decode max gap=0.0
+ok   SmolLM-135M-1d461723-bf16-cpu-eager-7a50e44: prompt logits byte-identical to round 2 SmolLM-135M-1d461723-bf16-cpu-eager
+ok   SmolLM-135M-1d461723-bf16-cpu-eager-7a50e44: greedy steps identical to round 2
+ok   SmolLM-135M-1d461723-bf16-cpu-eager-7a50e44: decode-cached byte-identical to round 2
+ok   SmolLM-135M-1d461723-bf16-cpu-eager-7a50e44: decode-stateless byte-identical to round 2
+ok   SmolLM-135M-1d461723-bf16-cpu-eager-7a50e44: every logits file matches its recorded digest
+ok   SmolLM-135M-1d461723-bf16-cpu-sdpa-7a50e44: provenance bfloat16/cpu/sdpa script a4ed0db4
+ok   SmolLM-135M-1d461723-bf16-cpu-sdpa-7a50e44: token IDs equal the truth's
+ok   SmolLM-135M-1d461723-bf16-cpu-sdpa-7a50e44: decode tokens_source is the truth
+ok   SmolLM-135M-1d461723-bf16-cpu-sdpa-7a50e44: decode feeds the truth's tokens
+ok   SmolLM-135M-1d461723-bf16-cpu-sdpa-7a50e44: prompt_decode present=True
+     SmolLM-135M-1d461723-bf16-cpu-sdpa-7a50e44: finite=True greedy=32 decode max gap=0.5625
+ok   SmolLM-135M-1d461723-bf16-cpu-sdpa-7a50e44: prompt logits byte-identical to round 2 SmolLM-135M-1d461723-bf16-cpu-sdpa
+ok   SmolLM-135M-1d461723-bf16-cpu-sdpa-7a50e44: greedy steps identical to round 2
+ok   SmolLM-135M-1d461723-bf16-cpu-sdpa-7a50e44: decode-cached byte-identical to round 2
+ok   SmolLM-135M-1d461723-bf16-cpu-sdpa-7a50e44: decode-stateless byte-identical to round 2
+ok   SmolLM-135M-1d461723-bf16-cpu-sdpa-7a50e44: every logits file matches its recorded digest
+ok   SmolLM-135M-1d461723-bf16-mps-eager-7a50e44: provenance bfloat16/mps/eager script a4ed0db4
+ok   SmolLM-135M-1d461723-bf16-mps-eager-7a50e44: token IDs equal the truth's
+ok   SmolLM-135M-1d461723-bf16-mps-eager-7a50e44: decode tokens_source is the truth
+ok   SmolLM-135M-1d461723-bf16-mps-eager-7a50e44: decode feeds the truth's tokens
+ok   SmolLM-135M-1d461723-bf16-mps-eager-7a50e44: prompt_decode present=True
+     SmolLM-135M-1d461723-bf16-mps-eager-7a50e44: finite=True greedy=32 decode max gap=0.5625
+ok   SmolLM-135M-1d461723-bf16-mps-eager-7a50e44: prompt logits byte-identical to round 2 SmolLM-135M-1d461723-bf16-mps-eager
+ok   SmolLM-135M-1d461723-bf16-mps-eager-7a50e44: greedy steps identical to round 2
+ok   SmolLM-135M-1d461723-bf16-mps-eager-7a50e44: decode-cached byte-identical to round 2
+ok   SmolLM-135M-1d461723-bf16-mps-eager-7a50e44: decode-stateless byte-identical to round 2
+ok   SmolLM-135M-1d461723-bf16-mps-eager-7a50e44: every logits file matches its recorded digest
+ok   SmolLM-135M-1d461723-bf16-mps-sdpa-7a50e44: provenance bfloat16/mps/sdpa script a4ed0db4
+ok   SmolLM-135M-1d461723-bf16-mps-sdpa-7a50e44: token IDs equal the truth's
+ok   SmolLM-135M-1d461723-bf16-mps-sdpa-7a50e44: decode tokens_source is the truth
+ok   SmolLM-135M-1d461723-bf16-mps-sdpa-7a50e44: decode feeds the truth's tokens
+ok   SmolLM-135M-1d461723-bf16-mps-sdpa-7a50e44: prompt_decode present=True
+     SmolLM-135M-1d461723-bf16-mps-sdpa-7a50e44: finite=True greedy=32 decode max gap=0.494140625
+ok   SmolLM-135M-1d461723-bf16-mps-sdpa-7a50e44: prompt logits byte-identical to round 2 SmolLM-135M-1d461723-bf16-mps-sdpa
+ok   SmolLM-135M-1d461723-bf16-mps-sdpa-7a50e44: greedy steps identical to round 2
+ok   SmolLM-135M-1d461723-bf16-mps-sdpa-7a50e44: decode-cached byte-identical to round 2
+ok   SmolLM-135M-1d461723-bf16-mps-sdpa-7a50e44: decode-stateless byte-identical to round 2
+ok   SmolLM-135M-1d461723-bf16-mps-sdpa-7a50e44: every logits file matches its recorded digest
+ok   SmolLM-135M-1d461723-f16-cpu-eager-7a50e44: provenance float16/cpu/eager script a4ed0db4
+ok   SmolLM-135M-1d461723-f16-cpu-eager-7a50e44: token IDs equal the truth's
+ok   SmolLM-135M-1d461723-f16-cpu-eager-7a50e44: decode tokens_source is the truth
+ok   SmolLM-135M-1d461723-f16-cpu-eager-7a50e44: decode feeds the truth's tokens
+ok   SmolLM-135M-1d461723-f16-cpu-eager-7a50e44: prompt_decode present=True
+     SmolLM-135M-1d461723-f16-cpu-eager-7a50e44: finite=True greedy=32 decode max gap=0.0625
+ok   SmolLM-135M-1d461723-f16-cpu-eager-7a50e44: every logits file matches its recorded digest
+ok   SmolLM-135M-1d461723-f16-cpu-sdpa-7a50e44: provenance float16/cpu/sdpa script a4ed0db4
+ok   SmolLM-135M-1d461723-f16-cpu-sdpa-7a50e44: token IDs equal the truth's
+ok   SmolLM-135M-1d461723-f16-cpu-sdpa-7a50e44: decode tokens_source is the truth
+ok   SmolLM-135M-1d461723-f16-cpu-sdpa-7a50e44: decode feeds the truth's tokens
+ok   SmolLM-135M-1d461723-f16-cpu-sdpa-7a50e44: prompt_decode present=True
+     SmolLM-135M-1d461723-f16-cpu-sdpa-7a50e44: finite=True greedy=32 decode max gap=0.056640625
+ok   SmolLM-135M-1d461723-f16-cpu-sdpa-7a50e44: every logits file matches its recorded digest
+ok   SmolLM-135M-1d461723-f16-mps-eager-7a50e44: provenance float16/mps/eager script a4ed0db4
+ok   SmolLM-135M-1d461723-f16-mps-eager-7a50e44: token IDs equal the truth's
+ok   SmolLM-135M-1d461723-f16-mps-eager-7a50e44: decode tokens_source is the truth
+ok   SmolLM-135M-1d461723-f16-mps-eager-7a50e44: decode feeds the truth's tokens
+ok   SmolLM-135M-1d461723-f16-mps-eager-7a50e44: prompt_decode present=True
+     SmolLM-135M-1d461723-f16-mps-eager-7a50e44: finite=True greedy=32 decode max gap=0.08203125
+ok   SmolLM-135M-1d461723-f16-mps-eager-7a50e44: every logits file matches its recorded digest
+ok   SmolLM-135M-1d461723-f16-mps-sdpa-7a50e44: provenance float16/mps/sdpa script a4ed0db4
+ok   SmolLM-135M-1d461723-f16-mps-sdpa-7a50e44: token IDs equal the truth's
+ok   SmolLM-135M-1d461723-f16-mps-sdpa-7a50e44: decode tokens_source is the truth
+ok   SmolLM-135M-1d461723-f16-mps-sdpa-7a50e44: decode feeds the truth's tokens
+ok   SmolLM-135M-1d461723-f16-mps-sdpa-7a50e44: prompt_decode present=True
+     SmolLM-135M-1d461723-f16-mps-sdpa-7a50e44: finite=True greedy=32 decode max gap=0.072265625
+ok   SmolLM-135M-1d461723-f16-mps-sdpa-7a50e44: every logits file matches its recorded digest
+== Qwen3-4B: truth Qwen3-4B-531c80e2 sha256 70fc11946cb9adc97af7a173d419438a9ca2350940b8519ddb33497172985b3a
+ok   Qwen3-4B-531c80e2-bf16-cpu-eager-7a50e44: provenance bfloat16/cpu/eager script a4ed0db4
+ok   Qwen3-4B-531c80e2-bf16-cpu-eager-7a50e44: token IDs equal the truth's
+ok   Qwen3-4B-531c80e2-bf16-cpu-eager-7a50e44: decode tokens_source is the truth
+ok   Qwen3-4B-531c80e2-bf16-cpu-eager-7a50e44: decode feeds the truth's tokens
+ok   Qwen3-4B-531c80e2-bf16-cpu-eager-7a50e44: prompt_decode present=True
+     Qwen3-4B-531c80e2-bf16-cpu-eager-7a50e44: finite=True greedy=32 decode max gap=0.0625
+ok   Qwen3-4B-531c80e2-bf16-cpu-eager-7a50e44: prompt logits byte-identical to round 2 Qwen3-4B-531c80e2-bf16-cpu-eager
+ok   Qwen3-4B-531c80e2-bf16-cpu-eager-7a50e44: greedy steps identical to round 2
+ok   Qwen3-4B-531c80e2-bf16-cpu-eager-7a50e44: decode-cached byte-identical to round 2
+ok   Qwen3-4B-531c80e2-bf16-cpu-eager-7a50e44: decode-stateless byte-identical to round 2
+ok   Qwen3-4B-531c80e2-bf16-cpu-eager-7a50e44: every logits file matches its recorded digest
+ok   Qwen3-4B-531c80e2-bf16-cpu-sdpa-7a50e44: provenance bfloat16/cpu/sdpa script a4ed0db4
+ok   Qwen3-4B-531c80e2-bf16-cpu-sdpa-7a50e44: token IDs equal the truth's
+ok   Qwen3-4B-531c80e2-bf16-cpu-sdpa-7a50e44: decode tokens_source is the truth
+ok   Qwen3-4B-531c80e2-bf16-cpu-sdpa-7a50e44: decode feeds the truth's tokens
+ok   Qwen3-4B-531c80e2-bf16-cpu-sdpa-7a50e44: prompt_decode present=True
+     Qwen3-4B-531c80e2-bf16-cpu-sdpa-7a50e44: finite=True greedy=32 decode max gap=0.75
+ok   Qwen3-4B-531c80e2-bf16-cpu-sdpa-7a50e44: prompt logits byte-identical to round 2 Qwen3-4B-531c80e2-bf16-cpu-sdpa
+ok   Qwen3-4B-531c80e2-bf16-cpu-sdpa-7a50e44: greedy steps identical to round 2
+ok   Qwen3-4B-531c80e2-bf16-cpu-sdpa-7a50e44: decode-cached byte-identical to round 2
+ok   Qwen3-4B-531c80e2-bf16-cpu-sdpa-7a50e44: decode-stateless byte-identical to round 2
+ok   Qwen3-4B-531c80e2-bf16-cpu-sdpa-7a50e44: every logits file matches its recorded digest
+ok   Qwen3-4B-531c80e2-bf16-mps-eager-7a50e44: provenance bfloat16/mps/eager script a4ed0db4
+ok   Qwen3-4B-531c80e2-bf16-mps-eager-7a50e44: token IDs equal the truth's
+ok   Qwen3-4B-531c80e2-bf16-mps-eager-7a50e44: decode tokens_source is the truth
+ok   Qwen3-4B-531c80e2-bf16-mps-eager-7a50e44: decode feeds the truth's tokens
+ok   Qwen3-4B-531c80e2-bf16-mps-eager-7a50e44: prompt_decode present=True
+     Qwen3-4B-531c80e2-bf16-mps-eager-7a50e44: finite=True greedy=32 decode max gap=0.875
+ok   Qwen3-4B-531c80e2-bf16-mps-eager-7a50e44: prompt logits byte-identical to round 2 Qwen3-4B-531c80e2-bf16-mps-eager
+ok   Qwen3-4B-531c80e2-bf16-mps-eager-7a50e44: greedy steps identical to round 2
+ok   Qwen3-4B-531c80e2-bf16-mps-eager-7a50e44: decode-cached byte-identical to round 2
+ok   Qwen3-4B-531c80e2-bf16-mps-eager-7a50e44: decode-stateless byte-identical to round 2
+ok   Qwen3-4B-531c80e2-bf16-mps-eager-7a50e44: every logits file matches its recorded digest
+ok   Qwen3-4B-531c80e2-bf16-mps-sdpa-7a50e44: provenance bfloat16/mps/sdpa script a4ed0db4
+ok   Qwen3-4B-531c80e2-bf16-mps-sdpa-7a50e44: token IDs equal the truth's
+ok   Qwen3-4B-531c80e2-bf16-mps-sdpa-7a50e44: decode tokens_source is the truth
+ok   Qwen3-4B-531c80e2-bf16-mps-sdpa-7a50e44: decode feeds the truth's tokens
+ok   Qwen3-4B-531c80e2-bf16-mps-sdpa-7a50e44: prompt_decode present=True
+     Qwen3-4B-531c80e2-bf16-mps-sdpa-7a50e44: finite=True greedy=32 decode max gap=0.59375
+ok   Qwen3-4B-531c80e2-bf16-mps-sdpa-7a50e44: prompt logits byte-identical to round 2 Qwen3-4B-531c80e2-bf16-mps-sdpa
+ok   Qwen3-4B-531c80e2-bf16-mps-sdpa-7a50e44: greedy steps identical to round 2
+ok   Qwen3-4B-531c80e2-bf16-mps-sdpa-7a50e44: decode-cached byte-identical to round 2
+ok   Qwen3-4B-531c80e2-bf16-mps-sdpa-7a50e44: decode-stateless byte-identical to round 2
+ok   Qwen3-4B-531c80e2-bf16-mps-sdpa-7a50e44: every logits file matches its recorded digest
+ok   Qwen3-4B-531c80e2-f16-cpu-eager-7a50e44: provenance float16/cpu/eager script a4ed0db4
+ok   Qwen3-4B-531c80e2-f16-cpu-eager-7a50e44: token IDs equal the truth's
+ok   Qwen3-4B-531c80e2-f16-cpu-eager-7a50e44: decode tokens_source is the truth
+ok   Qwen3-4B-531c80e2-f16-cpu-eager-7a50e44: decode feeds the truth's tokens
+ok   Qwen3-4B-531c80e2-f16-cpu-eager-7a50e44: prompt_decode present=True
+     Qwen3-4B-531c80e2-f16-cpu-eager-7a50e44: finite=True greedy=32 decode max gap=0.109375
+ok   Qwen3-4B-531c80e2-f16-cpu-eager-7a50e44: every logits file matches its recorded digest
+ok   Qwen3-4B-531c80e2-f16-cpu-sdpa-7a50e44: provenance float16/cpu/sdpa script a4ed0db4
+ok   Qwen3-4B-531c80e2-f16-cpu-sdpa-7a50e44: token IDs equal the truth's
+ok   Qwen3-4B-531c80e2-f16-cpu-sdpa-7a50e44: decode tokens_source is the truth
+ok   Qwen3-4B-531c80e2-f16-cpu-sdpa-7a50e44: decode feeds the truth's tokens
+ok   Qwen3-4B-531c80e2-f16-cpu-sdpa-7a50e44: prompt_decode present=True
+     Qwen3-4B-531c80e2-f16-cpu-sdpa-7a50e44: finite=True greedy=32 decode max gap=0.078125
+ok   Qwen3-4B-531c80e2-f16-cpu-sdpa-7a50e44: every logits file matches its recorded digest
+ok   Qwen3-4B-531c80e2-f16-mps-eager-7a50e44: provenance float16/mps/eager script a4ed0db4
+ok   Qwen3-4B-531c80e2-f16-mps-eager-7a50e44: token IDs equal the truth's
+ok   Qwen3-4B-531c80e2-f16-mps-eager-7a50e44: decode tokens_source is the truth
+ok   Qwen3-4B-531c80e2-f16-mps-eager-7a50e44: decode feeds the truth's tokens
+ok   Qwen3-4B-531c80e2-f16-mps-eager-7a50e44: prompt_decode present=True
+     Qwen3-4B-531c80e2-f16-mps-eager-7a50e44: finite=True greedy=32 decode max gap=0.1875
+ok   Qwen3-4B-531c80e2-f16-mps-eager-7a50e44: every logits file matches its recorded digest
+ok   Qwen3-4B-531c80e2-f16-mps-sdpa-7a50e44: provenance float16/mps/sdpa script a4ed0db4
+ok   Qwen3-4B-531c80e2-f16-mps-sdpa-7a50e44: token IDs equal the truth's
+ok   Qwen3-4B-531c80e2-f16-mps-sdpa-7a50e44: decode tokens_source is the truth
+ok   Qwen3-4B-531c80e2-f16-mps-sdpa-7a50e44: decode feeds the truth's tokens
+ok   Qwen3-4B-531c80e2-f16-mps-sdpa-7a50e44: prompt_decode present=True
+     Qwen3-4B-531c80e2-f16-mps-sdpa-7a50e44: finite=True greedy=32 decode max gap=0.0859375
+ok   Qwen3-4B-531c80e2-f16-mps-sdpa-7a50e44: every logits file matches its recorded digest
+== SmolLM3-3B: truth SmolLM3-3B-1fa6fa28 sha256 cf399f62351665297f181c12c68f89d163315cf87001b78a62c0c0335dbd40d7
+ok   SmolLM3-3B-1fa6fa28-bf16-cpu-eager-7a50e44: provenance bfloat16/cpu/eager script a4ed0db4
+ok   SmolLM3-3B-1fa6fa28-bf16-cpu-eager-7a50e44: token IDs equal the truth's
+ok   SmolLM3-3B-1fa6fa28-bf16-cpu-eager-7a50e44: decode tokens_source is the truth
+ok   SmolLM3-3B-1fa6fa28-bf16-cpu-eager-7a50e44: decode feeds the truth's tokens
+ok   SmolLM3-3B-1fa6fa28-bf16-cpu-eager-7a50e44: prompt_decode present=True
+     SmolLM3-3B-1fa6fa28-bf16-cpu-eager-7a50e44: finite=True greedy=32 decode max gap=0.875
+ok   SmolLM3-3B-1fa6fa28-bf16-cpu-eager-7a50e44: prompt logits byte-identical to round 2 SmolLM3-3B-1fa6fa28-bf16-cpu-eager
+ok   SmolLM3-3B-1fa6fa28-bf16-cpu-eager-7a50e44: greedy steps identical to round 2
+ok   SmolLM3-3B-1fa6fa28-bf16-cpu-eager-7a50e44: decode-cached byte-identical to round 2
+ok   SmolLM3-3B-1fa6fa28-bf16-cpu-eager-7a50e44: decode-stateless byte-identical to round 2
+ok   SmolLM3-3B-1fa6fa28-bf16-cpu-eager-7a50e44: every logits file matches its recorded digest
+ok   SmolLM3-3B-1fa6fa28-bf16-cpu-sdpa-7a50e44: provenance bfloat16/cpu/sdpa script a4ed0db4
+ok   SmolLM3-3B-1fa6fa28-bf16-cpu-sdpa-7a50e44: token IDs equal the truth's
+ok   SmolLM3-3B-1fa6fa28-bf16-cpu-sdpa-7a50e44: decode tokens_source is the truth
+ok   SmolLM3-3B-1fa6fa28-bf16-cpu-sdpa-7a50e44: decode feeds the truth's tokens
+ok   SmolLM3-3B-1fa6fa28-bf16-cpu-sdpa-7a50e44: prompt_decode present=True
+     SmolLM3-3B-1fa6fa28-bf16-cpu-sdpa-7a50e44: finite=True greedy=32 decode max gap=0.8125
+ok   SmolLM3-3B-1fa6fa28-bf16-cpu-sdpa-7a50e44: prompt logits byte-identical to round 2 SmolLM3-3B-1fa6fa28-bf16-cpu-sdpa
+ok   SmolLM3-3B-1fa6fa28-bf16-cpu-sdpa-7a50e44: greedy steps identical to round 2
+ok   SmolLM3-3B-1fa6fa28-bf16-cpu-sdpa-7a50e44: decode-cached byte-identical to round 2
+ok   SmolLM3-3B-1fa6fa28-bf16-cpu-sdpa-7a50e44: decode-stateless byte-identical to round 2
+ok   SmolLM3-3B-1fa6fa28-bf16-cpu-sdpa-7a50e44: every logits file matches its recorded digest
+ok   SmolLM3-3B-1fa6fa28-bf16-mps-eager-7a50e44: provenance bfloat16/mps/eager script a4ed0db4
+ok   SmolLM3-3B-1fa6fa28-bf16-mps-eager-7a50e44: token IDs equal the truth's
+ok   SmolLM3-3B-1fa6fa28-bf16-mps-eager-7a50e44: decode tokens_source is the truth
+ok   SmolLM3-3B-1fa6fa28-bf16-mps-eager-7a50e44: decode feeds the truth's tokens
+ok   SmolLM3-3B-1fa6fa28-bf16-mps-eager-7a50e44: prompt_decode present=True
+     SmolLM3-3B-1fa6fa28-bf16-mps-eager-7a50e44: finite=True greedy=32 decode max gap=0.75
+ok   SmolLM3-3B-1fa6fa28-bf16-mps-eager-7a50e44: prompt logits byte-identical to round 2 SmolLM3-3B-1fa6fa28-bf16-mps-eager
+ok   SmolLM3-3B-1fa6fa28-bf16-mps-eager-7a50e44: greedy steps identical to round 2
+ok   SmolLM3-3B-1fa6fa28-bf16-mps-eager-7a50e44: decode-cached byte-identical to round 2
+ok   SmolLM3-3B-1fa6fa28-bf16-mps-eager-7a50e44: decode-stateless byte-identical to round 2
+ok   SmolLM3-3B-1fa6fa28-bf16-mps-eager-7a50e44: every logits file matches its recorded digest
+ok   SmolLM3-3B-1fa6fa28-bf16-mps-sdpa-7a50e44: provenance bfloat16/mps/sdpa script a4ed0db4
+ok   SmolLM3-3B-1fa6fa28-bf16-mps-sdpa-7a50e44: token IDs equal the truth's
+ok   SmolLM3-3B-1fa6fa28-bf16-mps-sdpa-7a50e44: decode tokens_source is the truth
+ok   SmolLM3-3B-1fa6fa28-bf16-mps-sdpa-7a50e44: decode feeds the truth's tokens
+ok   SmolLM3-3B-1fa6fa28-bf16-mps-sdpa-7a50e44: prompt_decode present=True
+     SmolLM3-3B-1fa6fa28-bf16-mps-sdpa-7a50e44: finite=True greedy=32 decode max gap=0.75
+ok   SmolLM3-3B-1fa6fa28-bf16-mps-sdpa-7a50e44: prompt logits byte-identical to round 2 SmolLM3-3B-1fa6fa28-bf16-mps-sdpa
+ok   SmolLM3-3B-1fa6fa28-bf16-mps-sdpa-7a50e44: greedy steps identical to round 2
+ok   SmolLM3-3B-1fa6fa28-bf16-mps-sdpa-7a50e44: decode-cached byte-identical to round 2
+ok   SmolLM3-3B-1fa6fa28-bf16-mps-sdpa-7a50e44: decode-stateless byte-identical to round 2
+ok   SmolLM3-3B-1fa6fa28-bf16-mps-sdpa-7a50e44: every logits file matches its recorded digest
+ok   SmolLM3-3B-1fa6fa28-f16-cpu-eager-7a50e44: provenance float16/cpu/eager script a4ed0db4
+ok   SmolLM3-3B-1fa6fa28-f16-cpu-eager-7a50e44: token IDs equal the truth's
+ok   SmolLM3-3B-1fa6fa28-f16-cpu-eager-7a50e44: decode tokens_source is the truth
+ok   SmolLM3-3B-1fa6fa28-f16-cpu-eager-7a50e44: decode feeds the truth's tokens
+ok   SmolLM3-3B-1fa6fa28-f16-cpu-eager-7a50e44: prompt_decode present=True
+     SmolLM3-3B-1fa6fa28-f16-cpu-eager-7a50e44: finite=True greedy=32 decode max gap=0.09375
+ok   SmolLM3-3B-1fa6fa28-f16-cpu-eager-7a50e44: every logits file matches its recorded digest
+ok   SmolLM3-3B-1fa6fa28-f16-cpu-sdpa-7a50e44: provenance float16/cpu/sdpa script a4ed0db4
+ok   SmolLM3-3B-1fa6fa28-f16-cpu-sdpa-7a50e44: token IDs equal the truth's
+ok   SmolLM3-3B-1fa6fa28-f16-cpu-sdpa-7a50e44: decode tokens_source is the truth
+ok   SmolLM3-3B-1fa6fa28-f16-cpu-sdpa-7a50e44: decode feeds the truth's tokens
+ok   SmolLM3-3B-1fa6fa28-f16-cpu-sdpa-7a50e44: prompt_decode present=True
+     SmolLM3-3B-1fa6fa28-f16-cpu-sdpa-7a50e44: finite=True greedy=32 decode max gap=0.09375
+ok   SmolLM3-3B-1fa6fa28-f16-cpu-sdpa-7a50e44: every logits file matches its recorded digest
+ok   SmolLM3-3B-1fa6fa28-f16-mps-eager-7a50e44: provenance float16/mps/eager script a4ed0db4
+ok   SmolLM3-3B-1fa6fa28-f16-mps-eager-7a50e44: token IDs equal the truth's
+ok   SmolLM3-3B-1fa6fa28-f16-mps-eager-7a50e44: decode tokens_source is the truth
+ok   SmolLM3-3B-1fa6fa28-f16-mps-eager-7a50e44: decode feeds the truth's tokens
+ok   SmolLM3-3B-1fa6fa28-f16-mps-eager-7a50e44: prompt_decode present=True
+     SmolLM3-3B-1fa6fa28-f16-mps-eager-7a50e44: finite=True greedy=32 decode max gap=0.09375
+ok   SmolLM3-3B-1fa6fa28-f16-mps-eager-7a50e44: every logits file matches its recorded digest
+ok   SmolLM3-3B-1fa6fa28-f16-mps-sdpa-7a50e44: provenance float16/mps/sdpa script a4ed0db4
+ok   SmolLM3-3B-1fa6fa28-f16-mps-sdpa-7a50e44: token IDs equal the truth's
+ok   SmolLM3-3B-1fa6fa28-f16-mps-sdpa-7a50e44: decode tokens_source is the truth
+ok   SmolLM3-3B-1fa6fa28-f16-mps-sdpa-7a50e44: decode feeds the truth's tokens
+ok   SmolLM3-3B-1fa6fa28-f16-mps-sdpa-7a50e44: prompt_decode present=True
+     SmolLM3-3B-1fa6fa28-f16-mps-sdpa-7a50e44: finite=True greedy=32 decode max gap=0.09375
+ok   SmolLM3-3B-1fa6fa28-f16-mps-sdpa-7a50e44: every logits file matches its recorded digest
+== Llama-3.1-8B: truth Llama-3.1-8B-d04e592b sha256 3b6b5196d7a864c6d219b29a3366e357057d6e38b1dad00129d1310f0f801edf
+ok   Llama-3.1-8B-d04e592b-bf16-cpu-eager-7a50e44: provenance bfloat16/cpu/eager script a4ed0db4
+ok   Llama-3.1-8B-d04e592b-bf16-cpu-eager-7a50e44: token IDs equal the truth's
+ok   Llama-3.1-8B-d04e592b-bf16-cpu-eager-7a50e44: decode tokens_source is the truth
+ok   Llama-3.1-8B-d04e592b-bf16-cpu-eager-7a50e44: decode feeds the truth's tokens
+ok   Llama-3.1-8B-d04e592b-bf16-cpu-eager-7a50e44: prompt_decode present=True
+     Llama-3.1-8B-d04e592b-bf16-cpu-eager-7a50e44: finite=True greedy=32 decode max gap=0.25
+ok   Llama-3.1-8B-d04e592b-bf16-cpu-eager-7a50e44: prompt logits byte-identical to round 2 Llama-3.1-8B-d04e592b-bf16-cpu-eager
+ok   Llama-3.1-8B-d04e592b-bf16-cpu-eager-7a50e44: greedy steps identical to round 2
+ok   Llama-3.1-8B-d04e592b-bf16-cpu-eager-7a50e44: decode-cached byte-identical to round 2
+ok   Llama-3.1-8B-d04e592b-bf16-cpu-eager-7a50e44: decode-stateless byte-identical to round 2
+ok   Llama-3.1-8B-d04e592b-bf16-cpu-eager-7a50e44: every logits file matches its recorded digest
+ok   Llama-3.1-8B-d04e592b-bf16-cpu-sdpa-7a50e44: provenance bfloat16/cpu/sdpa script a4ed0db4
+ok   Llama-3.1-8B-d04e592b-bf16-cpu-sdpa-7a50e44: token IDs equal the truth's
+ok   Llama-3.1-8B-d04e592b-bf16-cpu-sdpa-7a50e44: decode tokens_source is the truth
+ok   Llama-3.1-8B-d04e592b-bf16-cpu-sdpa-7a50e44: decode feeds the truth's tokens
+ok   Llama-3.1-8B-d04e592b-bf16-cpu-sdpa-7a50e44: prompt_decode present=True
+     Llama-3.1-8B-d04e592b-bf16-cpu-sdpa-7a50e44: finite=True greedy=32 decode max gap=0.21875
+ok   Llama-3.1-8B-d04e592b-bf16-cpu-sdpa-7a50e44: prompt logits byte-identical to round 2 Llama-3.1-8B-d04e592b-bf16-cpu-sdpa
+ok   Llama-3.1-8B-d04e592b-bf16-cpu-sdpa-7a50e44: greedy steps identical to round 2
+ok   Llama-3.1-8B-d04e592b-bf16-cpu-sdpa-7a50e44: decode-cached byte-identical to round 2
+ok   Llama-3.1-8B-d04e592b-bf16-cpu-sdpa-7a50e44: decode-stateless byte-identical to round 2
+ok   Llama-3.1-8B-d04e592b-bf16-cpu-sdpa-7a50e44: every logits file matches its recorded digest
+ok   Llama-3.1-8B-d04e592b-bf16-mps-eager-7a50e44: provenance bfloat16/mps/eager script a4ed0db4
+ok   Llama-3.1-8B-d04e592b-bf16-mps-eager-7a50e44: token IDs equal the truth's
+ok   Llama-3.1-8B-d04e592b-bf16-mps-eager-7a50e44: decode tokens_source is the truth
+ok   Llama-3.1-8B-d04e592b-bf16-mps-eager-7a50e44: decode feeds the truth's tokens
+ok   Llama-3.1-8B-d04e592b-bf16-mps-eager-7a50e44: prompt_decode present=True
+     Llama-3.1-8B-d04e592b-bf16-mps-eager-7a50e44: finite=True greedy=32 decode max gap=0.25
+ok   Llama-3.1-8B-d04e592b-bf16-mps-eager-7a50e44: prompt logits byte-identical to round 2 Llama-3.1-8B-d04e592b-bf16-mps-eager
+ok   Llama-3.1-8B-d04e592b-bf16-mps-eager-7a50e44: greedy steps identical to round 2
+ok   Llama-3.1-8B-d04e592b-bf16-mps-eager-7a50e44: decode-cached byte-identical to round 2
+ok   Llama-3.1-8B-d04e592b-bf16-mps-eager-7a50e44: decode-stateless byte-identical to round 2
+ok   Llama-3.1-8B-d04e592b-bf16-mps-eager-7a50e44: every logits file matches its recorded digest
+ok   Llama-3.1-8B-d04e592b-bf16-mps-sdpa-7a50e44: provenance bfloat16/mps/sdpa script a4ed0db4
+ok   Llama-3.1-8B-d04e592b-bf16-mps-sdpa-7a50e44: token IDs equal the truth's
+ok   Llama-3.1-8B-d04e592b-bf16-mps-sdpa-7a50e44: decode tokens_source is the truth
+ok   Llama-3.1-8B-d04e592b-bf16-mps-sdpa-7a50e44: decode feeds the truth's tokens
+ok   Llama-3.1-8B-d04e592b-bf16-mps-sdpa-7a50e44: prompt_decode present=True
+     Llama-3.1-8B-d04e592b-bf16-mps-sdpa-7a50e44: finite=True greedy=32 decode max gap=0.1875
+ok   Llama-3.1-8B-d04e592b-bf16-mps-sdpa-7a50e44: prompt logits byte-identical to round 2 Llama-3.1-8B-d04e592b-bf16-mps-sdpa
+ok   Llama-3.1-8B-d04e592b-bf16-mps-sdpa-7a50e44: greedy steps identical to round 2
+ok   Llama-3.1-8B-d04e592b-bf16-mps-sdpa-7a50e44: decode-cached byte-identical to round 2
+ok   Llama-3.1-8B-d04e592b-bf16-mps-sdpa-7a50e44: decode-stateless byte-identical to round 2
+ok   Llama-3.1-8B-d04e592b-bf16-mps-sdpa-7a50e44: every logits file matches its recorded digest
+ok   Llama-3.1-8B-d04e592b-f16-cpu-eager-7a50e44: provenance float16/cpu/eager script a4ed0db4
+ok   Llama-3.1-8B-d04e592b-f16-cpu-eager-7a50e44: token IDs equal the truth's
+ok   Llama-3.1-8B-d04e592b-f16-cpu-eager-7a50e44: decode tokens_source is the truth
+ok   Llama-3.1-8B-d04e592b-f16-cpu-eager-7a50e44: decode feeds the truth's tokens
+ok   Llama-3.1-8B-d04e592b-f16-cpu-eager-7a50e44: prompt_decode present=True
+     Llama-3.1-8B-d04e592b-f16-cpu-eager-7a50e44: finite=True greedy=32 decode max gap=0.0322265625
+ok   Llama-3.1-8B-d04e592b-f16-cpu-eager-7a50e44: every logits file matches its recorded digest
+ok   Llama-3.1-8B-d04e592b-f16-cpu-sdpa-7a50e44: provenance float16/cpu/sdpa script a4ed0db4
+ok   Llama-3.1-8B-d04e592b-f16-cpu-sdpa-7a50e44: token IDs equal the truth's
+ok   Llama-3.1-8B-d04e592b-f16-cpu-sdpa-7a50e44: decode tokens_source is the truth
+ok   Llama-3.1-8B-d04e592b-f16-cpu-sdpa-7a50e44: decode feeds the truth's tokens
+ok   Llama-3.1-8B-d04e592b-f16-cpu-sdpa-7a50e44: prompt_decode present=True
+     Llama-3.1-8B-d04e592b-f16-cpu-sdpa-7a50e44: finite=True greedy=32 decode max gap=0.02734375
+ok   Llama-3.1-8B-d04e592b-f16-cpu-sdpa-7a50e44: every logits file matches its recorded digest
+ok   Llama-3.1-8B-d04e592b-f16-mps-eager-7a50e44: provenance float16/mps/eager script a4ed0db4
+ok   Llama-3.1-8B-d04e592b-f16-mps-eager-7a50e44: token IDs equal the truth's
+ok   Llama-3.1-8B-d04e592b-f16-mps-eager-7a50e44: decode tokens_source is the truth
+ok   Llama-3.1-8B-d04e592b-f16-mps-eager-7a50e44: decode feeds the truth's tokens
+ok   Llama-3.1-8B-d04e592b-f16-mps-eager-7a50e44: prompt_decode present=True
+     Llama-3.1-8B-d04e592b-f16-mps-eager-7a50e44: finite=True greedy=32 decode max gap=0.025390625
+ok   Llama-3.1-8B-d04e592b-f16-mps-eager-7a50e44: every logits file matches its recorded digest
+ok   Llama-3.1-8B-d04e592b-f16-mps-sdpa-7a50e44: provenance float16/mps/sdpa script a4ed0db4
+ok   Llama-3.1-8B-d04e592b-f16-mps-sdpa-7a50e44: token IDs equal the truth's
+ok   Llama-3.1-8B-d04e592b-f16-mps-sdpa-7a50e44: decode tokens_source is the truth
+ok   Llama-3.1-8B-d04e592b-f16-mps-sdpa-7a50e44: decode feeds the truth's tokens
+ok   Llama-3.1-8B-d04e592b-f16-mps-sdpa-7a50e44: prompt_decode present=True
+     Llama-3.1-8B-d04e592b-f16-mps-sdpa-7a50e44: finite=True greedy=32 decode max gap=0.03125
+ok   Llama-3.1-8B-d04e592b-f16-mps-sdpa-7a50e44: every logits file matches its recorded digest
+== gemma-3-4b-it: truth gemma-3-4b-it-093f9f38 sha256 a3e0fd391940cb5789160c5f08ea4a60fa6eab75075eac3cdb4737afe5c86c86
+ok   gemma-3-4b-it-093f9f38-bf16-cpu-eager-7a50e44: provenance bfloat16/cpu/eager script a4ed0db4
+ok   gemma-3-4b-it-093f9f38-bf16-cpu-eager-7a50e44: token IDs equal the truth's
+ok   gemma-3-4b-it-093f9f38-bf16-cpu-eager-7a50e44: decode tokens_source is the truth
+ok   gemma-3-4b-it-093f9f38-bf16-cpu-eager-7a50e44: decode feeds the truth's tokens
+ok   gemma-3-4b-it-093f9f38-bf16-cpu-eager-7a50e44: prompt_decode present=True
+     gemma-3-4b-it-093f9f38-bf16-cpu-eager-7a50e44: finite=True greedy=32 decode max gap=0.375
+ok   gemma-3-4b-it-093f9f38-bf16-cpu-eager-7a50e44: prompt logits byte-identical to round 2 gemma-3-4b-it-093f9f38-bf16-cpu-eager
+ok   gemma-3-4b-it-093f9f38-bf16-cpu-eager-7a50e44: greedy steps identical to round 2
+ok   gemma-3-4b-it-093f9f38-bf16-cpu-eager-7a50e44: decode-cached byte-identical to round 2
+ok   gemma-3-4b-it-093f9f38-bf16-cpu-eager-7a50e44: decode-stateless byte-identical to round 2
+ok   gemma-3-4b-it-093f9f38-bf16-cpu-eager-7a50e44: every logits file matches its recorded digest
+ok   gemma-3-4b-it-093f9f38-bf16-cpu-sdpa-7a50e44: provenance bfloat16/cpu/sdpa script a4ed0db4
+ok   gemma-3-4b-it-093f9f38-bf16-cpu-sdpa-7a50e44: token IDs equal the truth's
+ok   gemma-3-4b-it-093f9f38-bf16-cpu-sdpa-7a50e44: decode tokens_source is the truth
+ok   gemma-3-4b-it-093f9f38-bf16-cpu-sdpa-7a50e44: decode feeds the truth's tokens
+ok   gemma-3-4b-it-093f9f38-bf16-cpu-sdpa-7a50e44: prompt_decode present=True
+     gemma-3-4b-it-093f9f38-bf16-cpu-sdpa-7a50e44: finite=True greedy=32 decode max gap=1.0
+ok   gemma-3-4b-it-093f9f38-bf16-cpu-sdpa-7a50e44: prompt logits byte-identical to round 2 gemma-3-4b-it-093f9f38-bf16-cpu-sdpa
+ok   gemma-3-4b-it-093f9f38-bf16-cpu-sdpa-7a50e44: greedy steps identical to round 2
+ok   gemma-3-4b-it-093f9f38-bf16-cpu-sdpa-7a50e44: decode-cached byte-identical to round 2
+ok   gemma-3-4b-it-093f9f38-bf16-cpu-sdpa-7a50e44: decode-stateless byte-identical to round 2
+ok   gemma-3-4b-it-093f9f38-bf16-cpu-sdpa-7a50e44: every logits file matches its recorded digest
+ok   gemma-3-4b-it-093f9f38-bf16-mps-eager-7a50e44: provenance bfloat16/mps/eager script a4ed0db4
+ok   gemma-3-4b-it-093f9f38-bf16-mps-eager-7a50e44: token IDs equal the truth's
+ok   gemma-3-4b-it-093f9f38-bf16-mps-eager-7a50e44: decode tokens_source is the truth
+ok   gemma-3-4b-it-093f9f38-bf16-mps-eager-7a50e44: decode feeds the truth's tokens
+ok   gemma-3-4b-it-093f9f38-bf16-mps-eager-7a50e44: prompt_decode present=True
+     gemma-3-4b-it-093f9f38-bf16-mps-eager-7a50e44: finite=True greedy=32 decode max gap=1.5625
+ok   gemma-3-4b-it-093f9f38-bf16-mps-eager-7a50e44: prompt logits byte-identical to round 2 gemma-3-4b-it-093f9f38-bf16-mps-eager
+ok   gemma-3-4b-it-093f9f38-bf16-mps-eager-7a50e44: greedy steps identical to round 2
+ok   gemma-3-4b-it-093f9f38-bf16-mps-eager-7a50e44: decode-cached byte-identical to round 2
+ok   gemma-3-4b-it-093f9f38-bf16-mps-eager-7a50e44: decode-stateless byte-identical to round 2
+ok   gemma-3-4b-it-093f9f38-bf16-mps-eager-7a50e44: every logits file matches its recorded digest
+ok   gemma-3-4b-it-093f9f38-bf16-mps-sdpa-7a50e44: provenance bfloat16/mps/sdpa script a4ed0db4
+ok   gemma-3-4b-it-093f9f38-bf16-mps-sdpa-7a50e44: token IDs equal the truth's
+ok   gemma-3-4b-it-093f9f38-bf16-mps-sdpa-7a50e44: decode tokens_source is the truth
+ok   gemma-3-4b-it-093f9f38-bf16-mps-sdpa-7a50e44: decode feeds the truth's tokens
+ok   gemma-3-4b-it-093f9f38-bf16-mps-sdpa-7a50e44: prompt_decode present=True
+     gemma-3-4b-it-093f9f38-bf16-mps-sdpa-7a50e44: finite=True greedy=32 decode max gap=1.25
+ok   gemma-3-4b-it-093f9f38-bf16-mps-sdpa-7a50e44: prompt logits byte-identical to round 2 gemma-3-4b-it-093f9f38-bf16-mps-sdpa
+ok   gemma-3-4b-it-093f9f38-bf16-mps-sdpa-7a50e44: greedy steps identical to round 2
+ok   gemma-3-4b-it-093f9f38-bf16-mps-sdpa-7a50e44: decode-cached byte-identical to round 2
+ok   gemma-3-4b-it-093f9f38-bf16-mps-sdpa-7a50e44: decode-stateless byte-identical to round 2
+ok   gemma-3-4b-it-093f9f38-bf16-mps-sdpa-7a50e44: every logits file matches its recorded digest
+ok   gemma-3-4b-it-093f9f38-f16-cpu-eager-7a50e44: provenance float16/cpu/eager script a4ed0db4
+ok   gemma-3-4b-it-093f9f38-f16-cpu-eager-7a50e44: token IDs equal the truth's
+ok   gemma-3-4b-it-093f9f38-f16-cpu-eager-7a50e44: decode tokens_source is the truth
+ok   gemma-3-4b-it-093f9f38-f16-cpu-eager-7a50e44: decode feeds the truth's tokens
+ok   gemma-3-4b-it-093f9f38-f16-cpu-eager-7a50e44: prompt_decode present=True
+     gemma-3-4b-it-093f9f38-f16-cpu-eager-7a50e44: finite=False greedy=0 stopped=non_finite decode max gap=None first non-finite: [{"position": 0, "token": 0}, {"position": 0, "token": 0}, {"position": 0, "token": 0}, {"logits": "cached", "position": 6, "step": 0, "token": 0}, {"position": 0, "token": 0}]
+ok   gemma-3-4b-it-093f9f38-f16-cpu-eager-7a50e44: every logits file matches its recorded digest
+ok   gemma-3-4b-it-093f9f38-f16-cpu-sdpa-7a50e44: provenance float16/cpu/sdpa script a4ed0db4
+ok   gemma-3-4b-it-093f9f38-f16-cpu-sdpa-7a50e44: token IDs equal the truth's
+ok   gemma-3-4b-it-093f9f38-f16-cpu-sdpa-7a50e44: decode tokens_source is the truth
+ok   gemma-3-4b-it-093f9f38-f16-cpu-sdpa-7a50e44: decode feeds the truth's tokens
+ok   gemma-3-4b-it-093f9f38-f16-cpu-sdpa-7a50e44: prompt_decode present=True
+     gemma-3-4b-it-093f9f38-f16-cpu-sdpa-7a50e44: finite=False greedy=0 stopped=non_finite decode max gap=None first non-finite: [{"position": 0, "token": 0}, {"position": 0, "token": 0}, {"position": 0, "token": 0}, {"logits": "cached", "position": 6, "step": 0, "token": 0}, {"position": 0, "token": 0}]
+ok   gemma-3-4b-it-093f9f38-f16-cpu-sdpa-7a50e44: every logits file matches its recorded digest
+ok   gemma-3-4b-it-093f9f38-f16-mps-eager-7a50e44: provenance float16/mps/eager script a4ed0db4
+ok   gemma-3-4b-it-093f9f38-f16-mps-eager-7a50e44: token IDs equal the truth's
+ok   gemma-3-4b-it-093f9f38-f16-mps-eager-7a50e44: decode tokens_source is the truth
+ok   gemma-3-4b-it-093f9f38-f16-mps-eager-7a50e44: decode feeds the truth's tokens
+ok   gemma-3-4b-it-093f9f38-f16-mps-eager-7a50e44: prompt_decode present=True
+     gemma-3-4b-it-093f9f38-f16-mps-eager-7a50e44: finite=False greedy=0 stopped=non_finite decode max gap=None first non-finite: [{"position": 0, "token": 0}, {"position": 0, "token": 0}, {"position": 0, "token": 0}, {"logits": "cached", "position": 6, "step": 0, "token": 0}, {"position": 0, "token": 0}]
+ok   gemma-3-4b-it-093f9f38-f16-mps-eager-7a50e44: every logits file matches its recorded digest
+ok   gemma-3-4b-it-093f9f38-f16-mps-sdpa-7a50e44: provenance float16/mps/sdpa script a4ed0db4
+ok   gemma-3-4b-it-093f9f38-f16-mps-sdpa-7a50e44: token IDs equal the truth's
+ok   gemma-3-4b-it-093f9f38-f16-mps-sdpa-7a50e44: decode tokens_source is the truth
+ok   gemma-3-4b-it-093f9f38-f16-mps-sdpa-7a50e44: decode feeds the truth's tokens
+ok   gemma-3-4b-it-093f9f38-f16-mps-sdpa-7a50e44: prompt_decode present=True
+     gemma-3-4b-it-093f9f38-f16-mps-sdpa-7a50e44: finite=False greedy=0 stopped=non_finite decode max gap=None first non-finite: [{"position": 0, "token": 0}, {"position": 0, "token": 0}, {"position": 0, "token": 0}, {"logits": "cached", "position": 6, "step": 0, "token": 0}, {"position": 0, "token": 0}]
+ok   gemma-3-4b-it-093f9f38-f16-mps-sdpa-7a50e44: every logits file matches its recorded digest
+== gemma-long: truth gemma-3-4b-it-093f9f38-long sha256 b73b85f0f503524a16eba289ed633bdd73139fbfa3008640732ef5d39b774cf4
+ok   gemma-3-4b-it-093f9f38-long-bf16-cpu-eager-7a50e44: provenance bfloat16/cpu/eager script a4ed0db4
+ok   gemma-3-4b-it-093f9f38-long-bf16-cpu-eager-7a50e44: token IDs equal the truth's
+ok   gemma-3-4b-it-093f9f38-long-bf16-cpu-eager-7a50e44: decode tokens_source is the truth
+ok   gemma-3-4b-it-093f9f38-long-bf16-cpu-eager-7a50e44: decode feeds the truth's tokens
+ok   gemma-3-4b-it-093f9f38-long-bf16-cpu-eager-7a50e44: prompt_decode present=False
+     gemma-3-4b-it-093f9f38-long-bf16-cpu-eager-7a50e44: finite=True greedy=8 decode max gap=0.3125
+ok   gemma-3-4b-it-093f9f38-long-bf16-cpu-eager-7a50e44: prompt logits byte-identical to round 2 gemma-3-4b-it-093f9f38-long-bf16-cpu-eager
+ok   gemma-3-4b-it-093f9f38-long-bf16-cpu-eager-7a50e44: greedy steps identical to round 2
+ok   gemma-3-4b-it-093f9f38-long-bf16-cpu-eager-7a50e44: decode-cached byte-identical to round 2
+ok   gemma-3-4b-it-093f9f38-long-bf16-cpu-eager-7a50e44: decode-stateless byte-identical to round 2
+ok   gemma-3-4b-it-093f9f38-long-bf16-cpu-eager-7a50e44: every logits file matches its recorded digest
+ok   gemma-3-4b-it-093f9f38-long-bf16-cpu-sdpa-7a50e44: provenance bfloat16/cpu/sdpa script a4ed0db4
+ok   gemma-3-4b-it-093f9f38-long-bf16-cpu-sdpa-7a50e44: token IDs equal the truth's
+ok   gemma-3-4b-it-093f9f38-long-bf16-cpu-sdpa-7a50e44: decode tokens_source is the truth
+ok   gemma-3-4b-it-093f9f38-long-bf16-cpu-sdpa-7a50e44: decode feeds the truth's tokens
+ok   gemma-3-4b-it-093f9f38-long-bf16-cpu-sdpa-7a50e44: prompt_decode present=False
+     gemma-3-4b-it-093f9f38-long-bf16-cpu-sdpa-7a50e44: finite=True greedy=8 decode max gap=0.3125
+ok   gemma-3-4b-it-093f9f38-long-bf16-cpu-sdpa-7a50e44: prompt logits byte-identical to round 2 gemma-3-4b-it-093f9f38-long-bf16-cpu-sdpa
+ok   gemma-3-4b-it-093f9f38-long-bf16-cpu-sdpa-7a50e44: greedy steps identical to round 2
+ok   gemma-3-4b-it-093f9f38-long-bf16-cpu-sdpa-7a50e44: decode-cached byte-identical to round 2
+ok   gemma-3-4b-it-093f9f38-long-bf16-cpu-sdpa-7a50e44: decode-stateless byte-identical to round 2
+ok   gemma-3-4b-it-093f9f38-long-bf16-cpu-sdpa-7a50e44: every logits file matches its recorded digest
+ok   gemma-3-4b-it-093f9f38-long-bf16-mps-eager-7a50e44: provenance bfloat16/mps/eager script a4ed0db4
+ok   gemma-3-4b-it-093f9f38-long-bf16-mps-eager-7a50e44: token IDs equal the truth's
+ok   gemma-3-4b-it-093f9f38-long-bf16-mps-eager-7a50e44: decode tokens_source is the truth
+ok   gemma-3-4b-it-093f9f38-long-bf16-mps-eager-7a50e44: decode feeds the truth's tokens
+ok   gemma-3-4b-it-093f9f38-long-bf16-mps-eager-7a50e44: prompt_decode present=False
+     gemma-3-4b-it-093f9f38-long-bf16-mps-eager-7a50e44: finite=True greedy=8 decode max gap=0.3125
+ok   gemma-3-4b-it-093f9f38-long-bf16-mps-eager-7a50e44: prompt logits byte-identical to round 2 gemma-3-4b-it-093f9f38-long-bf16-mps-eager
+ok   gemma-3-4b-it-093f9f38-long-bf16-mps-eager-7a50e44: greedy steps identical to round 2
+ok   gemma-3-4b-it-093f9f38-long-bf16-mps-eager-7a50e44: decode-cached byte-identical to round 2
+ok   gemma-3-4b-it-093f9f38-long-bf16-mps-eager-7a50e44: decode-stateless byte-identical to round 2
+ok   gemma-3-4b-it-093f9f38-long-bf16-mps-eager-7a50e44: every logits file matches its recorded digest
+ok   gemma-3-4b-it-093f9f38-long-bf16-mps-sdpa-7a50e44: provenance bfloat16/mps/sdpa script a4ed0db4
+ok   gemma-3-4b-it-093f9f38-long-bf16-mps-sdpa-7a50e44: token IDs equal the truth's
+ok   gemma-3-4b-it-093f9f38-long-bf16-mps-sdpa-7a50e44: decode tokens_source is the truth
+ok   gemma-3-4b-it-093f9f38-long-bf16-mps-sdpa-7a50e44: decode feeds the truth's tokens
+ok   gemma-3-4b-it-093f9f38-long-bf16-mps-sdpa-7a50e44: prompt_decode present=False
+     gemma-3-4b-it-093f9f38-long-bf16-mps-sdpa-7a50e44: finite=True greedy=8 decode max gap=0.25
+ok   gemma-3-4b-it-093f9f38-long-bf16-mps-sdpa-7a50e44: prompt logits byte-identical to round 2 gemma-3-4b-it-093f9f38-long-bf16-mps-sdpa
+ok   gemma-3-4b-it-093f9f38-long-bf16-mps-sdpa-7a50e44: greedy steps identical to round 2
+ok   gemma-3-4b-it-093f9f38-long-bf16-mps-sdpa-7a50e44: decode-cached byte-identical to round 2
+ok   gemma-3-4b-it-093f9f38-long-bf16-mps-sdpa-7a50e44: decode-stateless byte-identical to round 2
+ok   gemma-3-4b-it-093f9f38-long-bf16-mps-sdpa-7a50e44: every logits file matches its recorded digest
+ok   gemma-3-4b-it-093f9f38-long-f16-cpu-eager-7a50e44: provenance float16/cpu/eager script a4ed0db4
+ok   gemma-3-4b-it-093f9f38-long-f16-cpu-eager-7a50e44: token IDs equal the truth's
+ok   gemma-3-4b-it-093f9f38-long-f16-cpu-eager-7a50e44: decode tokens_source is the truth
+ok   gemma-3-4b-it-093f9f38-long-f16-cpu-eager-7a50e44: decode feeds the truth's tokens
+ok   gemma-3-4b-it-093f9f38-long-f16-cpu-eager-7a50e44: prompt_decode present=False
+     gemma-3-4b-it-093f9f38-long-f16-cpu-eager-7a50e44: finite=False greedy=0 stopped=non_finite decode max gap=None first non-finite: [{"position": 0, "token": 0}, {"logits": "cached", "position": 1237, "step": 0, "token": 0}, null]
+ok   gemma-3-4b-it-093f9f38-long-f16-cpu-eager-7a50e44: every logits file matches its recorded digest
+ok   gemma-3-4b-it-093f9f38-long-f16-cpu-sdpa-7a50e44: provenance float16/cpu/sdpa script a4ed0db4
+ok   gemma-3-4b-it-093f9f38-long-f16-cpu-sdpa-7a50e44: token IDs equal the truth's
+ok   gemma-3-4b-it-093f9f38-long-f16-cpu-sdpa-7a50e44: decode tokens_source is the truth
+ok   gemma-3-4b-it-093f9f38-long-f16-cpu-sdpa-7a50e44: decode feeds the truth's tokens
+ok   gemma-3-4b-it-093f9f38-long-f16-cpu-sdpa-7a50e44: prompt_decode present=False
+     gemma-3-4b-it-093f9f38-long-f16-cpu-sdpa-7a50e44: finite=False greedy=0 stopped=non_finite decode max gap=None first non-finite: [{"position": 0, "token": 0}, {"logits": "cached", "position": 1237, "step": 0, "token": 0}, null]
+ok   gemma-3-4b-it-093f9f38-long-f16-cpu-sdpa-7a50e44: every logits file matches its recorded digest
+ok   gemma-3-4b-it-093f9f38-long-f16-mps-eager-7a50e44: provenance float16/mps/eager script a4ed0db4
+ok   gemma-3-4b-it-093f9f38-long-f16-mps-eager-7a50e44: token IDs equal the truth's
+ok   gemma-3-4b-it-093f9f38-long-f16-mps-eager-7a50e44: decode tokens_source is the truth
+ok   gemma-3-4b-it-093f9f38-long-f16-mps-eager-7a50e44: decode feeds the truth's tokens
+ok   gemma-3-4b-it-093f9f38-long-f16-mps-eager-7a50e44: prompt_decode present=False
+     gemma-3-4b-it-093f9f38-long-f16-mps-eager-7a50e44: finite=False greedy=0 stopped=non_finite decode max gap=None first non-finite: [{"position": 0, "token": 0}, {"logits": "cached", "position": 1237, "step": 0, "token": 0}, null]
+ok   gemma-3-4b-it-093f9f38-long-f16-mps-eager-7a50e44: every logits file matches its recorded digest
+ok   gemma-3-4b-it-093f9f38-long-f16-mps-sdpa-7a50e44: provenance float16/mps/sdpa script a4ed0db4
+ok   gemma-3-4b-it-093f9f38-long-f16-mps-sdpa-7a50e44: token IDs equal the truth's
+ok   gemma-3-4b-it-093f9f38-long-f16-mps-sdpa-7a50e44: decode tokens_source is the truth
+ok   gemma-3-4b-it-093f9f38-long-f16-mps-sdpa-7a50e44: decode feeds the truth's tokens
+ok   gemma-3-4b-it-093f9f38-long-f16-mps-sdpa-7a50e44: prompt_decode present=False
+     gemma-3-4b-it-093f9f38-long-f16-mps-sdpa-7a50e44: finite=False greedy=0 stopped=non_finite decode max gap=None first non-finite: [{"position": 0, "token": 0}, {"logits": "cached", "position": 1237, "step": 0, "token": 0}, null]
+ok   gemma-3-4b-it-093f9f38-long-f16-mps-sdpa-7a50e44: every logits file matches its recorded digest
+== Qwen2-7B: truth Qwen2-7B-453ed157-f64 sha256 a1272a0a6d5b44e733ed3a1b7845e3849cfb20237918d9926ba0ca1939ed8687
+ok   Qwen2-7B-453ed157-f64-bf16-cpu-eager-7a50e44: provenance bfloat16/cpu/eager script a4ed0db4
+ok   Qwen2-7B-453ed157-f64-bf16-cpu-eager-7a50e44: token IDs equal the truth's
+ok   Qwen2-7B-453ed157-f64-bf16-cpu-eager-7a50e44: decode tokens_source is the truth
+ok   Qwen2-7B-453ed157-f64-bf16-cpu-eager-7a50e44: decode feeds the truth's tokens
+ok   Qwen2-7B-453ed157-f64-bf16-cpu-eager-7a50e44: prompt_decode present=True
+     Qwen2-7B-453ed157-f64-bf16-cpu-eager-7a50e44: finite=True greedy=32 decode max gap=1.75
+ok   Qwen2-7B-453ed157-f64-bf16-cpu-eager-7a50e44: prompt logits byte-identical to round 2 Qwen2-7B-453ed157-f64-bf16-cpu-eager
+ok   Qwen2-7B-453ed157-f64-bf16-cpu-eager-7a50e44: greedy steps identical to round 2
+ok   Qwen2-7B-453ed157-f64-bf16-cpu-eager-7a50e44: decode-cached byte-identical to round 2
+ok   Qwen2-7B-453ed157-f64-bf16-cpu-eager-7a50e44: decode-stateless byte-identical to round 2
+ok   Qwen2-7B-453ed157-f64-bf16-cpu-eager-7a50e44: every logits file matches its recorded digest
+ok   Qwen2-7B-453ed157-f64-bf16-cpu-sdpa-7a50e44: provenance bfloat16/cpu/sdpa script a4ed0db4
+ok   Qwen2-7B-453ed157-f64-bf16-cpu-sdpa-7a50e44: token IDs equal the truth's
+ok   Qwen2-7B-453ed157-f64-bf16-cpu-sdpa-7a50e44: decode tokens_source is the truth
+ok   Qwen2-7B-453ed157-f64-bf16-cpu-sdpa-7a50e44: decode feeds the truth's tokens
+ok   Qwen2-7B-453ed157-f64-bf16-cpu-sdpa-7a50e44: prompt_decode present=True
+     Qwen2-7B-453ed157-f64-bf16-cpu-sdpa-7a50e44: finite=True greedy=32 decode max gap=0.2578125
+ok   Qwen2-7B-453ed157-f64-bf16-cpu-sdpa-7a50e44: prompt logits byte-identical to round 2 Qwen2-7B-453ed157-f64-bf16-cpu-sdpa
+ok   Qwen2-7B-453ed157-f64-bf16-cpu-sdpa-7a50e44: greedy steps identical to round 2
+ok   Qwen2-7B-453ed157-f64-bf16-cpu-sdpa-7a50e44: decode-cached byte-identical to round 2
+ok   Qwen2-7B-453ed157-f64-bf16-cpu-sdpa-7a50e44: decode-stateless byte-identical to round 2
+ok   Qwen2-7B-453ed157-f64-bf16-cpu-sdpa-7a50e44: every logits file matches its recorded digest
+ok   Qwen2-7B-453ed157-f64-bf16-mps-eager-7a50e44: provenance bfloat16/mps/eager script a4ed0db4
+ok   Qwen2-7B-453ed157-f64-bf16-mps-eager-7a50e44: token IDs equal the truth's
+ok   Qwen2-7B-453ed157-f64-bf16-mps-eager-7a50e44: decode tokens_source is the truth
+ok   Qwen2-7B-453ed157-f64-bf16-mps-eager-7a50e44: decode feeds the truth's tokens
+ok   Qwen2-7B-453ed157-f64-bf16-mps-eager-7a50e44: prompt_decode present=True
+     Qwen2-7B-453ed157-f64-bf16-mps-eager-7a50e44: finite=True greedy=32 decode max gap=1.578125
+ok   Qwen2-7B-453ed157-f64-bf16-mps-eager-7a50e44: prompt logits byte-identical to round 2 Qwen2-7B-453ed157-f64-bf16-mps-eager
+ok   Qwen2-7B-453ed157-f64-bf16-mps-eager-7a50e44: greedy steps identical to round 2
+ok   Qwen2-7B-453ed157-f64-bf16-mps-eager-7a50e44: decode-cached byte-identical to round 2
+ok   Qwen2-7B-453ed157-f64-bf16-mps-eager-7a50e44: decode-stateless byte-identical to round 2
+ok   Qwen2-7B-453ed157-f64-bf16-mps-eager-7a50e44: every logits file matches its recorded digest
+ok   Qwen2-7B-453ed157-f64-bf16-mps-sdpa-7a50e44: provenance bfloat16/mps/sdpa script a4ed0db4
+ok   Qwen2-7B-453ed157-f64-bf16-mps-sdpa-7a50e44: token IDs equal the truth's
+ok   Qwen2-7B-453ed157-f64-bf16-mps-sdpa-7a50e44: decode tokens_source is the truth
+ok   Qwen2-7B-453ed157-f64-bf16-mps-sdpa-7a50e44: decode feeds the truth's tokens
+ok   Qwen2-7B-453ed157-f64-bf16-mps-sdpa-7a50e44: prompt_decode present=True
+     Qwen2-7B-453ed157-f64-bf16-mps-sdpa-7a50e44: finite=True greedy=32 decode max gap=0.375
+ok   Qwen2-7B-453ed157-f64-bf16-mps-sdpa-7a50e44: prompt logits byte-identical to round 2 Qwen2-7B-453ed157-f64-bf16-mps-sdpa
+ok   Qwen2-7B-453ed157-f64-bf16-mps-sdpa-7a50e44: greedy steps identical to round 2
+ok   Qwen2-7B-453ed157-f64-bf16-mps-sdpa-7a50e44: decode-cached byte-identical to round 2
+ok   Qwen2-7B-453ed157-f64-bf16-mps-sdpa-7a50e44: decode-stateless byte-identical to round 2
+ok   Qwen2-7B-453ed157-f64-bf16-mps-sdpa-7a50e44: every logits file matches its recorded digest
+ok   Qwen2-7B-453ed157-f64-f16-cpu-eager-7a50e44: provenance float16/cpu/eager script a4ed0db4
+ok   Qwen2-7B-453ed157-f64-f16-cpu-eager-7a50e44: token IDs equal the truth's
+ok   Qwen2-7B-453ed157-f64-f16-cpu-eager-7a50e44: decode tokens_source is the truth
+ok   Qwen2-7B-453ed157-f64-f16-cpu-eager-7a50e44: decode feeds the truth's tokens
+ok   Qwen2-7B-453ed157-f64-f16-cpu-eager-7a50e44: prompt_decode present=True
+     Qwen2-7B-453ed157-f64-f16-cpu-eager-7a50e44: finite=False greedy=0 stopped=non_finite decode max gap=None first non-finite: [{"position": 1, "token": 0}, {"position": 0, "token": 0}, {"position": 1, "token": 0}, {"logits": "cached", "position": 5, "step": 0, "token": 0}, {"position": 0, "token": 0}]
+ok   Qwen2-7B-453ed157-f64-f16-cpu-eager-7a50e44: every logits file matches its recorded digest
+ok   Qwen2-7B-453ed157-f64-f16-cpu-sdpa-7a50e44: provenance float16/cpu/sdpa script a4ed0db4
+ok   Qwen2-7B-453ed157-f64-f16-cpu-sdpa-7a50e44: token IDs equal the truth's
+ok   Qwen2-7B-453ed157-f64-f16-cpu-sdpa-7a50e44: decode tokens_source is the truth
+ok   Qwen2-7B-453ed157-f64-f16-cpu-sdpa-7a50e44: decode feeds the truth's tokens
+ok   Qwen2-7B-453ed157-f64-f16-cpu-sdpa-7a50e44: prompt_decode present=True
+     Qwen2-7B-453ed157-f64-f16-cpu-sdpa-7a50e44: finite=True greedy=32 decode max gap=0.02734375
+ok   Qwen2-7B-453ed157-f64-f16-cpu-sdpa-7a50e44: every logits file matches its recorded digest
+ok   Qwen2-7B-453ed157-f64-f16-mps-eager-7a50e44: provenance float16/mps/eager script a4ed0db4
+ok   Qwen2-7B-453ed157-f64-f16-mps-eager-7a50e44: token IDs equal the truth's
+ok   Qwen2-7B-453ed157-f64-f16-mps-eager-7a50e44: decode tokens_source is the truth
+ok   Qwen2-7B-453ed157-f64-f16-mps-eager-7a50e44: decode feeds the truth's tokens
+ok   Qwen2-7B-453ed157-f64-f16-mps-eager-7a50e44: prompt_decode present=True
+     Qwen2-7B-453ed157-f64-f16-mps-eager-7a50e44: finite=False greedy=0 stopped=non_finite decode max gap=None first non-finite: [{"position": 1, "token": 0}, {"position": 0, "token": 0}, {"position": 1, "token": 0}, {"logits": "cached", "position": 5, "step": 0, "token": 0}, {"position": 0, "token": 0}]
+ok   Qwen2-7B-453ed157-f64-f16-mps-eager-7a50e44: every logits file matches its recorded digest
+ok   Qwen2-7B-453ed157-f64-f16-mps-sdpa-7a50e44: provenance float16/mps/sdpa script a4ed0db4
+ok   Qwen2-7B-453ed157-f64-f16-mps-sdpa-7a50e44: token IDs equal the truth's
+ok   Qwen2-7B-453ed157-f64-f16-mps-sdpa-7a50e44: decode tokens_source is the truth
+ok   Qwen2-7B-453ed157-f64-f16-mps-sdpa-7a50e44: decode feeds the truth's tokens
+ok   Qwen2-7B-453ed157-f64-f16-mps-sdpa-7a50e44: prompt_decode present=True
+     Qwen2-7B-453ed157-f64-f16-mps-sdpa-7a50e44: finite=True greedy=32 decode max gap=0.046875
+ok   Qwen2-7B-453ed157-f64-f16-mps-sdpa-7a50e44: every logits file matches its recorded digest
+ok   Qwen2-7B-453ed157-f64-cpu-eager: provenance float64/cpu/eager script a4ed0db4
+ok   Qwen2-7B-453ed157-f64-cpu-eager: token IDs equal the truth's
+ok   Qwen2-7B-453ed157-f64-cpu-eager: decode tokens_source is the truth
+ok   Qwen2-7B-453ed157-f64-cpu-eager: decode feeds the truth's tokens
+ok   Qwen2-7B-453ed157-f64-cpu-eager: prompt_decode present=False
+     Qwen2-7B-453ed157-f64-cpu-eager: finite=True greedy=32 decode max gap=7.62939453125e-06
+ok   Qwen2-7B-453ed157-f64-cpu-eager: prompt logits byte-identical to the F64 truth
+ok   Qwen2-7B-453ed157-f64-cpu-eager: every logits file matches its recorded digest
+== 0 failures

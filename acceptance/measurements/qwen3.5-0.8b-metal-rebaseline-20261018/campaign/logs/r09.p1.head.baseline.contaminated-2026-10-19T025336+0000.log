@@ -1,0 +1,74 @@
+== sample 32 round 9 position 1 head baseline
+== source fa8426e5dc8cbcb269c29e211b119ea0acd61054 (worktree /Users/nover/repos/transformers-worktrees/tfm-rebaseline, src tree ea9deb1a, cargo +1.92.0)
+== binary /Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-head/release/deps/qwen35_benchmarks-ffcc519af7a3b786 sha256 cb7bf1b53d045b53a8fadb8cc032c732fc8d40f57ddc347cc8500f1eb0723f99
+== env TRANSFORMERS_QWEN35_DIR=/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17
+== env TRANSFORMERS_QWEN35_REFERENCE_DIR=/Volumes/bag of holding/models/transformers-acceptance
+== cwd /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/rebaseline/campaign
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-head/release/deps/qwen35_benchmarks-ffcc519af7a3b786 --ignored --exact --nocapture --test-threads 1 qwen::qwen35_metal_baseline_benchmark
+== admission cooldown=120.01s load_wait=0.016s load_1m=1.89 load_5m=2.31
+== start 2026-10-19T02:53:36+00:00 loadavg [1.89, 2.31, 2.49]
+== top processes by CPU at start
+  PID  %CPU    RSS     ELAPSED ARGS
+  796  11.4  41440 17-08:11:40 /usr/sbin/coreaudiod
+59357   5.8 734480 01-01:34:59 /Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Versions/155.0.8059.80/Helpers/Codex (Renderer).app/Contents/MacOS/Codex (Renderer) --type=render
+84015   5.8 105408    02:43:11 /System/Applications/Utilities/Activity Monitor.app/Contents/MacOS/Activity Monitor
+59299   4.4  84288 01-01:35:06 /Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Versions/155.0.8059.80/Helpers/Codex (Service).app/Contents/MacOS/Codex (Service) --type=gpu-proc
+  770   3.6  47744 17-08:11:46 /System/Library/DriverExtensions/com.apple.DriverKit-AppleBCMWLAN.dext/com.apple.DriverKit-AppleBCMWLAN com.apple.bcmwlan 0x10000103b com.apple.DriverKit-AppleBCMWLAN
+20184   2.4 878048 04-01:52:22 /Users/nover/Library/Application Support/Claude/claude-code/2.1.295/9d6405864fdc/claude.app/Contents/MacOS/claude --output-format stream-json --verbose --input-format st
+25337   2.4 353568 02-14:00:06 /Users/nover/Library/Application Support/Claude/claude-code/2.1.295/9d6405864fdc/claude.app/Contents/MacOS/claude --output-format stream-json --verbose --input-format st
+48526   2.1  25568       02:00 /Library/Frameworks/Python.framework/Versions/3.11/Resources/Python.app/Contents/MacOS/Python -I /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f
+73534   1.9 764080 01-06:10:00 /Applications/Firefox.app/Contents/MacOS/plugin-container.app/Contents/MacOS/plugin-container -isForBrowser -prefsHandle 0:53104 -prefMapHandle 1:303549 -jsInitHandle 2:
+ 6933   1.7 974176 03-12:33:11 /Applications/Firefox.app/Contents/MacOS/firefox
+  593   1.6  18976 17-08:11:48 /System/Library/CoreServices/launchservicesd
+15887   1.4 289184 03-07:41:50 /Users/nover/Library/Application Support/Claude/claude-code/2.1.295/9d6405864fdc/claude.app/Contents/MacOS/claude --output-format stream-json --verbose --input-format st
+== power Now drawing from 'AC Power'
+ -InternalBattery-0 (id=37027939)	100%; charged; 0:00 remaining present: true
+== thermal Note: No thermal warning level has been recorded
+Note: No performance warning level has been recorded
+Note: No CPU power status has been recorded
+== memory System-wide memory free percentage: 92%
+
+
+running 1 test
+test qwen::qwen35_metal_baseline_benchmark ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 26 filtered out; finished in 213.56s
+
+      213.56 real       247.63 user        71.48 sys
+          2652831744  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              244407  page reclaims
+                  52  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   9  voluntary context switches
+             2805811  involuntary context switches
+       2166542990999  instructions retired
+       1107294795536  cycles elapsed
+          3672328424  peak memory footprint
+
+== end 2026-10-19T02:57:09+00:00 loadavg [6.14, 3.86, 3.06]
+== top processes by CPU at end
+  PID  %CPU    RSS     ELAPSED ARGS
+  796   8.9  41440 17-08:15:13 /usr/sbin/coreaudiod
+59357   4.8 730512 01-01:38:32 /Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Versions/155.0.8059.80/Helpers/Codex (Renderer).app/Contents/MacOS/Codex (Renderer) --type=render
+84982   4.4 776256    02:36:05 /Users/nover/Library/Application Support/Claude/claude-code/2.1.295/9d6405864fdc/claude.app/Contents/MacOS/claude --output-format stream-json --verbose --input-format st
+59299   2.8  84288 01-01:38:39 /Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Versions/155.0.8059.80/Helpers/Codex (Service).app/Contents/MacOS/Codex (Service) --type=gpu-proc
+50491   2.7   9664       00:00 git -C /Users/nover/repos/hmm_compression push -q origin claude/staging
+50492   2.0   4976       00:00 /usr/bin/ssh git@github.com git-receive-pack 'NoahIsCool/hmm_compression.git'
+  615   1.0   6112 17-08:15:21 /usr/sbin/notifyd
+  591   1.0  15120 17-08:15:21 /usr/libexec/opendirectoryd
+  770   0.9  47744 17-08:15:19 /System/Library/DriverExtensions/com.apple.DriverKit-AppleBCMWLAN.dext/com.apple.DriverKit-AppleBCMWLAN com.apple.bcmwlan 0x10000103b com.apple.DriverKit-AppleBCMWLAN
+73534   0.8 764096 01-06:13:33 /Applications/Firefox.app/Contents/MacOS/plugin-container.app/Contents/MacOS/plugin-container -isForBrowser -prefsHandle 0:53104 -prefMapHandle 1:303549 -jsInitHandle 2:
+ 6933   0.7 974176 03-12:36:44 /Applications/Firefox.app/Contents/MacOS/firefox
+  854   0.7  13040 17-08:15:01 /Library/SystemExtensions/77076093-81DD-4634-8CED-ABD06F0EC0ED/com.cisco.anyconnect.macos.acsockext.systemextension/Contents/MacOS/com.cisco.anyconnect.macos.acsockext
+== metal shader cache growth 147960 bytes {"16777235_419/functions.list": {"before": [495084, 1792378280], "after": [495084, 1792378420], "growth_bytes": 0}, "32024/libraries.data": {"before": [379535360, 1792378294], "after": [379682816, 1792378483], "growth_bytes": 147456}, "32024/libraries.list": {"before": [1581932, 1792378294], "after": [1582436, 1792378483], "growth_bytes": 504}}
+== binary sha256 after cb7bf1b53d045b53a8fadb8cc032c732fc8d40f57ddc347cc8500f1eb0723f99
+== in-run load_1m maximum 8.17 over 42 observations; limit 6.0; CONTAMINATED
+== exit=0 wall=213.62s

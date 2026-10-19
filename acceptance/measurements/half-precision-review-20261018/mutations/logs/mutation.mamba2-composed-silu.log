@@ -1,0 +1,27 @@
+== source 1e38eecf989a1ae568b67b2e9fcdd9b2ebdbadb8 with one mutation: the Mamba-2 convolution SiLU call site reverted to activation::silu
+== start 2026-10-18T06:59:19+00:00
+== cmd cargo test --locked --lib mamba2::tests::convolution_silu_is_rounded_once_in_half_precision -- --exact
+== diff
+diff --git a/src/mamba2.rs b/src/mamba2.rs
+index 2f1855a..24a207d 100644
+--- a/src/mamba2.rs
++++ b/src/mamba2.rs
+@@ -858,7 +858,7 @@ impl<B: Backend> Mamba2<B> {
+         );
+         let convolved = zero_invalid(
+             // SiLU rounded once in F16/BF16, as the reference's `F.silu` is.
+-            crate::feed_forward::silu(convolved).swap_dims(1, 2),
++            activation::silu(convolved).swap_dims(1, 2),
+             invalid.as_ref(),
+         );
+         // Verified tiling of `[x | B | C]`: `0..I`, then two `G * N` slices.
+== output
+running 1 test
+test mamba2::tests::convolution_silu_is_rounded_once_in_half_precision ... FAILED
+thread 'mamba2::tests::convolution_silu_is_rounded_once_in_half_precision' (41957809) panicked at src/mamba2_tests.rs:2060:13:
+assertion `left == right` failed: BF16 Recurrent: post-convolution SiLU [2.640625, -0.030395508, -0.018310547, 0.5078125], once-rounded [2.65625, -0.030273438, -0.018188477, 0.5078125]
+  left: [1076428800, 3170435072, 3163947008, 1057095680]
+ right: [1076494336, 3170369536, 3163881472, 1057095680]
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3530 filtered out; finished in 0.01s
+== exit=101 expected=failure
+== restored, git status: clean

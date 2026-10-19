@@ -386,11 +386,29 @@ mod autodiff {
     }
 
     /// Layer-by-layer T5 execution with an identity hook matches full-forward values and all parameter gradients.
+    ///
+    /// The relative-attention bias table is the one parameter whose gradient
+    /// may differ by rounding: staged execution accumulates its two layers'
+    /// contributions in another order. That difference is a few units in the
+    /// last place of the table's gradient, so whether it stays below the
+    /// absolute `1e-6` depends on the gradient's magnitude, and therefore on the
+    /// weights. The weights come from a fixed seed through
+    /// [`deterministic_parameters`], not from Burn's process-wide generator,
+    /// which parallel tests share: with scheduling-dependent weights, 18 of
+    /// 20,000 draws put a table gradient between 16 and 75 and failed by one or
+    /// two units in the last place. Over 2,000 deterministic seeds the table's
+    /// largest gradient had median 1.1 and 8 seeds failed. Seed 1758 gives a
+    /// largest table gradient of 0.17 and a largest difference of `7.5e-9`
+    /// (three elements differ), 134 times below the tolerance; every other
+    /// parameter's gradient is bit-identical.
     #[test]
     fn staged_t5_execution_preserves_every_parameter_gradient() {
         use crate::{
             CausalLmInput, ForwardOptions,
-            models::t5::{T5Config, T5EncoderRecipe},
+            models::{
+                shared::test_support::deterministic_parameters,
+                t5::{T5Config, T5EncoderRecipe},
+            },
         };
         let device = Default::default();
         let config = T5Config {
@@ -406,11 +424,14 @@ mod autodiff {
             dropout_rate: 0.0,
             ..T5Config::default()
         };
-        Ad::seed(&device, 921);
-        let encoder = T5EncoderRecipe::from_config(config)
-            .unwrap()
-            .init::<Ad>(&device)
-            .unwrap();
+        // Scheduling-independent weights; the seed's margin is measured above.
+        let encoder = deterministic_parameters(
+            T5EncoderRecipe::from_config(config)
+                .unwrap()
+                .init::<Ad>(&device)
+                .unwrap(),
+            1758,
+        );
         let source = || CausalLmInput {
             token_ids: Tensor::from_ints([[1, 2, 3]], &device),
             token_mask: None,

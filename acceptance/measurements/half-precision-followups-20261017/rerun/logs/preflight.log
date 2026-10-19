@@ -1,0 +1,16 @@
+== source 818160545802c1374f7607d26ce20cc86d2d758d dirty=0
+== preflight 2026-10-18T05:02:39+00:00 checkout /Users/nover/repos/transformers-worktrees/tfm-half-followups2 branch claude/tfm-half-followups2
+== mount
+/dev/disk5s1 on /Volumes/T9 (apfs, local, nodev, nosuid, journaled, noowners)
+/dev/disk7s1 on /Volumes/bag of holding (apfs, local, nodev, nosuid, journaled, noowners)
+== df
+Filesystem        Size    Used   Avail Capacity iused ifree %iused  Mounted on
+/dev/disk3s1s1   460Gi    13Gi    23Gi    36%    484k  239M    0%   /
+/dev/disk7s1     1.8Ti   1.8Ti    48Gi    98%    2.2M  500M    0%   /Volumes/bag of holding
+/dev/disk5s1     3.6Ti   3.4Ti   293Gi    93%    2.1M  3.1G    0%   /Volumes/T9
+== toolchain
+cargo 1.94.0-nightly (3861f60f6 2025-12-19)
+rustc 1.94.0-nightly (4f14395c3 2025-12-22)
+Python 3.11.9
+== Cargo.lock sha256 9734d5bc2d0a0c6c2d6db45671d4dbddad46424eea878bff6254b06be54827e1
+== lock present: no

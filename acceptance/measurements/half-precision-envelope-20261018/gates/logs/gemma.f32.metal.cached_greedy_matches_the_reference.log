@@ -1,0 +1,41 @@
+== source f9f78b5fc7cca9d1a8afaf29f8f9df04fe7c3008 (git archive export /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src)
+== binary /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/gemma_artifacts-7e9fb558e3797b0a sha256 533d5d9c242bcc783dea609917c57471e30f92fd01b010316e1dde57993b2e17 build A
+== metal/F32 metal::metal_cached_greedy_matches_the_reference
+== env TRANSFORMERS_GEMMA_DECODE_TRUTH_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-f32-cpu-eager
+== env TRANSFORMERS_GEMMA_DIR=/Volumes/T9/models/google/gemma-3-4b-it
+== env TRANSFORMERS_GEMMA_LONG_DECODE_TRUTH_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long-f32-cpu-eager
+== env TRANSFORMERS_GEMMA_LONG_REFERENCE_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long
+== env TRANSFORMERS_GEMMA_REFERENCE_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38
+== cwd /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/gemma_artifacts-7e9fb558e3797b0a --ignored --exact --nocapture --test-threads 1 metal::metal_cached_greedy_matches_the_reference
+== start 2026-10-18T01:11:01+00:00 load 7.66 11.42 18.83 free 91%
+
+running 1 test
+test metal::metal_cached_greedy_matches_the_reference ... F32 matrix products use F32 inputs; tolerance 1e-3
+load: 439 vision-tower tensors intentionally ignored
+cached prefill: max |Δ| = 5.4359436e-5
+greedy: 32 of 32 greedy tokens decisive and matching (smallest decisive margin 2.3321152e-1), 0 ties skipped
+cached decode: 32 decode rows from position 6: max |Δ| = 3.070831298828125e-4 to the decode truth, at step 13 (tolerance 1e-3)
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 39 filtered out; finished in 10.14s
+
+       10.21 real         4.29 user         3.28 sys
+         14537605120  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             1564244  page reclaims
+                  23  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   0  voluntary context switches
+               66557  involuntary context switches
+         61242803458  instructions retired
+         27323768999  cycles elapsed
+         27231609760  peak memory footprint
+== exit=0 wall=11.1s min_free_pct=74 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0

@@ -1,0 +1,11 @@
+--- /Users/nover/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f//cubecl-wgpu-0.10.0/src/backend/metal.rs	2006-07-23 21:21:28
++++ src/backend/metal.rs	2026-10-17 11:19:20
+@@ -102,6 +102,8 @@
+         ElemType::Int(IntKind::I32),
+         ElemType::Int(IntKind::I64),
+         ElemType::Float(FloatKind::F16),
++        // DIAGNOSTIC PATCH (scratch only): declare BF16 as CubeCL 0.11 does.
++        ElemType::Float(FloatKind::BF16),
+         ElemType::Float(FloatKind::F32),
+         ElemType::Bool,
+     ];

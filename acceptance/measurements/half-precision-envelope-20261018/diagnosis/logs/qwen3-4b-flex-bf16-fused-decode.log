@@ -1,0 +1,26 @@
+== source f9f78b5fc7cca9d1a8afaf29f8f9df04fe7c3008 (transformers path dependency on the gate export /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/diag/../gates/src)
+== binary /Volumes/bag of holding/cargo-targets/tfm-half-followups2-diag/release/burn-dump sha256 2752e8150c7cb7e81078f8223abee4b9d218048c33b4247d560d31f1699d5ad8 (the Mac validation record's harness/burn-dump/src/main.rs, sha256 8444d473b4fb1de089d2cd90bfd80073c81a01f5bb84c2fd90a42b2c09440089)
+== Qwen3-4B Flex/BF16 fused attention: prompt 0 plus the truth's 32 greedy tokens, prefill 5, then token-by-token decode
+== cwd /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/diag
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-half-followups2-diag/release/burn-dump flex bf16 /Volumes/T9/models/Qwen/Qwen3-4B 785,6722,315,9625,374,12095,13,576,6722,315,9856,374,19846,13,576,6722,315,15344,374,21718,13,576,6722,315,17689,374,24081,13,576,6722,315,33311,374,80701,13,576,6722 /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/diag/data/qwen3-4b-flex-bf16-fused-decode fused 5
+== start 2026-10-18T03:26:28+00:00 load 1.65 2.04 2.90
+wrote 38 points for 37 tokens (eager=false, prefill=5) to /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/diag/data/qwen3-4b-flex-bf16-fused-decode
+       70.06 real        50.72 user        34.60 sys
+         10749378560  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              663538  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                 276  voluntary context switches
+              233311  involuntary context switches
+       1122396014525  instructions retired
+        306703334386  cycles elapsed
+         10745225496  peak memory footprint
+== exit=0 wall=70.1s end=2026-10-18T03:27:38+00:00 load_end 1.62 min_free_pct=90 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0

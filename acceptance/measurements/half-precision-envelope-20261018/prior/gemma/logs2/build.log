@@ -1,0 +1,5 @@
+   Compiling transformers v0.1.0 (/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/gemma/repo)
+    Finished `release` profile [optimized] target(s) in 27.87s
+  Executable tests/gemma_artifacts.rs (/Volumes/bag of holding/cargo-targets/followups-gemma/release/deps/gemma_artifacts-7e9fb558e3797b0a)
+  Executable tests/metal_bf16_probe.rs (/Volumes/bag of holding/cargo-targets/followups-gemma/release/deps/metal_bf16_probe-5c2b593db1bdc288)
+CARGO_TARGET_DIR="/Volumes/bag of holding/cargo-targets/followups-gemma" carg  119.85s user 2.41s system 438% cpu 27.911 total

@@ -1,0 +1,12 @@
+2026-10-17T23:49:54Z waiting for the lock (SmolLM-135M)
+2026-10-17T23:49:54Z lock acquired for SmolLM-135M
+2026-10-17T19:50:04 SmolLM-135M bf16-cpu-eager exit=0
+2026-10-17T19:50:09 SmolLM-135M bf16-cpu-sdpa exit=0
+2026-10-17T19:50:19 SmolLM-135M bf16-mps-eager exit=0
+2026-10-17T19:50:29 SmolLM-135M bf16-mps-sdpa exit=0
+2026-10-17T19:50:39 SmolLM-135M f16-cpu-eager exit=0
+2026-10-17T19:50:44 SmolLM-135M f16-cpu-sdpa exit=0
+2026-10-17T19:50:59 SmolLM-135M f16-mps-eager exit=0
+2026-10-17T19:51:09 SmolLM-135M f16-mps-sdpa exit=0
+2026-10-17T23:51:09Z lock released
+2026-10-17T23:51:09Z done

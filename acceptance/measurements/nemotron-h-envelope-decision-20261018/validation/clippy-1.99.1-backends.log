@@ -1,0 +1,82 @@
+== source 603ec5c41d4fcb8b4895010157f347dda4f57e26 dirty=0
+== cmd cargo +1.99.1 clippy --locked --all-targets --no-default-features --features std,flex,cpu,cuda,rocm,tokenizers,chat-templates,autodiff,train -- -D warnings
+== env CARGO_TARGET_DIR=/Volumes/bag of holding/cargo-targets/tfm-nemotron-envelope
+== start 2026-10-18T23:37:51+00:00 uptime 19:37  up 17 days,  4:58, 3 users, load averages: 22.37 13.82 11.84
+== start free /Volumes/bag of holding 163.2 GiB
+   Compiling ring v0.17.14
+   Compiling icu_normalizer_data v2.3.0
+   Compiling icu_properties_data v2.3.0
+   Compiling httparse v1.10.1
+    Checking futures-core v0.3.34
+    Checking parking_lot v0.12.5
+    Checking bytes v1.12.1
+    Checking objc2-core-foundation v0.3.2
+   Compiling cubecl v0.10.0
+    Checking burn-dataset v0.21.0
+    Checking futures-lite v2.6.1
+    Checking async-channel v2.5.0
+    Checking futures-util v0.3.34
+   Compiling icu_normalizer v2.3.0
+   Compiling icu_properties v2.3.0
+   Compiling hyper v1.11.1
+    Checking objc2-io-kit v0.3.2
+    Checking cubecl-common v0.10.0
+    Checking sysinfo v0.38.4
+   Compiling idna_adapter v1.2.2
+   Compiling idna v1.1.0
+   Compiling hyper-util v0.1.20
+    Checking rstest v0.26.1
+    Checking cubecl-ir v0.10.0
+   Compiling url v2.5.8
+   Compiling rustls v0.23.46
+   Compiling tower-http v0.6.11
+   Compiling rustls-webpki v0.103.15
+    Checking cubecl-runtime v0.10.0
+    Checking cubecl-core v0.10.0
+   Compiling tokio-rustls v0.26.4
+   Compiling hyper-rustls v0.27.9
+   Compiling reqwest v0.12.28
+    Checking cubecl-opt v0.10.0
+    Checking cubecl-std v0.10.0
+    Checking cubecl-cpp v0.10.0
+   Compiling tracel-llvm-bundler v20.1.4-7
+    Checking cubecl-hip v0.10.0
+    Checking cubecl-cuda v0.10.0
+   Compiling tracel-tblgen-rs v20.1.4-7
+   Compiling tracel-mlir-rs-macros v20.1.4-7
+   Compiling tracel-mlir-sys v20.1.4-7
+   Compiling cubecl-cpu v0.10.0
+    Checking tracel-mlir-rs v20.1.4-7
+    Checking tracel-llvm v20.1.4-7
+    Checking burn-std v0.21.0
+    Checking cubek-std v0.2.0
+    Checking cubek-quant v0.2.0
+    Checking cubek-random v0.2.0
+    Checking cubek-fft v0.2.0
+    Checking burn-backend v0.21.0
+    Checking burn-ir v0.21.0
+    Checking burn-tensor v0.21.0
+    Checking burn-autodiff v0.21.0
+    Checking cubek-matmul v0.2.0
+    Checking cubek-reduce v0.2.0
+    Checking burn-core v0.21.0
+    Checking burn-optim v0.21.0
+    Checking burn-nn v0.21.0
+    Checking burn-store v0.21.0
+    Checking burn-fusion v0.21.0
+    Checking burn-flex v0.21.0
+    Checking cubek-attention v0.2.0
+    Checking cubek-convolution v0.2.0
+    Checking cubek v0.2.0
+    Checking burn-cubecl-fusion v0.21.0
+    Checking burn-cubecl v0.21.0
+    Checking burn-cuda v0.21.0
+    Checking burn-cpu v0.21.0
+    Checking burn-rocm v0.21.0
+    Checking burn-train v0.21.0
+    Checking burn v0.21.0
+    Checking transformers v0.1.0 (/Users/nover/repos/transformers-worktrees/tfm-nemotron-envelope)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 43.85s
+== end 2026-10-18T23:38:35+00:00 wall=43.9s
+== source after run 603ec5c41d4fcb8b4895010157f347dda4f57e26 dirty=0
+== exit=0

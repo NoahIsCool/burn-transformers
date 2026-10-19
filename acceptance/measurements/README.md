@@ -61,6 +61,114 @@ lists its failing gates, the gates it did not run, and its open findings;
 status, and identity to the committed logs and to the earlier records it
 repeats. It promotes no checkpoint.
 
+The [October 18 official-envelope round](half-precision-envelope-20261018.json)
+records the 57 official half-precision bundles that the envelope rule reads
+(four BF16 and four F16 graphs per truth, from the generator at `7a50e44`,
+by file digest), the leave-one-out derivation of its slacks, and the Burn
+runs at `f9f78b5` after the once-rounded SiLU and eager-scale fixes: the
+Llama-family and Gemma gates in F32 and half precision, the Qwen3.5-0.8B
+parity, benchmark, controlled benchmark rerun, and memory gates, the larger
+checkpoints' official gates, smokes, and audits, the Qwen3.8-27B Q8/Q4
+conversions, probes, diagnoses, and the source checks at `1816d73`. Each test
+process has its own log, named by source commit and binary digest, beside
+the copied harness in its campaign directory. It lists its failing gate, the
+gates it did not run, the decisions that await the maintainer, and its open
+findings, and leaves the October 17 records byte-identical;
+`scripts/tests/test_half_precision_envelope_record.py` ties every quoted
+figure, status, and identity to the committed logs. It promotes no checkpoint.
+
+The [half-precision follow-ups record](half-precision-followups-20261017.json),
+named for the round that began on October 17 with the decision measurements,
+completes that round. It repeats the decisions with their rationale,
+rejected alternatives, and review flags, verbatim from the decision stage's
+report, and states what each led to. It also records the October 18 rerun of
+every Llama-family and Gemma gate at the integrated head `8181605`: 106
+processes in the worktree itself, from release binaries rebuilt there that
+are byte-identical to the `f9f78b5` gate binaries. 94 pass; the 12 expected
+failures are Qwen2-7B's uncalibrated F16 runs and the Gemma Metal/F16 and
+Metal BF16 refusals. The 99 runs with an `f9f78b5` counterpart reproduce its
+output exactly, and all 40 F32 gates repeat every printed statistic of the
+last pre-SiLU round. The round still fails, because the Nemotron-H
+official-precision failure at `f9f78b5` stands. The campaign directory holds
+the rerun's logs and harness, the digests of every bundle, checkpoint
+configuration, and binary the runs read, the final head checks, and the
+stage reports. The envelope and October 17 records stay byte-identical, and
+`scripts/tests/test_half_precision_followups_record.py` recomputes every
+status, comparison, and identity from the committed logs. The record promotes
+no checkpoint.
+
+The [half-precision review record](half-precision-review-20261018.json)
+answers a review of the envelope and follow-ups records at the code head
+`1e38eec`. It records the eager-attention rounding-point test that exposed
+Flex's F16 partial sums in the eager graph (fixed), the convolution SiLU
+call-site tests, seven mutations that each fail their test, a torch 2.10.0
+probe of PyTorch's scalar multiply and matrix products, and 33 single-process
+runs: every gemma-3-4b-it gate, whose 17 runs with an `8181605` counterpart
+reproduce it exactly, the Gemma Metal/F16 runs now failing as uncalibrated,
+and the new operation-level tests on Flex and Metal. It also records that
+Qwen3.5-0.8B's cold first token breaches the approved September 10 baseline
+in the base binary as well, which awaits the maintainer, and corrects two
+statements of the envelope record, which stays byte-identical with the other
+earlier records. `scripts/tests/test_half_precision_review_record.py`
+recomputes its statuses, figures, and identities. It promotes no checkpoint.
+
+The [Qwen3.5-0.8B re-baseline record](qwen3.5-0.8b-metal-rebaseline-20261018.json)
+carries the maintainer's October 18 decision to re-baseline the Qwen3.5-0.8B
+benchmarks on the current host (Mac15,11, macOS 27.0.1) and to report cold
+first token as a diagnostic rather than a gate. It measures the head
+`fa8426e` against the September source `c70057e`, both rebuilt with rustc
+1.92.0 and the profile's features, under the
+[campaign protocol](../../BENCHMARKS.md#qwen35-08b-benchmark-campaign-protocol):
+12 alternating, counterbalanced rounds of the baseline and public benchmarks
+(48 clean processes, 5 attempts contaminated by other CPU work and rerun, and
+an aborted first attempt kept unused). It is steady from round 5 under the
+steady-state rule as corrected on October 19; the record's `review_amendment`
+says what changed from its first version, which reported round 3 under the
+original rule, and every measurement file keeps its bytes. Its `reference`
+block, the head's steady-state medians with the executable's identity, is
+what future comparisons are judged against; it supersedes the September 10 baseline of the
+[v0.1 release record](v0_1-release-20260910.json) for that purpose without
+editing it or the September summaries. Every sample's raw repetitions are in
+the record, and the campaign directory holds the reports, logs, host
+records, build logs, plans, and harness copies;
+`scripts/tests/test_qwen35_rebaseline_record.py` recomputes every sample,
+the steady state, the reference, and every comparison from them with the
+crate's `scripts/qwen35_benchmark_protocol.py`. It promotes no checkpoint and
+changes no support claim.
+
+The [Nemotron-H envelope record](nemotron-h-envelope-20261018.json) proposes
+to replace the Nemotron-H official-precision gate's two-graph floor with an
+envelope over four official F16 graphs (CPU and MPS, eager and SDPA
+attention) and a per-path leave-one-out slack from those graphs alone. It
+holds the method registered before any new data, the two new SDPA graph
+bundles' manifests and generator logs (a first, resident MPS attempt swapped
+and was stopped), a control repeating the oracle's MPS eager graph (not
+bitwise equal to it), the derivation and its assessment written before any
+Burn row, and the gate run at `2cf83d7`, which passes the proposed rule with
+every slack at the rounding's `1.1`.
+`scripts/tests/test_nemotron_h_envelope_record.py` recomputes its statuses,
+figures, quotes, ordering, and identities, and the earlier records stay
+byte-identical. It promotes no checkpoint.
+
+The [Nemotron-H envelope decision record](nemotron-h-envelope-decision-20261018.json)
+records the maintainer's decision of October 18 not to adopt that rule: the
+gate judges by its two official F16 floors again and fails at cached
+decision 22 (`0.998558` against `0.998635`), an open finding inferred from
+the rows the envelope record measured, and the four-graph envelope is a
+printed diagnostic. It holds the bundle-only run that recomputes the floors
+and the envelope at the new source, the source checks, and corrections of
+four envelope-record statements. It was revised once before integration (its
+first version, committed at `665762c`, is pinned by digest): next to the
+verdict it lists the three other official F16 rows that fall below a restored
+floor (CPU SDPA at teacher decision 18; MPS SDPA and the MPS eager control at
+cached decision 22), diagnostic context that leaves the rule unchanged, and
+it discloses that the derivation tool's digest changed with a comment-only
+edit at `530a82a`; every other value is unchanged. The envelope record and
+the earlier records stay byte-identical, and
+`scripts/tests/test_nemotron_h_envelope_decision_record.py` recomputes the
+decision record's verdict, figures, quotes, and identities. It promotes no
+checkpoint.
+
 ## Published and repository-only records
 
 The crates.io package carries only part of this directory, because the

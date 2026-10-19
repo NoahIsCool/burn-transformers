@@ -1,0 +1,32 @@
+== source f9f78b5fc7cca9d1a8afaf29f8f9df04fe7c3008 (git archive export /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src)
+== binary /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/muse_glimmer_artifacts-88ebcadea94bbe9e sha256 419cb9d51dbfffd4862f052475bcee97af1f6819a45ac661beaf5f003aeb291f build B
+== metal/F16 loads_pinned_muse_glimmer_f16_and_audits_streaming
+== env TRANSFORMERS_MUSE_GLIMMER_DIR=/Volumes/bag of holding/models/meta-models/Muse-Glimmer-30B-a4e59da52a7bc87ae7251dd5545c0dd437c44b68
+== cwd /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/muse_glimmer_artifacts-88ebcadea94bbe9e --ignored --exact --nocapture --test-threads 1 loads_pinned_muse_glimmer_f16_and_audits_streaming
+== start 2026-10-18T01:23:00+00:00 load 3.71 4.95 10.49 free 92%
+
+running 1 test
+test loads_pinned_muse_glimmer_f16_and_audits_streaming ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 39 filtered out; finished in 271.19s
+
+      271.75 real       146.17 user        42.40 sys
+         19898023936  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             3984032  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                  74  voluntary context switches
+             1791427  involuntary context switches
+       2312909739594  instructions retired
+        664627885611  cycles elapsed
+         60750372016  peak memory footprint
+== exit=0 wall=272.1s min_free_pct=42 max_swap_growth_mib=0 swapin_mib=1 pressured_swapin_mib=0

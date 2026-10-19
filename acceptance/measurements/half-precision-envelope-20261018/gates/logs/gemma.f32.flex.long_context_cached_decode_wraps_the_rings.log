@@ -1,0 +1,43 @@
+== source f9f78b5fc7cca9d1a8afaf29f8f9df04fe7c3008 (git archive export /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src)
+== binary /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/gemma_artifacts-7e9fb558e3797b0a sha256 533d5d9c242bcc783dea609917c57471e30f92fd01b010316e1dde57993b2e17 build A
+== flex/F32 flex_long_context_cached_decode_wraps_the_rings
+== env TRANSFORMERS_GEMMA_DECODE_TRUTH_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-f32-cpu-eager
+== env TRANSFORMERS_GEMMA_DIR=/Volumes/T9/models/google/gemma-3-4b-it
+== env TRANSFORMERS_GEMMA_LONG_DECODE_TRUTH_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long-f32-cpu-eager
+== env TRANSFORMERS_GEMMA_LONG_REFERENCE_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long
+== env TRANSFORMERS_GEMMA_REFERENCE_DIR=/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38
+== cwd /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/gemma_artifacts-7e9fb558e3797b0a --ignored --exact --nocapture --test-threads 1 flex_long_context_cached_decode_wraps_the_rings
+== start 2026-10-18T01:10:23+00:00 load 10.17 12.26 19.43 free 89%
+
+running 1 test
+test flex_long_context_cached_decode_wraps_the_rings ... F32 matrix products use F32 inputs; tolerance 5e-3
+load: 439 vision-tower tensors intentionally ignored
+cached: capacity 1245, 29 layers in 1024-slot rings
+cached chunk 0..1000: max |Δ| = 1.5115738e-4 at position 999
+cached chunk 1000..1237: max |Δ| = 6.818771e-5 at position 1236
+long greedy: 8 of 8 greedy tokens decisive and matching (smallest decisive margin 3.3272362e-1), 0 ties skipped
+long cached decode: 8 decode rows from position 1237: max |Δ| = 1.5735626220703125e-4 to the decode truth, at step 3 (tolerance 5e-3)
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 39 filtered out; finished in 28.96s
+
+       28.98 real       112.15 user         4.75 sys
+         23150952448  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             1426903  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   1  voluntary context switches
+              191194  involuntary context switches
+       1554758720730  instructions retired
+        399158504432  cycles elapsed
+         23152067456  peak memory footprint
+== exit=0 wall=29.5s min_free_pct=89 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0

@@ -1,0 +1,43 @@
+== lock taken 2026-10-17T23:05:55Z load { 5.16 27.97 74.73 }
+== script sha256 c28cfd7e9bd55f7833a29f29ff8f7b605771052c7e3132053e33c8292b5ac983
+float32-clamp prompt 0 positions >= 1: max |d| = 10.6829, mean |d| = 1.11467 (official BF16 there: 0.383584, 0.041028); per-position max |d|: 33.3 10.7 4.82 4.77 5.12 6.71
+float32-clamp prompt 0: 6 tokens, finite=True; max |d| = 33.3225 at position 0 token 154896 (official BF16 0.383584, bound 0.460301); mean |d| = 1.9026 (official BF16 0.0377086, bound 0.0452503); OUTSIDE the rule; argmax agrees with F32 at 4/6 positions
+float32-clamp prompt 1 positions >= 1: max |d| = 17.2537, mean |d| = 1.63451 (official BF16 there: 0.592167, 0.0539211); per-position max |d|: 33.6 17.3 7.74 8.66 8.85 10.8 11.8 9.86 7.95 7.2 6.75 9.17 11.3 17 8.26 6.87 6.48 9.33 13.3
+float32-clamp prompt 1: 19 tokens, finite=True; max |d| = 33.5812 at position 0 token 154896 (official BF16 0.592167, bound 0.7106); mean |d| = 1.8585 (official BF16 0.0521943, bound 0.0626332); OUTSIDE the rule; argmax agrees with F32 at 17/19 positions
+float32-clamp prompt 2 positions >= 1: max |d| = 19.605, mean |d| = 1.42795 (official BF16 there: 0.747809, 0.0686701); per-position max |d|: 33.6 19.6 7.07 6.82 4.71 6.13 4.99 5.47 7.38
+float32-clamp prompt 2: 9 tokens, finite=True; max |d| = 33.5766 at position 0 token 154896 (official BF16 0.747809, bound 0.897371); mean |d| = 1.92369 (official BF16 0.0633858, bound 0.076063); OUTSIDE the rule; argmax agrees with F32 at 8/9 positions
+float32-clamp: clamp fired on 111 tensors, 184 entries (all prompts); 20.4 s
+float16-clamp prompt 0 positions >= 1: max |d| = 10.4761, mean |d| = 1.10485 (official BF16 there: 0.383584, 0.041028); per-position max |d|: 33.3 10.5 4.8 4.78 5.14 6.78
+float16-clamp prompt 0: 6 tokens, finite=True; max |d| = 33.3362 at position 0 token 23415 (official BF16 0.383584, bound 0.460301); mean |d| = 1.89659 (official BF16 0.0377086, bound 0.0452503); OUTSIDE the rule; argmax agrees with F32 at 4/6 positions
+float16-clamp prompt 1 positions >= 1: max |d| = 17.1982, mean |d| = 1.54108 (official BF16 there: 0.592167, 0.0539211); per-position max |d|: 33.5 17.2 5.96 7.77 8.28 10.8 11.7 9.87 7.89 7.21 6.76 9.17 11.4 11.6 8.25 6.49 6.55 9.35 13.3
+float16-clamp prompt 1: 19 tokens, finite=True; max |d| = 33.4619 at position 0 token 154896 (official BF16 0.592167, bound 0.7106); mean |d| = 1.76964 (official BF16 0.0521943, bound 0.0626332); OUTSIDE the rule; argmax agrees with F32 at 17/19 positions
+float16-clamp prompt 2 positions >= 1: max |d| = 19.6805, mean |d| = 1.42661 (official BF16 there: 0.747809, 0.0686701); per-position max |d|: 33.4 19.7 7.06 6.77 4.73 6.13 5 5.46 7.36
+float16-clamp prompt 2: 9 tokens, finite=True; max |d| = 33.4456 at position 0 token 23415 (official BF16 0.747809, bound 0.897371); mean |d| = 1.92125 (official BF16 0.0633858, bound 0.076063); OUTSIDE the rule; argmax agrees with F32 at 8/9 positions
+float16-clamp: clamp fired on 112 tensors, 195 entries (all prompts); 1.6 s
+bfloat16 prompt 0 positions >= 1: max |d| = 0.383584, mean |d| = 0.041028 (official BF16 there: 0.383584, 0.041028); per-position max |d|: 0.173 0.351 0.265 0.352 0.331 0.384
+bfloat16 prompt 0: 6 tokens, finite=True; max |d| = 0.383584 at position 5 token 1 (official BF16 0.383584, bound 0.460301); mean |d| = 0.0377086 (official BF16 0.0377086, bound 0.0452503); within the rule; argmax agrees with F32 at 6/6 positions
+bfloat16 prompt 1 positions >= 1: max |d| = 0.592167, mean |d| = 0.0539211 (official BF16 there: 0.592167, 0.0539211); per-position max |d|: 0.173 0.592 0.347 0.295 0.272 0.361 0.353 0.363 0.296 0.201 0.349 0.345 0.226 0.285 0.209 0.286 0.277 0.423 0.358
+bfloat16 prompt 1: 19 tokens, finite=True; max |d| = 0.592167 at position 1 token 23130 (official BF16 0.592167, bound 0.7106); mean |d| = 0.0521943 (official BF16 0.0521943, bound 0.0626332); within the rule; argmax agrees with F32 at 19/19 positions
+bfloat16 prompt 2 positions >= 1: max |d| = 0.747809, mean |d| = 0.0686701 (official BF16 there: 0.747809, 0.0686701); per-position max |d|: 0.173 0.697 0.505 0.748 0.502 0.358 0.251 0.473 0.412
+bfloat16 prompt 2: 9 tokens, finite=True; max |d| = 0.747809 at position 3 token 33178 (official BF16 0.747809, bound 0.897371); mean |d| = 0.0633858 (official BF16 0.0633858, bound 0.076063); within the rule; argmax agrees with F32 at 7/9 positions
+bfloat16: clamp fired on 0 tensors, 0 entries (all prompts); 1.5 s
+torch 2.10.0 transformers 5.2.0; truth /Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38; official /Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-bf16
+       25.69 real        19.37 user        12.10 sys
+         34368978944  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             2588573  page reclaims
+              526986  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                4000  voluntary context switches
+              430967  involuntary context switches
+        332385013319  instructions retired
+        107066904233  cycles elapsed
+         23783810200  peak memory footprint
+== exit=0 end 2026-10-17T23:06:20Z

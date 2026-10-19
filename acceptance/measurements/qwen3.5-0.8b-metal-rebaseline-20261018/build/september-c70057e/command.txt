@@ -1,0 +1,1 @@
+env CARGO_TARGET_DIR=/Volumes/bag\ of\ holding/cargo-targets/tfm-rebaseline/bench-september cargo +1.92.0 test --manifest-path /Users/nover/repos/transformers-worktrees/tfm-rebaseline-september-c70057e/Cargo.toml --locked --offline --release --no-default-features --features std\,metal\,tokenizers\,chat-templates --no-run --test qwen35_benchmarks --message-format=json 

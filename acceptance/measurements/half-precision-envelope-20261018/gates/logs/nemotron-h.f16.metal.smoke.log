@@ -1,0 +1,33 @@
+== source f9f78b5fc7cca9d1a8afaf29f8f9df04fe7c3008 (git archive export /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src)
+== binary /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/nemotron_h_artifacts-4cd54efee0f15525 sha256 651e75ca83bfa0bd1d6f5298f9a439fabfc5d502ff54441baefd545fe4ae2692 build B
+== metal/F16 loads_pinned_nemotron_f16_and_smokes_base_inference
+== env TRANSFORMERS_NEMOTRON_H_DIR=/Volumes/bag of holding/models/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16-a9904d24bcc1d289a1950fa9d2b978c47cf903b9
+== cwd /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/nemotron_h_artifacts-4cd54efee0f15525 --ignored --exact --nocapture --test-threads 1 loads_pinned_nemotron_f16_and_smokes_base_inference
+== start 2026-10-18T02:36:42+00:00 load 3.33 3.77 4.70 free 88%
+
+running 1 test
+test loads_pinned_nemotron_f16_and_smokes_base_inference ... Nemotron 3.5 Burn Metal smoke: tensors_applied=6513, source_bytes=65826538624, shard_order=["model-00001-of-00014.safetensors", "model-00002-of-00014.safetensors", "model-00003-of-00014.safetensors", "model-00004-of-00014.safetensors", "model-00005-of-00014.safetensors", "model-00006-of-00014.safetensors", "model-00007-of-00014.safetensors", "model-00008-of-00014.safetensors", "model-00009-of-00014.safetensors", "model-00010-of-00014.safetensors", "model-00011-of-00014.safetensors", "model-00012-of-00014.safetensors", "model-00013-of-00014.safetensors", "model-00014-of-00014.safetensors"], load_seconds=89.412, stateless_seconds=1.857, prefill_seconds=0.320, decode_seconds=0.324, first_token=1256, stateless_hidden_sha256=177e9af9013ce345644de1cfb8b1f293b91ca642ab76e4461dedfed1d55e6d35, prefill_hidden_sha256=177e9af9013ce345644de1cfb8b1f293b91ca642ab76e4461dedfed1d55e6d35, decode_hidden_sha256=4248a09634d33a837dbb68ce17d7b23ff6b211c6555f4c9dc4fc8946aaf4631f, stateless_prefill_logit_cosine=1.000000000, stateless_prefill_hidden_cosine=1.000000000, decode_teacher_logit_cosine=0.999362664, total_seconds=291.326
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 41 filtered out; finished in 291.33s
+
+      291.79 real       160.40 user        48.35 sys
+          3960274944  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             4187548  page reclaims
+                 168  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                 229  voluntary context switches
+             1761301  involuntary context switches
+       2596893390688  instructions retired
+        760438835781  cycles elapsed
+         68985801800  peak memory footprint
+== exit=0 wall=292.0s min_free_pct=48 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0

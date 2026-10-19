@@ -1,0 +1,42 @@
+== source base: export /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/silu/base of 7bd057ecc56d60df2776639befd30058720d3c09 (commit=7bd057ecc56d60df2776639befd30058720d3c09 files=2733 dirty=0)
+== binary /Volumes/bag of holding/cargo-targets/followups-silu/base/release/deps/llama_family_artifacts-693e11c29d0eb894 sha256 48b39504ecde9466d766834ee38675950aea7498d71fb418191ee92c2086fa89
+== metal/f16 metal::metal_prompt_logits_match_the_reference
+== env TRANSFORMERS_LLAMA_FAMILY_BF16_REFERENCE_DIR=/Volumes/T9/transformers-references/Qwen3-4B-531c80e2-bf16
+== env TRANSFORMERS_LLAMA_FAMILY_DIR=/Volumes/T9/models/Qwen/Qwen3-4B
+== env TRANSFORMERS_LLAMA_FAMILY_DTYPE=f16
+== env TRANSFORMERS_LLAMA_FAMILY_REFERENCE_DIR=/Volumes/T9/transformers-references/Qwen3-4B-531c80e2
+== cwd /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/silu/base
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/followups-silu/base/release/deps/llama_family_artifacts-693e11c29d0eb894 --ignored --exact --nocapture --test-threads 1 metal::metal_prompt_logits_match_the_reference
+== start 2026-10-17T21:14:23+00:00 load 9.68 24.36 36.80
+
+running 1 test
+test metal::metal_prompt_logits_match_the_reference ... F16 bounds of prompt 0: max 8.400341033935547e-1, mean 9.356504341905933e-2 (1.2 × official BF16 7.000284194946289e-1, 7.797086951588278e-2; /Volumes/T9/transformers-references/Qwen3-4B-531c80e2-bf16)
+F16 bounds of prompt 1: max 8.413138389587402e-1, mean 5.2039653755092376e-2 (1.2 × official BF16 7.010948657989502e-1, 4.336637812924365e-2; /Volumes/T9/transformers-references/Qwen3-4B-531c80e2-bf16)
+F16 bounds of prompt 2: max 1.0554290771484374e0, mean 6.461845336599158e-2 (1.2 × official BF16 8.795242309570313e-1, 5.3848711138326316e-2; /Volumes/T9/transformers-references/Qwen3-4B-531c80e2-bf16)
+F32 matrix products use F32 inputs; the F16 run is judged by the official calibration, greedy steps at 8.4003407e-1
+prompt 0: 5 tokens, max |Δ| = 4.73027229309082e-2 at position 4 (bound 8.400341033935547e-1), mean |Δ| = 4.976689390551652e-3 (bound 9.356504341905933e-2)
+prompt 1: 13 tokens, max |Δ| = 6.45301342010498e-2 at position 0 (bound 8.413138389587402e-1), mean |Δ| = 5.8344752422051175e-3 (bound 5.2039653755092376e-2)
+prompt 2: 8 tokens, max |Δ| = 1.6913414001464844e-1 at position 0 (bound 1.0554290771484374e0), mean |Δ| = 6.684873947032355e-3 (bound 6.461845336599158e-2)
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 22 filtered out; finished in 4.70s
+
+        4.73 real         2.66 user         1.95 sys
+          4595187712  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              655689  page reclaims
+                  41  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   0  voluntary context switches
+               19596  involuntary context switches
+         65602530090  instructions retired
+         17206756258  cycles elapsed
+         11790339504  peak memory footprint
+== exit=0 wall=5.1s end=2026-10-17T21:14:28+00:00 load_end 8.99 min_free_pct=86 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0

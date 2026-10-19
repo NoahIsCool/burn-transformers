@@ -1,0 +1,29 @@
+== source patched: export /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/silu/repo of 7bd057ecc56d60df2776639befd30058720d3c09 (now commit=7bd057ecc56d60df2776639befd30058720d3c09 files=2733 dirty=6)
+== binary built from patch /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/silu/silu-measured-8ca626bf.patch sha256 8ca626bf919e334a38f195069628b60aedb585d453b6526257678c4bec13a1d4
+== binary /Volumes/bag of holding/cargo-targets/followups-silu/tools-patched/release/silu-bench sha256 c1dd3ca5e1b2accd4f1fb096fc50aeefbc66a9552c1f542b7e3c8a5403d9cade
+== round 3
+== cwd /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/silu/repo
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/followups-silu/tools-patched/release/silu-bench act metal f16 14336 1,128,512 200
+== start 2026-10-17T22:22:52+00:00 load 3.66 4.29 6.99
+{"kind":"act","backend":"cubecl<wgpu<msl>>","dtype":"F16","tokens":1,"intermediate":14336,"reps":200,"median_us":1525.709,"min_us":1291.250,"max_us":1630.583}
+{"kind":"act","backend":"cubecl<wgpu<msl>>","dtype":"F16","tokens":128,"intermediate":14336,"reps":200,"median_us":1534.750,"min_us":1275.916,"max_us":1581.708}
+{"kind":"act","backend":"cubecl<wgpu<msl>>","dtype":"F16","tokens":512,"intermediate":14336,"reps":200,"median_us":2659.667,"min_us":2343.625,"max_us":2806.125}
+        1.23 real         0.13 user         0.14 sys
+           172949504  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+               11956  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   0  voluntary context switches
+               12255  involuntary context switches
+          1477190564  instructions retired
+           880529101  cycles elapsed
+           664322936  peak memory footprint
+== exit=0 wall=2.0s end=2026-10-17T22:22:54+00:00 load_end 3.53 min_free_pct=89 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0

@@ -1,0 +1,21 @@
+2026-10-17T21:14:09Z waiting for the lock (SmolLM-135M)
+2026-10-17T22:38:10Z lock acquired for SmolLM-135M
+2026-10-17T22:38:15Z prompt-defects-SmolLM-135M exit=0
+2026-10-17T22:38:15Z lock released
+2026-10-17T22:38:15Z waiting for the lock (Qwen3-4B)
+2026-10-17T22:38:15Z lock acquired for Qwen3-4B
+2026-10-17T22:38:38Z prompt-defects-Qwen3-4B exit=0
+2026-10-17T22:38:38Z lock released
+2026-10-17T22:38:38Z waiting for the lock (SmolLM3-3B)
+2026-10-17T22:38:38Z lock acquired for SmolLM3-3B
+2026-10-17T22:39:00Z prompt-defects-SmolLM3-3B exit=0
+2026-10-17T22:39:00Z lock released
+2026-10-17T22:39:00Z waiting for the lock (Llama-3.1-8B)
+2026-10-17T22:39:00Z lock acquired for Llama-3.1-8B
+2026-10-17T22:39:13Z prompt-defects-Llama-3.1-8B exit=0
+2026-10-17T22:39:13Z lock released
+2026-10-17T22:39:13Z waiting for the lock (Qwen2-7B)
+2026-10-17T22:39:13Z lock acquired for Qwen2-7B
+2026-10-17T22:40:28Z prompt-defects-Qwen2-7B exit=0
+2026-10-17T22:40:28Z lock released
+2026-10-17T22:40:28Z done

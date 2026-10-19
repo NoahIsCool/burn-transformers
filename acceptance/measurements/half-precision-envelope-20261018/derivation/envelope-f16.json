@@ -1,0 +1,2498 @@
+{
+ "dtype": "float16",
+ "cases": [
+  {
+   "name": "SmolLM-135M-1d461723",
+   "dtype": "float16",
+   "truth": {
+    "bundle": "/Volumes/T9/transformers-references/SmolLM-135M-1d461723",
+    "dtype": "float32",
+    "reference_json_sha256": "3d3235dc28250bf45284bcf16cb8525db6b1f800f7ec700286909e4afea05010"
+   },
+   "decode_truth": {
+    "bundle": "/Volumes/T9/transformers-references/SmolLM-135M-1d461723-f32-cpu-eager",
+    "dtype": "float32",
+    "reference_json_sha256": "3e765467b7fb41699cf0a7191b8683265799acff219d2999c46165372519e01f"
+   },
+   "script_sha256": "a4ed0db48e9b4e6c816bf23c25f56cf39498d06165af49a0655c841d1b56a602",
+   "graphs": {
+    "cpu-eager": {
+     "bundle": "/Volumes/T9/transformers-references/SmolLM-135M-1d461723-f16-cpu-eager-7a50e44",
+     "reference_json_sha256": "06cf73e4d1403cfb6a3f406748a2c7be5d1cf55e3d5bcab7d2a78743f53f6973",
+     "prompt": [
+      {
+       "max": 0.12596797943115234,
+       "position": 0,
+       "token": 38171,
+       "mean": 0.018751589034967105
+      },
+      {
+       "max": 0.22113466262817383,
+       "position": 0,
+       "token": 45473,
+       "mean": 0.011734840582612602
+      },
+      {
+       "max": 0.18513965606689453,
+       "position": 0,
+       "token": 34,
+       "mean": 0.01501945707539537
+      }
+     ],
+     "decode_passes": {
+      "cached": {
+       "max": 0.06363296508789062,
+       "position": 14,
+       "token": 31034,
+       "mean": 0.010843603763615673
+      },
+      "stateless": {
+       "max": 0.06789588928222656,
+       "position": 13,
+       "token": 2979,
+       "mean": 0.010703677948883139
+      }
+     },
+     "decode": {
+      "max": 0.06789588928222656,
+      "mean": 0.010843603763615673
+     },
+     "prompt_decode": {
+      "max": 0.22113466262817383,
+      "position": 0,
+      "token": 45473,
+      "mean": 0.010992388969701202
+     }
+    },
+    "cpu-sdpa": {
+     "bundle": "/Volumes/T9/transformers-references/SmolLM-135M-1d461723-f16-cpu-sdpa-7a50e44",
+     "reference_json_sha256": "38927b7537d452f715ab80342495936926ce0e1de17ebcde2b58c6f1be00f64c",
+     "prompt": [
+      {
+       "max": 0.12596797943115234,
+       "position": 0,
+       "token": 38171,
+       "mean": 0.01739895431161278
+      },
+      {
+       "max": 0.22113466262817383,
+       "position": 0,
+       "token": 45473,
+       "mean": 0.012038623497337586
+      },
+      {
+       "max": 0.18513965606689453,
+       "position": 0,
+       "token": 34,
+       "mean": 0.025780370021533383
+      }
+     ],
+     "decode_passes": {
+      "cached": {
+       "max": 0.06984424591064453,
+       "position": 24,
+       "token": 38099,
+       "mean": 0.010795506318200296
+      },
+      "stateless": {
+       "max": 0.06312894821166992,
+       "position": 7,
+       "token": 2338,
+       "mean": 0.010449702341807157
+      }
+     },
+     "decode": {
+      "max": 0.06984424591064453,
+      "mean": 0.010795506318200296
+     },
+     "prompt_decode": {
+      "max": 0.22113466262817383,
+      "position": 0,
+      "token": 45473,
+      "mean": 0.011273019772354802
+     }
+    },
+    "mps-eager": {
+     "bundle": "/Volumes/T9/transformers-references/SmolLM-135M-1d461723-f16-mps-eager-7a50e44",
+     "reference_json_sha256": "cdd3c2ae7fa10a415cf6e4cdd49c82e5ac6c025fafe42249ffe866d1f0b687e5",
+     "prompt": [
+      {
+       "max": 0.27783203125,
+       "position": 0,
+       "token": 23309,
+       "mean": 0.020615269525622922
+      },
+      {
+       "max": 0.16149187088012695,
+       "position": 0,
+       "token": 35535,
+       "mean": 0.009733252286303616
+      },
+      {
+       "max": 0.26979827880859375,
+       "position": 0,
+       "token": 43558,
+       "mean": 0.021685892074472263
+      }
+     ],
+     "decode_passes": {
+      "cached": {
+       "max": 0.09620475769042969,
+       "position": 7,
+       "token": 29780,
+       "mean": 0.012236476171755481
+      },
+      "stateless": {
+       "max": 0.06122145429253578,
+       "position": 14,
+       "token": 3307,
+       "mean": 0.008980618662796282
+      }
+     },
+     "decode": {
+      "max": 0.09620475769042969,
+      "mean": 0.012236476171755481
+     },
+     "prompt_decode": {
+      "max": 0.15367937088012695,
+      "position": 0,
+      "token": 35535,
+      "mean": 0.014434576489628322
+     }
+    },
+    "mps-sdpa": {
+     "bundle": "/Volumes/T9/transformers-references/SmolLM-135M-1d461723-f16-mps-sdpa-7a50e44",
+     "reference_json_sha256": "7f1eb964dd2fd24dd866c51d773706edb4d2626d6aa01ecea3638ac2e0baabf6",
+     "prompt": [
+      {
+       "max": 0.27783203125,
+       "position": 0,
+       "token": 23309,
+       "mean": 0.022637435556103615
+      },
+      {
+       "max": 0.16149187088012695,
+       "position": 0,
+       "token": 35535,
+       "mean": 0.010890817142027102
+      },
+      {
+       "max": 0.26979827880859375,
+       "position": 0,
+       "token": 43558,
+       "mean": 0.02245476347261745
+      }
+     ],
+     "decode_passes": {
+      "cached": {
+       "max": 0.06412196159362793,
+       "position": 24,
+       "token": 3454,
+       "mean": 0.010284487148663566
+      },
+      "stateless": {
+       "max": 0.06339550018310547,
+       "position": 14,
+       "token": 9555,
+       "mean": 0.010150979580342384
+      }
+     },
+     "decode": {
+      "max": 0.06412196159362793,
+      "mean": 0.010284487148663566
+     },
+     "prompt_decode": {
+      "max": 0.15367937088012695,
+      "position": 0,
+      "token": 35535,
+      "mean": 0.012261323053170018
+     }
+    }
+   },
+   "calibrated": true,
+   "statistics": [
+    {
+     "kind": "prompt",
+     "prompt": 0,
+     "envelope": {
+      "max": 0.27783203125,
+      "mean": 0.022637435556103615
+     },
+     "leave_one_out": {
+      "cpu-eager": {
+       "max": 0.4533961720123023,
+       "mean": 0.8283442260274578
+      },
+      "cpu-sdpa": {
+       "max": 0.4533961720123023,
+       "mean": 0.7685921079042713
+      },
+      "mps-eager": {
+       "max": 1.0,
+       "mean": 0.9106715941622873
+      },
+      "mps-sdpa": {
+       "max": 1.0,
+       "mean": 1.0980906908816943
+      }
+     }
+    },
+    {
+     "kind": "prompt",
+     "prompt": 1,
+     "envelope": {
+      "max": 0.22113466262817383,
+      "mean": 0.012038623497337586
+     },
+     "leave_one_out": {
+      "cpu-eager": {
+       "max": 1.0,
+       "mean": 0.9747659759612743
+      },
+      "cpu-sdpa": {
+       "max": 1.0,
+       "mean": 1.0258872638777126
+      },
+      "mps-eager": {
+       "max": 0.7302874590568686,
+       "mean": 0.8085020923244408
+      },
+      "mps-sdpa": {
+       "max": 0.7302874590568686,
+       "mean": 0.9046563458385148
+      }
+     }
+    },
+    {
+     "kind": "prompt",
+     "prompt": 2,
+     "envelope": {
+      "max": 0.26979827880859375,
+      "mean": 0.025780370021533383
+     },
+     "leave_one_out": {
+      "cpu-eager": {
+       "max": 0.6862151118400588,
+       "mean": 0.5825927658466569
+      },
+      "cpu-sdpa": {
+       "max": 0.6862151118400588,
+       "mean": 1.1481024974042304
+      },
+      "mps-eager": {
+       "max": 1.0,
+       "mean": 0.8411784647139993
+      },
+      "mps-sdpa": {
+       "max": 1.0,
+       "mean": 0.8710023732732239
+      }
+     }
+    },
+    {
+     "kind": "decode",
+     "prompt": null,
+     "envelope": {
+      "max": 0.09620475769042969,
+      "mean": 0.012236476171755481
+     },
+     "leave_one_out": {
+      "cpu-eager": {
+       "max": 0.7057435714427328,
+       "mean": 0.8861704637357225
+      },
+      "cpu-sdpa": {
+       "max": 0.7259957572513333,
+       "mean": 0.8822398022658463
+      },
+      "mps-eager": {
+       "max": 1.3774185179622322,
+       "mean": 1.1284510609667806
+      },
+      "mps-sdpa": {
+       "max": 0.6665154939630048,
+       "mean": 0.8404778470784309
+      }
+     }
+    },
+    {
+     "kind": "prompt_decode",
+     "prompt": null,
+     "envelope": {
+      "max": 0.22113466262817383,
+      "mean": 0.014434576489628322
+     },
+     "leave_one_out": {
+      "cpu-eager": {
+       "max": 1.0,
+       "mean": 0.7615317967658812
+      },
+      "cpu-sdpa": {
+       "max": 1.0,
+       "mean": 0.7809733649237861
+      },
+      "mps-eager": {
+       "max": 0.6949583075473367,
+       "mean": 1.1772446111267278
+      },
+      "mps-sdpa": {
+       "max": 0.6949583075473367,
+       "mean": 0.8494411361483414
+      }
+     }
+    }
+   ]
+  },
+  {
+   "name": "Qwen3-4B-531c80e2",
+   "dtype": "float16",
+   "truth": {
+    "bundle": "/Volumes/T9/transformers-references/Qwen3-4B-531c80e2",
+    "dtype": "float32",
+    "reference_json_sha256": "70fc11946cb9adc97af7a173d419438a9ca2350940b8519ddb33497172985b3a"
+   },
+   "decode_truth": {
+    "bundle": "/Volumes/T9/transformers-references/Qwen3-4B-531c80e2-f32-cpu-eager",
+    "dtype": "float32",
+    "reference_json_sha256": "32bc3c6ac11c521f768097eff37d210b711731156d1a04ad6464e45ffcbb5bb4"
+   },
+   "script_sha256": "a4ed0db48e9b4e6c816bf23c25f56cf39498d06165af49a0655c841d1b56a602",
+   "graphs": {
+    "cpu-eager": {
+     "bundle": "/Volumes/T9/transformers-references/Qwen3-4B-531c80e2-f16-cpu-eager-7a50e44",
+     "reference_json_sha256": "8e7319d5cad83e0fac3c388679b9a08362eaa022322387d2ecdb77e2bb037518",
+     "prompt": [
+      {
+       "max": 0.0533299446105957,
+       "position": 4,
+       "token": 14867,
+       "mean": 0.005948823513668634
+      },
+      {
+       "max": 0.052811384201049805,
+       "position": 0,
+       "token": 15486,
+       "mean": 0.005858342274568638
+      },
+      {
+       "max": 0.16913414001464844,
+       "position": 0,
+       "token": 3,
+       "mean": 0.006075024972105451
+      }
+     ],
+     "decode_passes": {
+      "cached": {
+       "max": 0.08777999877929688,
+       "position": 25,
+       "token": 76514,
+       "mean": 0.008446808112593789
+      },
+      "stateless": {
+       "max": 0.08726024627685547,
+       "position": 4,
+       "token": 5794,
+       "mean": 0.011219396670881525
+      }
+     },
+     "decode": {
+      "max": 0.08777999877929688,
+      "mean": 0.011219396670881525
+     },
+     "prompt_decode": {
+      "max": 0.052811384201049805,
+      "position": 0,
+      "token": 15486,
+      "mean": 0.004598918240742998
+     }
+    },
+    "cpu-sdpa": {
+     "bundle": "/Volumes/T9/transformers-references/Qwen3-4B-531c80e2-f16-cpu-sdpa-7a50e44",
+     "reference_json_sha256": "18e50a1687a8a432e84a6f320e961b4783a5adcefdc923b1c76672ffe9b901a8",
+     "prompt": [
+      {
+       "max": 0.042159080505371094,
+       "position": 0,
+       "token": 330,
+       "mean": 0.004837601528910985
+      },
+      {
+       "max": 0.052811384201049805,
+       "position": 0,
+       "token": 15486,
+       "mean": 0.0043842179415811665
+      },
+      {
+       "max": 0.16913414001464844,
+       "position": 0,
+       "token": 3,
+       "mean": 0.005935460769596838
+      }
+     ],
+     "decode_passes": {
+      "cached": {
+       "max": 0.07129383087158203,
+       "position": 4,
+       "token": 93357,
+       "mean": 0.006672915579910537
+      },
+      "stateless": {
+       "max": 0.057952880859375,
+       "position": 30,
+       "token": 6722,
+       "mean": 0.010607099014282929
+      }
+     },
+     "decode": {
+      "max": 0.07129383087158203,
+      "mean": 0.010607099014282929
+     },
+     "prompt_decode": {
+      "max": 0.052811384201049805,
+      "position": 0,
+      "token": 15486,
+      "mean": 0.0056421076473186504
+     }
+    },
+    "mps-eager": {
+     "bundle": "/Volumes/T9/transformers-references/Qwen3-4B-531c80e2-f16-mps-eager-7a50e44",
+     "reference_json_sha256": "2580c67801dc8a05c1a5c90a42cd36b14912a9d3a64da1da804584adc6d5d427",
+     "prompt": [
+      {
+       "max": 0.08885002136230469,
+       "position": 4,
+       "token": 100449,
+       "mean": 0.010101806019049135
+      },
+      {
+       "max": 0.058670759201049805,
+       "position": 0,
+       "token": 15486,
+       "mean": 0.006433394180552691
+      },
+      {
+       "max": 0.16858673095703125,
+       "position": 0,
+       "token": 27,
+       "mean": 0.005929802680865918
+      }
+     ],
+     "decode_passes": {
+      "cached": {
+       "max": 0.11351299285888672,
+       "position": 1,
+       "token": 116252,
+       "mean": 0.013325478633156373
+      },
+      "stateless": {
+       "max": 0.11327743530273438,
+       "position": 23,
+       "token": 6722,
+       "mean": 0.016896347938050348
+      }
+     },
+     "decode": {
+      "max": 0.11351299285888672,
+      "mean": 0.016896347938050348
+     },
+     "prompt_decode": {
+      "max": 0.06104755401611328,
+      "position": 0,
+      "token": 20315,
+      "mean": 0.0076635336136034625
+     }
+    },
+    "mps-sdpa": {
+     "bundle": "/Volumes/T9/transformers-references/Qwen3-4B-531c80e2-f16-mps-sdpa-7a50e44",
+     "reference_json_sha256": "e7138737ef8846fae085d3da307396d9b6ab0724d8c4917671cd2e6be061f497",
+     "prompt": [
+      {
+       "max": 0.04014873504638672,
+       "position": 0,
+       "token": 107312,
+       "mean": 0.004606197830682254
+      },
+      {
+       "max": 0.058670759201049805,
+       "position": 0,
+       "token": 15486,
+       "mean": 0.004729396025139988
+      },
+      {
+       "max": 0.16858673095703125,
+       "position": 0,
+       "token": 27,
+       "mean": 0.006543649771259371
+      }
+     ],
+     "decode_passes": {
+      "cached": {
+       "max": 0.0660696029663086,
+       "position": 13,
+       "token": 22606,
+       "mean": 0.007007717816404051
+      },
+      "stateless": {
+       "max": 0.054782867431640625,
+       "position": 26,
+       "token": 374,
+       "mean": 0.007650226963544627
+      }
+     },
+     "decode": {
+      "max": 0.0660696029663086,
+      "mean": 0.007650226963544627
+     },
+     "prompt_decode": {
+      "max": 0.06104755401611328,
+      "position": 0,
+      "token": 20315,
+      "mean": 0.005692017328153118
+     }
+    }
+   },
+   "calibrated": true,
+   "statistics": [
+    {
+     "kind": "prompt",
+     "prompt": 0,
+     "envelope": {
+      "max": 0.08885002136230469,
+      "mean": 0.010101806019049135
+     },
+     "leave_one_out": {
+      "cpu-eager": {
+       "max": 0.6002243307644419,
+       "mean": 0.5888871259704298
+      },
+      "cpu-sdpa": {
+       "max": 0.47449713414765043,
+       "mean": 0.4788848172087885
+      },
+      "mps-eager": {
+       "max": 1.6660437585500845,
+       "mean": 1.6981182910937225
+      },
+      "mps-sdpa": {
+       "max": 0.4518708541742696,
+       "mean": 0.45597765607419843
+      }
+     }
+    },
+    {
+     "kind": "prompt",
+     "prompt": 1,
+     "envelope": {
+      "max": 0.058670759201049805,
+      "mean": 0.006433394180552691
+     },
+     "leave_one_out": {
+      "cpu-eager": {
+       "max": 0.9001312565272692,
+       "mean": 0.9106145387885045
+      },
+      "cpu-sdpa": {
+       "max": 0.9001312565272692,
+       "mean": 0.6814782086311583
+      },
+      "mps-eager": {
+       "max": 1.0,
+       "mean": 1.0981594927425773
+      },
+      "mps-sdpa": {
+       "max": 1.0,
+       "mean": 0.7351323255516246
+      }
+     }
+    },
+    {
+     "kind": "prompt",
+     "prompt": 2,
+     "envelope": {
+      "max": 0.16913414001464844,
+      "mean": 0.006543649771259371
+     },
+     "leave_one_out": {
+      "cpu-eager": {
+       "max": 1.0,
+       "mean": 0.9283847981577213
+      },
+      "cpu-sdpa": {
+       "max": 1.0,
+       "mean": 0.9070566086324203
+      },
+      "mps-eager": {
+       "max": 0.9967634620806315,
+       "mean": 0.9061919399950842
+      },
+      "mps-sdpa": {
+       "max": 0.9967634620806315,
+       "mean": 1.0771395675418116
+      }
+     }
+    },
+    {
+     "kind": "decode",
+     "prompt": null,
+     "envelope": {
+      "max": 0.11351299285888672,
+      "mean": 0.016896347938050348
+     },
+     "leave_one_out": {
+      "cpu-eager": {
+       "max": 0.7733035361724651,
+       "mean": 0.6640131176285494
+      },
+      "cpu-sdpa": {
+       "max": 0.628067581305082,
+       "mean": 0.6277746559891729
+      },
+      "mps-eager": {
+       "max": 1.2931532745208814,
+       "mean": 1.5059943447674513
+      },
+      "mps-sdpa": {
+       "max": 0.582044410091828,
+       "mean": 0.4527739953979297
+      }
+     }
+    },
+    {
+     "kind": "prompt_decode",
+     "prompt": null,
+     "envelope": {
+      "max": 0.06104755401611328,
+      "mean": 0.0076635336136034625
+     },
+     "leave_one_out": {
+      "cpu-eager": {
+       "max": 0.8650859981566245,
+       "mean": 0.6001041389809401
+      },
+      "cpu-sdpa": {
+       "max": 0.8650859981566245,
+       "mean": 0.7362279506810542
+      },
+      "mps-eager": {
+       "max": 1.0,
+       "mean": 1.3463651236090035
+      },
+      "mps-sdpa": {
+       "max": 1.0,
+       "mean": 0.7427405704920866
+      }
+     }
+    }
+   ]
+  },
+  {
+   "name": "SmolLM3-3B-1fa6fa28",
+   "dtype": "float16",
+   "truth": {
+    "bundle": "/Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28",
+    "dtype": "float32",
+    "reference_json_sha256": "cf399f62351665297f181c12c68f89d163315cf87001b78a62c0c0335dbd40d7"
+   },
+   "decode_truth": {
+    "bundle": "/Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28-f32-cpu-eager",
+    "dtype": "float32",
+    "reference_json_sha256": "62309448594bb87c9bfc55e95624e43a0078326e60107ccd19c7c8382528909c"
+   },
+   "script_sha256": "a4ed0db48e9b4e6c816bf23c25f56cf39498d06165af49a0655c841d1b56a602",
+   "graphs": {
+    "cpu-eager": {
+     "bundle": "/Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28-f16-cpu-eager-7a50e44",
+     "reference_json_sha256": "fc29d39d7f586ee79dcfb28cb9828da48d464911e9aa69609665b173bca420f6",
+     "prompt": [
+      {
+       "max": 0.39739179611206055,
+       "position": 0,
+       "token": 67317,
+       "mean": 0.013159763474415442
+      },
+      {
+       "max": 0.5032711029052734,
+       "position": 0,
+       "token": 28792,
+       "mean": 0.010297423533465492
+      },
+      {
+       "max": 0.4391031265258789,
+       "position": 0,
+       "token": 67317,
+       "mean": 0.015485544944605722
+      }
+     ],
+     "decode_passes": {
+      "cached": {
+       "max": 0.08736801147460938,
+       "position": 11,
+       "token": 66962,
+       "mean": 0.010644421669160622
+      },
+      "stateless": {
+       "max": 0.07793521881103516,
+       "position": 23,
+       "token": 98471,
+       "mean": 0.008229486575096314
+      }
+     },
+     "decode": {
+      "max": 0.08736801147460938,
+      "mean": 0.010644421669160622
+     },
+     "prompt_decode": {
+      "max": 0.5032711029052734,
+      "position": 0,
+      "token": 28792,
+      "mean": 0.010420725107921408
+     }
+    },
+    "cpu-sdpa": {
+     "bundle": "/Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28-f16-cpu-sdpa-7a50e44",
+     "reference_json_sha256": "817eb8846c42491471aecb826a211eb4fc89c2796308910149d5af026653975f",
+     "prompt": [
+      {
+       "max": 0.39739179611206055,
+       "position": 0,
+       "token": 67317,
+       "mean": 0.014637878082542424
+      },
+      {
+       "max": 0.5032711029052734,
+       "position": 0,
+       "token": 28792,
+       "mean": 0.008743327355199362
+      },
+      {
+       "max": 0.4391031265258789,
+       "position": 0,
+       "token": 67317,
+       "mean": 0.018850990837091665
+      }
+     ],
+     "decode_passes": {
+      "cached": {
+       "max": 0.08249950408935547,
+       "position": 3,
+       "token": 73917,
+       "mean": 0.008291835421923065
+      },
+      "stateless": {
+       "max": 0.0706329345703125,
+       "position": 24,
+       "token": 86860,
+       "mean": 0.006844663604359351
+      }
+     },
+     "decode": {
+      "max": 0.08249950408935547,
+      "mean": 0.008291835421923065
+     },
+     "prompt_decode": {
+      "max": 0.5032711029052734,
+      "position": 0,
+      "token": 28792,
+      "mean": 0.00995227731738682
+     }
+    },
+    "mps-eager": {
+     "bundle": "/Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28-f16-mps-eager-7a50e44",
+     "reference_json_sha256": "f358fd6be09deb6febdd9db4f1414ab462ceef022d7fb8840852cba0e73eef24",
+     "prompt": [
+      {
+       "max": 0.40129804611206055,
+       "position": 0,
+       "token": 67317,
+       "mean": 0.01653572223707962
+      },
+      {
+       "max": 0.5032711029052734,
+       "position": 0,
+       "token": 28792,
+       "mean": 0.0105302711395278
+      },
+      {
+       "max": 0.4430093765258789,
+       "position": 0,
+       "token": 67317,
+       "mean": 0.015257619953056608
+      }
+     ],
+     "decode_passes": {
+      "cached": {
+       "max": 0.08572196960449219,
+       "position": 12,
+       "token": 94827,
+       "mean": 0.008433395458212792
+      },
+      "stateless": {
+       "max": 0.07211875915527344,
+       "position": 29,
+       "token": 119875,
+       "mean": 0.007920032232337263
+      }
+     },
+     "decode": {
+      "max": 0.08572196960449219,
+      "mean": 0.008433395458212792
+     },
+     "prompt_decode": {
+      "max": 0.5032711029052734,
+      "position": 0,
+      "token": 28792,
+      "mean": 0.009472707558962993
+     }
+    },
+    "mps-sdpa": {
+     "bundle": "/Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28-f16-mps-sdpa-7a50e44",
+     "reference_json_sha256": "09abb7b9c71eaf1f7a4c5319eecdd8a1d0cbe9970cd86fb82015191d5df0a67f",
+     "prompt": [
+      {
+       "max": 0.40129804611206055,
+       "position": 0,
+       "token": 67317,
+       "mean": 0.015980900926220346
+      },
+      {
+       "max": 0.5032711029052734,
+       "position": 0,
+       "token": 28792,
+       "mean": 0.008845402393675672
+      },
+      {
+       "max": 0.4430093765258789,
+       "position": 0,
+       "token": 67317,
+       "mean": 0.012197580968553468
+      }
+     ],
+     "decode_passes": {
+      "cached": {
+       "max": 0.07571744918823242,
+       "position": 15,
+       "token": 85881,
+       "mean": 0.009121721645879783
+      },
+      "stateless": {
+       "max": 0.07229804992675781,
+       "position": 29,
+       "token": 98571,
+       "mean": 0.006546154950604202
+      }
+     },
+     "decode": {
+      "max": 0.07571744918823242,
+      "mean": 0.009121721645879783
+     },
+     "prompt_decode": {
+      "max": 0.5032711029052734,
+      "position": 0,
+      "token": 28792,
+      "mean": 0.01003160765911386
+     }
+    }
+   },
+   "calibrated": true,
+   "statistics": [
+    {
+     "kind": "prompt",
+     "prompt": 0,
+     "envelope": {
+      "max": 0.40129804611206055,
+      "mean": 0.01653572223707962
+     },
+     "leave_one_out": {
+      "cpu-eager": {
+       "max": 0.9902659630719727,
+       "mean": 0.7958384451394603
+      },
+      "cpu-sdpa": {
+       "max": 0.9902659630719727,
+       "mean": 0.8852276225176618
+      },
+      "mps-eager": {
+       "max": 1.0,
+       "mean": 1.0347177742619604
+      },
+      "mps-sdpa": {
+       "max": 1.0,
+       "mean": 0.9664471074861705
+      }
+     }
+    },
+    {
+     "kind": "prompt",
+     "prompt": 1,
+     "envelope": {
+      "max": 0.5032711029052734,
+      "mean": 0.0105302711395278
+     },
+     "leave_one_out": {
+      "cpu-eager": {
+       "max": 1.0,
+       "mean": 0.9778877862709289
+      },
+      "cpu-sdpa": {
+       "max": 1.0,
+       "mean": 0.8303041051221622
+      },
+      "mps-eager": {
+       "max": 1.0,
+       "mean": 1.022612219969935
+      },
+      "mps-sdpa": {
+       "max": 1.0,
+       "mean": 0.8399975913699331
+      }
+     }
+    },
+    {
+     "kind": "prompt",
+     "prompt": 2,
+     "envelope": {
+      "max": 0.4430093765258789,
+      "mean": 0.018850990837091665
+     },
+     "leave_one_out": {
+      "cpu-eager": {
+       "max": 0.9911824665413784,
+       "mean": 0.8214711406116643
+      },
+      "cpu-sdpa": {
+       "max": 0.9911824665413784,
+       "mean": 1.2173282183174492
+      },
+      "mps-eager": {
+       "max": 1.0,
+       "mean": 0.8093802646721012
+      },
+      "mps-sdpa": {
+       "max": 1.0,
+       "mean": 0.6470525116670903
+      }
+     }
+    },
+    {
+     "kind": "decode",
+     "prompt": null,
+     "envelope": {
+      "max": 0.08736801147460938,
+      "mean": 0.010644421669160622
+     },
+     "leave_one_out": {
+      "cpu-eager": {
+       "max": 1.019202100438333,
+       "mean": 1.1669312090847053
+      },
+      "cpu-sdpa": {
+       "max": 0.9442758590577653,
+       "mean": 0.7789841176572749
+      },
+      "mps-eager": {
+       "max": 0.9811596734052308,
+       "mean": 0.792283105680256
+      },
+      "mps-sdpa": {
+       "max": 0.8666495655590971,
+       "mean": 0.8569485435087134
+      }
+     }
+    },
+    {
+     "kind": "prompt_decode",
+     "prompt": null,
+     "envelope": {
+      "max": 0.5032711029052734,
+      "mean": 0.010420725107921408
+     },
+     "leave_one_out": {
+      "cpu-eager": {
+       "max": 1.0,
+       "mean": 1.0387891414846182
+      },
+      "cpu-sdpa": {
+       "max": 1.0,
+       "mean": 0.955046526447714
+      },
+      "mps-eager": {
+       "max": 1.0,
+       "mean": 0.909025759806506
+      },
+      "mps-sdpa": {
+       "max": 1.0,
+       "mean": 0.9626592732484847
+      }
+     }
+    }
+   ]
+  },
+  {
+   "name": "Qwen2-7B-453ed157-f64",
+   "dtype": "float16",
+   "truth": {
+    "bundle": "/Volumes/T9/transformers-references/Qwen2-7B-453ed157-f64",
+    "dtype": "float64",
+    "reference_json_sha256": "a1272a0a6d5b44e733ed3a1b7845e3849cfb20237918d9926ba0ca1939ed8687"
+   },
+   "decode_truth": {
+    "bundle": "/Volumes/T9/transformers-references/Qwen2-7B-453ed157-f64-cpu-eager",
+    "dtype": "float64",
+    "reference_json_sha256": "3aea8037c0b5bec905de4df2d8d267fdf5f82e2db50986e87d69c08fbe1d8f59"
+   },
+   "script_sha256": "a4ed0db48e9b4e6c816bf23c25f56cf39498d06165af49a0655c841d1b56a602",
+   "graphs": {
+    "cpu-eager": {
+     "bundle": "/Volumes/T9/transformers-references/Qwen2-7B-453ed157-f64-f16-cpu-eager-7a50e44",
+     "reference_json_sha256": "28512055861f0c4c74975e37b2faf09a813aaefa2493b3787a96ab63036b3c13",
+     "prompt": [
+      {
+       "finite": false,
+       "first_non_finite": {
+        "position": 1,
+        "token": 0
+       }
+      },
+      {
+       "finite": false,
+       "first_non_finite": {
+        "position": 0,
+        "token": 0
+       }
+      },
+      {
+       "finite": false,
+       "first_non_finite": {
+        "position": 1,
+        "token": 0
+       }
+      }
+     ],
+     "decode_passes": {
+      "cached": {
+       "finite": false,
+       "first_non_finite": {
+        "position": 0,
+        "token": 0
+       }
+      },
+      "stateless": {
+       "finite": false,
+       "first_non_finite": {
+        "position": 0,
+        "token": 0
+       }
+      }
+     },
+     "decode": {
+      "finite": false,
+      "first_non_finite": {
+       "position": 0,
+       "token": 0
+      }
+     },
+     "prompt_decode": {
+      "finite": false,
+      "first_non_finite": {
+       "position": 0,
+       "token": 0
+      }
+     }
+    },
+    "cpu-sdpa": {
+     "bundle": "/Volumes/T9/transformers-references/Qwen2-7B-453ed157-f64-f16-cpu-sdpa-7a50e44",
+     "reference_json_sha256": "aae03d34ecef5970b5f8bc7901dbb5b1ce14f002340fa078b81d423ca4a9682e",
+     "prompt": [
+      {
+       "max": 0.14327526092529297,
+       "position": 0,
+       "token": 79329,
+       "mean": 0.009509829317352055
+      },
+      {
+       "max": 0.5070646703243256,
+       "position": 0,
+       "token": 97192,
+       "mean": 0.013999210182101192
+      },
+      {
+       "max": 0.2192213535308838,
+       "position": 0,
+       "token": 108507,
+       "mean": 0.009868056384622965
+      }
+     ],
+     "decode_passes": {
+      "cached": {
+       "max": 0.049068331718444824,
+       "position": 22,
+       "token": 113421,
+       "mean": 0.006408691637125744
+      },
+      "stateless": {
+       "max": 0.052721261978149414,
+       "position": 0,
+       "token": 95783,
+       "mean": 0.0066373745648417625
+      }
+     },
+     "decode": {
+      "max": 0.052721261978149414,
+      "mean": 0.0066373745648417625
+     },
+     "prompt_decode": {
+      "max": 0.5070646703243256,
+      "position": 0,
+      "token": 97192,
+      "mean": 0.014088953322318382
+     }
+    },
+    "mps-eager": {
+     "bundle": "/Volumes/T9/transformers-references/Qwen2-7B-453ed157-f64-f16-mps-eager-7a50e44",
+     "reference_json_sha256": "85abe45db9b22741d34acc0242598f387c7eb0b5b162020bbd48838617b22f0c",
+     "prompt": [
+      {
+       "finite": false,
+       "first_non_finite": {
+        "position": 1,
+        "token": 0
+       }
+      },
+      {
+       "finite": false,
+       "first_non_finite": {
+        "position": 0,
+        "token": 0
+       }
+      },
+      {
+       "finite": false,
+       "first_non_finite": {
+        "position": 1,
+        "token": 0
+       }
+      }
+     ],
+     "decode_passes": {
+      "cached": {
+       "finite": false,
+       "first_non_finite": {
+        "position": 0,
+        "token": 0
+       }
+      },
+      "stateless": {
+       "finite": false,
+       "first_non_finite": {
+        "position": 0,
+        "token": 0
+       }
+      }
+     },
+     "decode": {
+      "finite": false,
+      "first_non_finite": {
+       "position": 0,
+       "token": 0
+      }
+     },
+     "prompt_decode": {
+      "finite": false,
+      "first_non_finite": {
+       "position": 0,
+       "token": 0
+      }
+     }
+    },
+    "mps-sdpa": {
+     "bundle": "/Volumes/T9/transformers-references/Qwen2-7B-453ed157-f64-f16-mps-sdpa-7a50e44",
+     "reference_json_sha256": "8d166defdc10ec61311be9d244737122507de24efb6b555a6f4876ab799e2857",
+     "prompt": [
+      {
+       "max": 0.2633289098739624,
+       "position": 0,
+       "token": 114438,
+       "mean": 0.016371644691054583
+      },
+      {
+       "max": 0.5134123265743256,
+       "position": 0,
+       "token": 97192,
+       "mean": 0.014117932031603771
+      },
+      {
+       "max": 0.34073102474212646,
+       "position": 0,
+       "token": 143477,
+       "mean": 0.012967581285103877
+      }
+     ],
+     "decode_passes": {
+      "cached": {
+       "max": 0.05585193634033203,
+       "position": 0,
+       "token": 151643,
+       "mean": 0.005507348389883079
+      },
+      "stateless": {
+       "max": 0.036437273025512695,
+       "position": 22,
+       "token": 117443,
+       "mean": 0.005386925902331246
+      }
+     },
+     "decode": {
+      "max": 0.05585193634033203,
+      "mean": 0.005507348389883079
+     },
+     "prompt_decode": {
+      "max": 0.268585205078125,
+      "position": 0,
+      "token": 138894,
+      "mean": 0.008838417861429831
+     }
+    }
+   },
+   "calibrated": false,
+   "uncalibrated": [
+    {
+     "graph": "cpu-eager",
+     "kind": "prompt",
+     "prompt": 0,
+     "first_non_finite": {
+      "position": 1,
+      "token": 0
+     }
+    },
+    {
+     "graph": "mps-eager",
+     "kind": "prompt",
+     "prompt": 0,
+     "first_non_finite": {
+      "position": 1,
+      "token": 0
+     }
+    },
+    {
+     "graph": "cpu-eager",
+     "kind": "prompt",
+     "prompt": 1,
+     "first_non_finite": {
+      "position": 0,
+      "token": 0
+     }
+    },
+    {
+     "graph": "mps-eager",
+     "kind": "prompt",
+     "prompt": 1,
+     "first_non_finite": {
+      "position": 0,
+      "token": 0
+     }
+    },
+    {
+     "graph": "cpu-eager",
+     "kind": "prompt",
+     "prompt": 2,
+     "first_non_finite": {
+      "position": 1,
+      "token": 0
+     }
+    },
+    {
+     "graph": "mps-eager",
+     "kind": "prompt",
+     "prompt": 2,
+     "first_non_finite": {
+      "position": 1,
+      "token": 0
+     }
+    },
+    {
+     "graph": "cpu-eager",
+     "kind": "decode",
+     "prompt": null,
+     "first_non_finite": {
+      "position": 0,
+      "token": 0
+     }
+    },
+    {
+     "graph": "mps-eager",
+     "kind": "decode",
+     "prompt": null,
+     "first_non_finite": {
+      "position": 0,
+      "token": 0
+     }
+    },
+    {
+     "graph": "cpu-eager",
+     "kind": "prompt_decode",
+     "prompt": null,
+     "first_non_finite": {
+      "position": 0,
+      "token": 0
+     }
+    },
+    {
+     "graph": "mps-eager",
+     "kind": "prompt_decode",
+     "prompt": null,
+     "first_non_finite": {
+      "position": 0,
+      "token": 0
+     }
+    }
+   ]
+  },
+  {
+   "name": "Llama-3.1-8B-d04e592b",
+   "dtype": "float16",
+   "truth": {
+    "bundle": "/Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b",
+    "dtype": "float32",
+    "reference_json_sha256": "3b6b5196d7a864c6d219b29a3366e357057d6e38b1dad00129d1310f0f801edf"
+   },
+   "decode_truth": {
+    "bundle": "/Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b-f32-cpu-eager",
+    "dtype": "float32",
+    "reference_json_sha256": "80ad3b22de3138c9bbdd605130859fbe191be0da10e55ff9da814e3dac395a6a"
+   },
+   "script_sha256": "a4ed0db48e9b4e6c816bf23c25f56cf39498d06165af49a0655c841d1b56a602",
+   "graphs": {
+    "cpu-eager": {
+     "bundle": "/Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b-f16-cpu-eager-7a50e44",
+     "reference_json_sha256": "83cfdf3e8a4f8713882a9efdad7dba02c0b77b98e5af040bf1005653a8fd3ce5",
+     "prompt": [
+      {
+       "max": 0.1118258386850357,
+       "position": 0,
+       "token": 1129,
+       "mean": 0.004356450146497873
+      },
+      {
+       "max": 0.1118258386850357,
+       "position": 0,
+       "token": 1129,
+       "mean": 0.00383346746900708
+      },
+      {
+       "max": 0.1118258386850357,
+       "position": 0,
+       "token": 1129,
+       "mean": 0.004392021229794332
+      }
+     ],
+     "decode_passes": {
+      "cached": {
+       "max": 0.031235873699188232,
+       "position": 30,
+       "token": 20557,
+       "mean": 0.0027301929189436445
+      },
+      "stateless": {
+       "max": 0.034082770347595215,
+       "position": 30,
+       "token": 44831,
+       "mean": 0.0026934094085655767
+      }
+     },
+     "decode": {
+      "max": 0.034082770347595215,
+      "mean": 0.0027301929189436445
+     },
+     "prompt_decode": {
+      "max": 0.1118258386850357,
+      "position": 0,
+      "token": 1129,
+      "mean": 0.003972491689582357
+     }
+    },
+    "cpu-sdpa": {
+     "bundle": "/Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b-f16-cpu-sdpa-7a50e44",
+     "reference_json_sha256": "bf837a87d355a802a0e3815b7d8d7610ddff136d26c3743813f4928b38d53547",
+     "prompt": [
+      {
+       "max": 0.1118258386850357,
+       "position": 0,
+       "token": 1129,
+       "mean": 0.004888196468564377
+      },
+      {
+       "max": 0.1118258386850357,
+       "position": 0,
+       "token": 1129,
+       "mean": 0.003874721331886827
+      },
+      {
+       "max": 0.1118258386850357,
+       "position": 0,
+       "token": 1129,
+       "mean": 0.004024142151768681
+      }
+     ],
+     "decode_passes": {
+      "cached": {
+       "max": 0.026563405990600586,
+       "position": 30,
+       "token": 22510,
+       "mean": 0.002485413401828604
+      },
+      "stateless": {
+       "max": 0.029199957847595215,
+       "position": 30,
+       "token": 44831,
+       "mean": 0.002546676090192456
+      }
+     },
+     "decode": {
+      "max": 0.029199957847595215,
+      "mean": 0.002546676090192456
+     },
+     "prompt_decode": {
+      "max": 0.1118258386850357,
+      "position": 0,
+      "token": 1129,
+      "mean": 0.00392320506847219
+     }
+    },
+    "mps-eager": {
+     "bundle": "/Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b-f16-mps-eager-7a50e44",
+     "reference_json_sha256": "92e12a3d591e52a2bf11d622d7af10c62da4bc72926c6d06d5f3fa35b200272a",
+     "prompt": [
+      {
+       "max": 0.1027316004037857,
+       "position": 0,
+       "token": 1129,
+       "mean": 0.004725632047933243
+      },
+      {
+       "max": 0.1031435877084732,
+       "position": 0,
+       "token": 1129,
+       "mean": 0.004025448650485792
+      },
+      {
+       "max": 0.1027316004037857,
+       "position": 0,
+       "token": 1129,
+       "mean": 0.004286464975691707
+      }
+     ],
+     "decode_passes": {
+      "cached": {
+       "max": 0.025293707847595215,
+       "position": 30,
+       "token": 44831,
+       "mean": 0.00250671699200825
+      },
+      "stateless": {
+       "max": 0.030073881149291992,
+       "position": 30,
+       "token": 8182,
+       "mean": 0.0024899664236008733
+      }
+     },
+     "decode": {
+      "max": 0.030073881149291992,
+      "mean": 0.00250671699200825
+     },
+     "prompt_decode": {
+      "max": 0.1027316004037857,
+      "position": 0,
+      "token": 1129,
+      "mean": 0.004061416250801705
+     }
+    },
+    "mps-sdpa": {
+     "bundle": "/Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b-f16-mps-sdpa-7a50e44",
+     "reference_json_sha256": "473f719e3bc85d4de32a0aa5de1eee4a0316da59f4d4272bc92e2ca31bd6001f",
+     "prompt": [
+      {
+       "max": 0.1027316004037857,
+       "position": 0,
+       "token": 1129,
+       "mean": 0.004279835627882872
+      },
+      {
+       "max": 0.1031435877084732,
+       "position": 0,
+       "token": 1129,
+       "mean": 0.0036920704712984655
+      },
+      {
+       "max": 0.1027316004037857,
+       "position": 0,
+       "token": 1129,
+       "mean": 0.004212269470163349
+      }
+     ],
+     "decode_passes": {
+      "cached": {
+       "max": 0.027463436126708984,
+       "position": 30,
+       "token": 97720,
+       "mean": 0.002473102880471799
+      },
+      "stateless": {
+       "max": 0.022978782653808594,
+       "position": 15,
+       "token": 3925,
+       "mean": 0.0024524985138975057
+      }
+     },
+     "decode": {
+      "max": 0.027463436126708984,
+      "mean": 0.002473102880471799
+     },
+     "prompt_decode": {
+      "max": 0.1027316004037857,
+      "position": 0,
+      "token": 1129,
+      "mean": 0.0038751809549856294
+     }
+    }
+   },
+   "calibrated": true,
+   "statistics": [
+    {
+     "kind": "prompt",
+     "prompt": 0,
+     "envelope": {
+      "max": 0.1118258386850357,
+      "mean": 0.004888196468564377
+     },
+     "leave_one_out": {
+      "cpu-eager": {
+       "max": 1.0,
+       "mean": 0.891218299942295
+      },
+      "cpu-sdpa": {
+       "max": 1.0,
+       "mean": 1.0344005667352436
+      },
+      "mps-eager": {
+       "max": 0.9186749825604753,
+       "mean": 0.9667434765201085
+      },
+      "mps-sdpa": {
+       "max": 0.9186749825604753,
+       "mean": 0.875544928565407
+      }
+     }
+    },
+    {
+     "kind": "prompt",
+     "prompt": 1,
+     "envelope": {
+      "max": 0.1118258386850357,
+      "mean": 0.004025448650485792
+     },
+     "leave_one_out": {
+      "cpu-eager": {
+       "max": 1.0,
+       "mean": 0.9523081280752286
+      },
+      "cpu-sdpa": {
+       "max": 1.0,
+       "mean": 0.9625563926692307
+      },
+      "mps-eager": {
+       "max": 0.9223591695921317,
+       "mean": 1.03890017002218
+      },
+      "mps-sdpa": {
+       "max": 0.9223591695921317,
+       "mean": 0.9171823545315639
+      }
+     }
+    },
+    {
+     "kind": "prompt",
+     "prompt": 2,
+     "envelope": {
+      "max": 0.1118258386850357,
+      "mean": 0.004392021229794332
+     },
+     "leave_one_out": {
+      "cpu-eager": {
+       "max": 1.0,
+       "mean": 1.0246254792005134
+      },
+      "cpu-sdpa": {
+       "max": 1.0,
+       "mean": 0.9162392304640844
+      },
+      "mps-eager": {
+       "max": 0.9186749825604753,
+       "mean": 0.9759663606845617
+      },
+      "mps-sdpa": {
+       "max": 0.9186749825604753,
+       "mean": 0.9590731123038307
+      }
+     }
+    },
+    {
+     "kind": "decode",
+     "prompt": null,
+     "envelope": {
+      "max": 0.034082770347595215,
+      "mean": 0.0027301929189436445
+     },
+     "leave_one_out": {
+      "cpu-eager": {
+       "max": 1.1333013580256701,
+       "mean": 1.0720613153191854
+      },
+      "cpu-sdpa": {
+       "max": 0.8567366311422945,
+       "mean": 0.932782468419047
+      },
+      "mps-eager": {
+       "max": 0.8823778361495171,
+       "mean": 0.9181464703886709
+      },
+      "mps-sdpa": {
+       "max": 0.8057864970077683,
+       "mean": 0.9058344790626305
+      }
+     }
+    },
+    {
+     "kind": "prompt_decode",
+     "prompt": null,
+     "envelope": {
+      "max": 0.1118258386850357,
+      "mean": 0.004061416250801705
+     },
+     "leave_one_out": {
+      "cpu-eager": {
+       "max": 1.0,
+       "mean": 0.9781050363400219
+      },
+      "cpu-sdpa": {
+       "max": 1.0,
+       "mean": 0.9659697076599245
+      },
+      "mps-eager": {
+       "max": 0.9186749825604753,
+       "mean": 1.022385084266519
+      },
+      "mps-sdpa": {
+       "max": 0.9186749825604753,
+       "mean": 0.9541452330134067
+      }
+     }
+    }
+   ]
+  },
+  {
+   "name": "gemma-3-4b-it-093f9f38",
+   "dtype": "float16",
+   "truth": {
+    "bundle": "/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38",
+    "dtype": "float32",
+    "reference_json_sha256": "a3e0fd391940cb5789160c5f08ea4a60fa6eab75075eac3cdb4737afe5c86c86"
+   },
+   "decode_truth": {
+    "bundle": "/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-f32-cpu-eager",
+    "dtype": "float32",
+    "reference_json_sha256": "c044b0e00262df5cec60c4993a2c11ce6f78995f01e6eb6807bf4a286ed42273"
+   },
+   "script_sha256": "a4ed0db48e9b4e6c816bf23c25f56cf39498d06165af49a0655c841d1b56a602",
+   "graphs": {
+    "cpu-eager": {
+     "bundle": "/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-f16-cpu-eager-7a50e44",
+     "reference_json_sha256": "466506e476ce0144ad68f8861b6b79b9af3f0aede313f6a8c3f6e6f76ec5c48d",
+     "prompt": [
+      {
+       "finite": false,
+       "first_non_finite": {
+        "position": 0,
+        "token": 0
+       }
+      },
+      {
+       "finite": false,
+       "first_non_finite": {
+        "position": 0,
+        "token": 0
+       }
+      },
+      {
+       "finite": false,
+       "first_non_finite": {
+        "position": 0,
+        "token": 0
+       }
+      }
+     ],
+     "decode_passes": {
+      "cached": {
+       "finite": false,
+       "first_non_finite": {
+        "position": 0,
+        "token": 0
+       }
+      },
+      "stateless": {
+       "finite": false,
+       "first_non_finite": {
+        "position": 0,
+        "token": 0
+       }
+      }
+     },
+     "decode": {
+      "finite": false,
+      "first_non_finite": {
+       "position": 0,
+       "token": 0
+      }
+     },
+     "prompt_decode": {
+      "finite": false,
+      "first_non_finite": {
+       "position": 0,
+       "token": 0
+      }
+     }
+    },
+    "cpu-sdpa": {
+     "bundle": "/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-f16-cpu-sdpa-7a50e44",
+     "reference_json_sha256": "591ccad00efb4b3403f25edaef34c050c3421b1b22be7dccac717bc0513a7783",
+     "prompt": [
+      {
+       "finite": false,
+       "first_non_finite": {
+        "position": 0,
+        "token": 0
+       }
+      },
+      {
+       "finite": false,
+       "first_non_finite": {
+        "position": 0,
+        "token": 0
+       }
+      },
+      {
+       "finite": false,
+       "first_non_finite": {
+        "position": 0,
+        "token": 0
+       }
+      }
+     ],
+     "decode_passes": {
+      "cached": {
+       "finite": false,
+       "first_non_finite": {
+        "position": 0,
+        "token": 0
+       }
+      },
+      "stateless": {
+       "finite": false,
+       "first_non_finite": {
+        "position": 0,
+        "token": 0
+       }
+      }
+     },
+     "decode": {
+      "finite": false,
+      "first_non_finite": {
+       "position": 0,
+       "token": 0
+      }
+     },
+     "prompt_decode": {
+      "finite": false,
+      "first_non_finite": {
+       "position": 0,
+       "token": 0
+      }
+     }
+    },
+    "mps-eager": {
+     "bundle": "/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-f16-mps-eager-7a50e44",
+     "reference_json_sha256": "a5bff5a0e46ed9aa6d61cbff496e5166867f40534deff68a921fefc871783fde",
+     "prompt": [
+      {
+       "finite": false,
+       "first_non_finite": {
+        "position": 0,
+        "token": 0
+       }
+      },
+      {
+       "finite": false,
+       "first_non_finite": {
+        "position": 0,
+        "token": 0
+       }
+      },
+      {
+       "finite": false,
+       "first_non_finite": {
+        "position": 0,
+        "token": 0
+       }
+      }
+     ],
+     "decode_passes": {
+      "cached": {
+       "finite": false,
+       "first_non_finite": {
+        "position": 0,
+        "token": 0
+       }
+      },
+      "stateless": {
+       "finite": false,
+       "first_non_finite": {
+        "position": 0,
+        "token": 0
+       }
+      }
+     },
+     "decode": {
+      "finite": false,
+      "first_non_finite": {
+       "position": 0,
+       "token": 0
+      }
+     },
+     "prompt_decode": {
+      "finite": false,
+      "first_non_finite": {
+       "position": 0,
+       "token": 0
+      }
+     }
+    },
+    "mps-sdpa": {
+     "bundle": "/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-f16-mps-sdpa-7a50e44",
+     "reference_json_sha256": "5073b5482e47aaa982c8e240a7e9525e6eb6d1b7350b8ca3bd8e9006a337de6a",
+     "prompt": [
+      {
+       "finite": false,
+       "first_non_finite": {
+        "position": 0,
+        "token": 0
+       }
+      },
+      {
+       "finite": false,
+       "first_non_finite": {
+        "position": 0,
+        "token": 0
+       }
+      },
+      {
+       "finite": false,
+       "first_non_finite": {
+        "position": 0,
+        "token": 0
+       }
+      }
+     ],
+     "decode_passes": {
+      "cached": {
+       "finite": false,
+       "first_non_finite": {
+        "position": 0,
+        "token": 0
+       }
+      },
+      "stateless": {
+       "finite": false,
+       "first_non_finite": {
+        "position": 0,
+        "token": 0
+       }
+      }
+     },
+     "decode": {
+      "finite": false,
+      "first_non_finite": {
+       "position": 0,
+       "token": 0
+      }
+     },
+     "prompt_decode": {
+      "finite": false,
+      "first_non_finite": {
+       "position": 0,
+       "token": 0
+      }
+     }
+    }
+   },
+   "calibrated": false,
+   "uncalibrated": [
+    {
+     "graph": "cpu-eager",
+     "kind": "prompt",
+     "prompt": 0,
+     "first_non_finite": {
+      "position": 0,
+      "token": 0
+     }
+    },
+    {
+     "graph": "cpu-sdpa",
+     "kind": "prompt",
+     "prompt": 0,
+     "first_non_finite": {
+      "position": 0,
+      "token": 0
+     }
+    },
+    {
+     "graph": "mps-eager",
+     "kind": "prompt",
+     "prompt": 0,
+     "first_non_finite": {
+      "position": 0,
+      "token": 0
+     }
+    },
+    {
+     "graph": "mps-sdpa",
+     "kind": "prompt",
+     "prompt": 0,
+     "first_non_finite": {
+      "position": 0,
+      "token": 0
+     }
+    },
+    {
+     "graph": "cpu-eager",
+     "kind": "prompt",
+     "prompt": 1,
+     "first_non_finite": {
+      "position": 0,
+      "token": 0
+     }
+    },
+    {
+     "graph": "cpu-sdpa",
+     "kind": "prompt",
+     "prompt": 1,
+     "first_non_finite": {
+      "position": 0,
+      "token": 0
+     }
+    },
+    {
+     "graph": "mps-eager",
+     "kind": "prompt",
+     "prompt": 1,
+     "first_non_finite": {
+      "position": 0,
+      "token": 0
+     }
+    },
+    {
+     "graph": "mps-sdpa",
+     "kind": "prompt",
+     "prompt": 1,
+     "first_non_finite": {
+      "position": 0,
+      "token": 0
+     }
+    },
+    {
+     "graph": "cpu-eager",
+     "kind": "prompt",
+     "prompt": 2,
+     "first_non_finite": {
+      "position": 0,
+      "token": 0
+     }
+    },
+    {
+     "graph": "cpu-sdpa",
+     "kind": "prompt",
+     "prompt": 2,
+     "first_non_finite": {
+      "position": 0,
+      "token": 0
+     }
+    },
+    {
+     "graph": "mps-eager",
+     "kind": "prompt",
+     "prompt": 2,
+     "first_non_finite": {
+      "position": 0,
+      "token": 0
+     }
+    },
+    {
+     "graph": "mps-sdpa",
+     "kind": "prompt",
+     "prompt": 2,
+     "first_non_finite": {
+      "position": 0,
+      "token": 0
+     }
+    },
+    {
+     "graph": "cpu-eager",
+     "kind": "decode",
+     "prompt": null,
+     "first_non_finite": {
+      "position": 0,
+      "token": 0
+     }
+    },
+    {
+     "graph": "cpu-sdpa",
+     "kind": "decode",
+     "prompt": null,
+     "first_non_finite": {
+      "position": 0,
+      "token": 0
+     }
+    },
+    {
+     "graph": "mps-eager",
+     "kind": "decode",
+     "prompt": null,
+     "first_non_finite": {
+      "position": 0,
+      "token": 0
+     }
+    },
+    {
+     "graph": "mps-sdpa",
+     "kind": "decode",
+     "prompt": null,
+     "first_non_finite": {
+      "position": 0,
+      "token": 0
+     }
+    },
+    {
+     "graph": "cpu-eager",
+     "kind": "prompt_decode",
+     "prompt": null,
+     "first_non_finite": {
+      "position": 0,
+      "token": 0
+     }
+    },
+    {
+     "graph": "cpu-sdpa",
+     "kind": "prompt_decode",
+     "prompt": null,
+     "first_non_finite": {
+      "position": 0,
+      "token": 0
+     }
+    },
+    {
+     "graph": "mps-eager",
+     "kind": "prompt_decode",
+     "prompt": null,
+     "first_non_finite": {
+      "position": 0,
+      "token": 0
+     }
+    },
+    {
+     "graph": "mps-sdpa",
+     "kind": "prompt_decode",
+     "prompt": null,
+     "first_non_finite": {
+      "position": 0,
+      "token": 0
+     }
+    }
+   ]
+  },
+  {
+   "name": "gemma-3-4b-it-093f9f38-long",
+   "dtype": "float16",
+   "truth": {
+    "bundle": "/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long",
+    "dtype": "float32",
+    "reference_json_sha256": "b73b85f0f503524a16eba289ed633bdd73139fbfa3008640732ef5d39b774cf4"
+   },
+   "decode_truth": {
+    "bundle": "/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long-f32-cpu-eager",
+    "dtype": "float32",
+    "reference_json_sha256": "2d406b41c80dff78ce4ac62312bcedde29f2b9cb3f1b6d276527291cae814503"
+   },
+   "script_sha256": "a4ed0db48e9b4e6c816bf23c25f56cf39498d06165af49a0655c841d1b56a602",
+   "graphs": {
+    "cpu-eager": {
+     "bundle": "/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long-f16-cpu-eager-7a50e44",
+     "reference_json_sha256": "cf3dda72312f6cec7bb136d7444392339dd194a153a21b48da339aa5c396cf0e",
+     "prompt": [
+      {
+       "finite": false,
+       "first_non_finite": {
+        "position": 0,
+        "token": 0
+       }
+      }
+     ],
+     "decode_passes": {
+      "cached": {
+       "finite": false,
+       "first_non_finite": {
+        "position": 0,
+        "token": 0
+       }
+      },
+      "stateless": {
+       "finite": false,
+       "first_non_finite": {
+        "position": 0,
+        "token": 0
+       }
+      }
+     },
+     "decode": {
+      "finite": false,
+      "first_non_finite": {
+       "position": 0,
+       "token": 0
+      }
+     }
+    },
+    "cpu-sdpa": {
+     "bundle": "/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long-f16-cpu-sdpa-7a50e44",
+     "reference_json_sha256": "a5feb0d18b8e2b36aa7454243aa60fa628668046189aa0dc91341d50374b7c02",
+     "prompt": [
+      {
+       "finite": false,
+       "first_non_finite": {
+        "position": 0,
+        "token": 0
+       }
+      }
+     ],
+     "decode_passes": {
+      "cached": {
+       "finite": false,
+       "first_non_finite": {
+        "position": 0,
+        "token": 0
+       }
+      },
+      "stateless": {
+       "finite": false,
+       "first_non_finite": {
+        "position": 0,
+        "token": 0
+       }
+      }
+     },
+     "decode": {
+      "finite": false,
+      "first_non_finite": {
+       "position": 0,
+       "token": 0
+      }
+     }
+    },
+    "mps-eager": {
+     "bundle": "/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long-f16-mps-eager-7a50e44",
+     "reference_json_sha256": "0bcbe5163ea6ff18e2adbde2a79a2de8af02ba9da0a6a490e7a60135a1b9f2f6",
+     "prompt": [
+      {
+       "finite": false,
+       "first_non_finite": {
+        "position": 0,
+        "token": 0
+       }
+      }
+     ],
+     "decode_passes": {
+      "cached": {
+       "finite": false,
+       "first_non_finite": {
+        "position": 0,
+        "token": 0
+       }
+      },
+      "stateless": {
+       "finite": false,
+       "first_non_finite": {
+        "position": 0,
+        "token": 0
+       }
+      }
+     },
+     "decode": {
+      "finite": false,
+      "first_non_finite": {
+       "position": 0,
+       "token": 0
+      }
+     }
+    },
+    "mps-sdpa": {
+     "bundle": "/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long-f16-mps-sdpa-7a50e44",
+     "reference_json_sha256": "48397afd006e8b7495e5df985fc3d6f0f4237f3affe5a8a2bcc0d4754fdf6853",
+     "prompt": [
+      {
+       "finite": false,
+       "first_non_finite": {
+        "position": 0,
+        "token": 0
+       }
+      }
+     ],
+     "decode_passes": {
+      "cached": {
+       "finite": false,
+       "first_non_finite": {
+        "position": 0,
+        "token": 0
+       }
+      },
+      "stateless": {
+       "finite": false,
+       "first_non_finite": {
+        "position": 0,
+        "token": 0
+       }
+      }
+     },
+     "decode": {
+      "finite": false,
+      "first_non_finite": {
+       "position": 0,
+       "token": 0
+      }
+     }
+    }
+   },
+   "calibrated": false,
+   "uncalibrated": [
+    {
+     "graph": "cpu-eager",
+     "kind": "prompt",
+     "prompt": 0,
+     "first_non_finite": {
+      "position": 0,
+      "token": 0
+     }
+    },
+    {
+     "graph": "cpu-sdpa",
+     "kind": "prompt",
+     "prompt": 0,
+     "first_non_finite": {
+      "position": 0,
+      "token": 0
+     }
+    },
+    {
+     "graph": "mps-eager",
+     "kind": "prompt",
+     "prompt": 0,
+     "first_non_finite": {
+      "position": 0,
+      "token": 0
+     }
+    },
+    {
+     "graph": "mps-sdpa",
+     "kind": "prompt",
+     "prompt": 0,
+     "first_non_finite": {
+      "position": 0,
+      "token": 0
+     }
+    },
+    {
+     "graph": "cpu-eager",
+     "kind": "decode",
+     "prompt": null,
+     "first_non_finite": {
+      "position": 0,
+      "token": 0
+     }
+    },
+    {
+     "graph": "cpu-sdpa",
+     "kind": "decode",
+     "prompt": null,
+     "first_non_finite": {
+      "position": 0,
+      "token": 0
+     }
+    },
+    {
+     "graph": "mps-eager",
+     "kind": "decode",
+     "prompt": null,
+     "first_non_finite": {
+      "position": 0,
+      "token": 0
+     }
+    },
+    {
+     "graph": "mps-sdpa",
+     "kind": "decode",
+     "prompt": null,
+     "first_non_finite": {
+      "position": 0,
+      "token": 0
+     }
+    }
+   ]
+  }
+ ],
+ "uncalibrated": [
+  "Qwen2-7B-453ed157-f64",
+  "gemma-3-4b-it-093f9f38",
+  "gemma-3-4b-it-093f9f38-long"
+ ],
+ "slacks": {
+  "max": {
+   "largest": [
+    {
+     "ratio": 1.6660437585500845,
+     "case": "Qwen3-4B-531c80e2",
+     "kind": "prompt",
+     "prompt": 0,
+     "graph": "mps-eager"
+    },
+    {
+     "ratio": 1.3774185179622322,
+     "case": "SmolLM-135M-1d461723",
+     "kind": "decode",
+     "prompt": null,
+     "graph": "mps-eager"
+    },
+    {
+     "ratio": 1.2931532745208814,
+     "case": "Qwen3-4B-531c80e2",
+     "kind": "decode",
+     "prompt": null,
+     "graph": "mps-eager"
+    },
+    {
+     "ratio": 1.1333013580256701,
+     "case": "Llama-3.1-8B-d04e592b",
+     "kind": "decode",
+     "prompt": null,
+     "graph": "cpu-eager"
+    },
+    {
+     "ratio": 1.019202100438333,
+     "case": "SmolLM3-3B-1fa6fa28",
+     "kind": "decode",
+     "prompt": null,
+     "graph": "cpu-eager"
+    },
+    {
+     "ratio": 1.0,
+     "case": "SmolLM-135M-1d461723",
+     "kind": "prompt",
+     "prompt": 0,
+     "graph": "mps-eager"
+    },
+    {
+     "ratio": 1.0,
+     "case": "SmolLM-135M-1d461723",
+     "kind": "prompt",
+     "prompt": 0,
+     "graph": "mps-sdpa"
+    },
+    {
+     "ratio": 1.0,
+     "case": "SmolLM-135M-1d461723",
+     "kind": "prompt",
+     "prompt": 1,
+     "graph": "cpu-eager"
+    }
+   ],
+   "count": 80,
+   "largest_by_kind": {
+    "prompt": 1.6660437585500845,
+    "decode": 1.3774185179622322,
+    "prompt_decode": 1.0
+   },
+   "slack": 1.7
+  },
+  "mean": {
+   "largest": [
+    {
+     "ratio": 1.6981182910937225,
+     "case": "Qwen3-4B-531c80e2",
+     "kind": "prompt",
+     "prompt": 0,
+     "graph": "mps-eager"
+    },
+    {
+     "ratio": 1.5059943447674513,
+     "case": "Qwen3-4B-531c80e2",
+     "kind": "decode",
+     "prompt": null,
+     "graph": "mps-eager"
+    },
+    {
+     "ratio": 1.3463651236090035,
+     "case": "Qwen3-4B-531c80e2",
+     "kind": "prompt_decode",
+     "prompt": null,
+     "graph": "mps-eager"
+    },
+    {
+     "ratio": 1.2173282183174492,
+     "case": "SmolLM3-3B-1fa6fa28",
+     "kind": "prompt",
+     "prompt": 2,
+     "graph": "cpu-sdpa"
+    },
+    {
+     "ratio": 1.1772446111267278,
+     "case": "SmolLM-135M-1d461723",
+     "kind": "prompt_decode",
+     "prompt": null,
+     "graph": "mps-eager"
+    },
+    {
+     "ratio": 1.1669312090847053,
+     "case": "SmolLM3-3B-1fa6fa28",
+     "kind": "decode",
+     "prompt": null,
+     "graph": "cpu-eager"
+    },
+    {
+     "ratio": 1.1481024974042304,
+     "case": "SmolLM-135M-1d461723",
+     "kind": "prompt",
+     "prompt": 2,
+     "graph": "cpu-sdpa"
+    },
+    {
+     "ratio": 1.1284510609667806,
+     "case": "SmolLM-135M-1d461723",
+     "kind": "decode",
+     "prompt": null,
+     "graph": "mps-eager"
+    }
+   ],
+   "count": 80,
+   "largest_by_kind": {
+    "prompt": 1.6981182910937225,
+    "decode": 1.5059943447674513,
+    "prompt_decode": 1.3463651236090035
+   },
+   "slack": 1.7
+  }
+ }
+}

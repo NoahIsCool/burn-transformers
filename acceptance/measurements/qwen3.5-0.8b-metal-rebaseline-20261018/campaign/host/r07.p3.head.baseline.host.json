@@ -1,0 +1,437 @@
+{
+ "sample": {
+  "index": 26,
+  "round": 7,
+  "position": 3,
+  "label": "head",
+  "benchmark": "baseline",
+  "test": "qwen::qwen35_metal_baseline_benchmark",
+  "source": "fa8426e5dc8cbcb269c29e211b119ea0acd61054 (worktree /Users/nover/repos/transformers-worktrees/tfm-rebaseline, src tree ea9deb1a, cargo +1.92.0)",
+  "binary": "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-head/release/deps/qwen35_benchmarks-ffcc519af7a3b786",
+  "sha256": "cb7bf1b53d045b53a8fadb8cc032c732fc8d40f57ddc347cc8500f1eb0723f99",
+  "argv": [
+   "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-head/release/deps/qwen35_benchmarks-ffcc519af7a3b786",
+   "--ignored",
+   "--exact",
+   "--nocapture",
+   "--test-threads",
+   "1",
+   "qwen::qwen35_metal_baseline_benchmark"
+  ],
+  "artifacts": {
+   "TRANSFORMERS_QWEN35_DIR": "/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17",
+   "TRANSFORMERS_QWEN35_REFERENCE_DIR": "/Volumes/bag of holding/models/transformers-acceptance"
+  },
+  "report": "bench/r07.p3.head.baseline.json",
+  "environment": "env/r07.p3.head.baseline.environment.json",
+  "log": "logs/r07.p3.head.baseline.log",
+  "host": "host/r07.p3.head.baseline.host.json"
+ },
+ "exit": 0,
+ "wall_seconds": 207.945,
+ "admission": {
+  "cooldown_seconds": 120.01,
+  "load_wait_seconds": 0.019,
+  "admitting_load_1m": 2.29,
+  "admitting_load_5m": 2.42
+ },
+ "binary_sha256_before": "cb7bf1b53d045b53a8fadb8cc032c732fc8d40f57ddc347cc8500f1eb0723f99",
+ "binary_sha256_after": "cb7bf1b53d045b53a8fadb8cc032c732fc8d40f57ddc347cc8500f1eb0723f99",
+ "host_before": {
+  "utc": "2026-10-19T02:28:00+00:00",
+  "uptime": "22:28  up 17 days,  7:48, 3 users, load averages: 2.29 2.42 2.55",
+  "loadavg": [
+   2.29,
+   2.42,
+   2.55
+  ],
+  "top_cpu": "  PID  %CPU    RSS     ELAPSED ARGS\n  625  13.4 170672 17-07:46:12 /System/Library/CoreServices/loginwindow.app/Contents/MacOS/loginwindow console\n  796  12.0  41440 17-07:46:04 /usr/sbin/coreaudiod\n84982  10.8 751760    02:06:56 /Users/nover/Library/Application Support/Claude/claude-code/2.1.295/9d6405864fdc/claude.app/Contents/MacOS/claude --output-format stream-json --verbose --input-format st\n59357   6.8 724640 01-01:09:23 /Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Versions/155.0.8059.80/Helpers/Codex (Renderer).app/Contents/MacOS/Codex (Renderer) --type=render\n  621   6.0 444240 17-07:46:12 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer -daemon\n59299   4.1  84304 01-01:09:30 /Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Versions/155.0.8059.80/Helpers/Codex (Service).app/Contents/MacOS/Codex (Service) --type=gpu-proc\n 9591   3.9  29424 02-09:50:54 /usr/libexec/PerfPowerServices\n  770   3.8  47744 17-07:46:10 /System/Library/DriverExtensions/com.apple.DriverKit-AppleBCMWLAN.dext/com.apple.DriverKit-AppleBCMWLAN com.apple.bcmwlan 0x10000103b com.apple.DriverKit-AppleBCMWLAN\n20184   3.4 877360 04-01:26:46 /Users/nover/Library/Application Support/Claude/claude-code/2.1.295/9d6405864fdc/claude.app/Contents/MacOS/claude --output-format stream-json --verbose --input-format st\n 7802   3.0 1124832 04-23:41:59 /Applications/Claude.app/Contents/Frameworks/Claude Helper (Renderer).app/Contents/MacOS/Claude Helper (Renderer) --type=renderer --user-data-dir=/Users/nover/Library/A\n73534   2.0 762304 01-05:44:24 /Applications/Firefox.app/Contents/MacOS/plugin-container.app/Contents/MacOS/plugin-container -isForBrowser -prefsHandle 0:53104 -prefMapHandle 1:303549 -jsInitHandle 2:\n 6933   1.8 986736 03-12:07:35 /Applications/Firefox.app/Contents/MacOS/firefox",
+  "power": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=37027939)\t100%; charged; 0:00 remaining present: true",
+  "thermal": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+  "memory_pressure": "System-wide memory free percentage: 91%",
+  "metal_cache": {
+   "16777235_419/functions.data": [
+    41779200,
+    1792311563
+   ],
+   "16777235_419/functions.list": [
+    495084,
+    1792376528
+   ],
+   "16777235_419/functions1.data": [
+    13058048,
+    1792272189
+   ],
+   "16777235_419/functions1.list": [
+    166812,
+    1792272190
+   ],
+   "16777235_419/functions2.data": [
+    458752,
+    1783353316
+   ],
+   "16777235_419/functions2.list": [
+    6148,
+    1783353316
+   ],
+   "16777235_419/functions3.data": [
+    65536,
+    1777995204
+   ],
+   "16777235_419/functions3.list": [
+    156,
+    1777995204
+   ],
+   "16777235_419/functions4.data": [
+    65536,
+    1777995204
+   ],
+   "16777235_419/functions4.list": [
+    156,
+    1777995204
+   ],
+   "32023/libraries.data": [
+    55721984,
+    1744978574
+   ],
+   "32023/libraries.list": [
+    111820,
+    1744978656
+   ],
+   "32023/libraries1.data": [
+    16580608,
+    1739292184
+   ],
+   "32023/libraries1.list": [
+    43388,
+    1739292184
+   ],
+   "32024/libraries.data": [
+    378322944,
+    1792376667
+   ],
+   "32024/libraries.list": [
+    1576892,
+    1792376667
+   ],
+   "32024/libraries1.data": [
+    62767104,
+    1792276901
+   ],
+   "32024/libraries1.list": [
+    163844,
+    1792276901
+   ],
+   "32024/libraries2.data": [
+    26755072,
+    1783353316
+   ],
+   "32024/libraries2.list": [
+    13932,
+    1783353316
+   ]
+  }
+ },
+ "host_after": {
+  "utc": "2026-10-19T02:31:28+00:00",
+  "uptime": "22:31  up 17 days,  7:51, 3 users, load averages: 2.50 2.54 2.58",
+  "loadavg": [
+   2.5,
+   2.54,
+   2.58
+  ],
+  "top_cpu": "  PID  %CPU    RSS     ELAPSED ARGS\n  796   9.5  41440 17-07:49:32 /usr/sbin/coreaudiod\n59357   4.5 722880 01-01:12:51 /Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Versions/155.0.8059.80/Helpers/Codex (Renderer).app/Contents/MacOS/Codex (Renderer) --type=render\n59299   4.0  84368 01-01:12:58 /Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Versions/155.0.8059.80/Helpers/Codex (Service).app/Contents/MacOS/Codex (Service) --type=gpu-proc\n84015   1.8 105424    02:21:03 /System/Applications/Utilities/Activity Monitor.app/Contents/MacOS/Activity Monitor\n10726   1.6 308064 03-05:49:53 /Users/nover/Library/Application Support/Claude/claude-code/2.1.295/9d6405864fdc/claude.app/Contents/MacOS/claude --output-format stream-json --verbose --input-format st\n  591   1.1  15072 17-07:49:40 /usr/libexec/opendirectoryd\n73534   0.9 762320 01-05:47:52 /Applications/Firefox.app/Contents/MacOS/plugin-container.app/Contents/MacOS/plugin-container -isForBrowser -prefsHandle 0:53104 -prefMapHandle 1:303549 -jsInitHandle 2:\n 6933   0.7 986752 03-12:11:03 /Applications/Firefox.app/Contents/MacOS/firefox\n  615   0.7   6112 17-07:49:40 /usr/sbin/notifyd\n  978   0.6  15984 17-07:49:19 /System/Library/PrivateFrameworks/CoreSpeech.framework/corespeechd\n  554   0.5  17008 17-07:49:40 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/FSEvents.framework/Versions/A/Support/fseventsd\n84982   0.5 751760    02:10:24 /Users/nover/Library/Application Support/Claude/claude-code/2.1.295/9d6405864fdc/claude.app/Contents/MacOS/claude --output-format stream-json --verbose --input-format st",
+  "power": "Now drawing from 'AC Power'\n -InternalBattery-0 (id=37027939)\t100%; charged; 0:00 remaining present: true",
+  "thermal": "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded",
+  "memory_pressure": "System-wide memory free percentage: 92%",
+  "metal_cache": {
+   "16777235_419/functions.data": [
+    41779200,
+    1792311563
+   ],
+   "16777235_419/functions.list": [
+    495084,
+    1792376884
+   ],
+   "16777235_419/functions1.data": [
+    13058048,
+    1792272189
+   ],
+   "16777235_419/functions1.list": [
+    166812,
+    1792272190
+   ],
+   "16777235_419/functions2.data": [
+    458752,
+    1783353316
+   ],
+   "16777235_419/functions2.list": [
+    6148,
+    1783353316
+   ],
+   "16777235_419/functions3.data": [
+    65536,
+    1777995204
+   ],
+   "16777235_419/functions3.list": [
+    156,
+    1777995204
+   ],
+   "16777235_419/functions4.data": [
+    65536,
+    1777995204
+   ],
+   "16777235_419/functions4.list": [
+    156,
+    1777995204
+   ],
+   "32023/libraries.data": [
+    55721984,
+    1744978574
+   ],
+   "32023/libraries.list": [
+    111820,
+    1744978656
+   ],
+   "32023/libraries1.data": [
+    16580608,
+    1739292184
+   ],
+   "32023/libraries1.list": [
+    43388,
+    1739292184
+   ],
+   "32024/libraries.data": [
+    378519552,
+    1792376947
+   ],
+   "32024/libraries.list": [
+    1577620,
+    1792376947
+   ],
+   "32024/libraries1.data": [
+    62767104,
+    1792276901
+   ],
+   "32024/libraries1.list": [
+    163844,
+    1792276901
+   ],
+   "32024/libraries2.data": [
+    26755072,
+    1783353316
+   ],
+   "32024/libraries2.list": [
+    13932,
+    1783353316
+   ]
+  }
+ },
+ "metal_cache_growth": {
+  "files": {
+   "16777235_419/functions.list": {
+    "before": [
+     495084,
+     1792376528
+    ],
+    "after": [
+     495084,
+     1792376884
+    ],
+    "growth_bytes": 0
+   },
+   "32024/libraries.data": {
+    "before": [
+     378322944,
+     1792376667
+    ],
+    "after": [
+     378519552,
+     1792376947
+    ],
+    "growth_bytes": 196608
+   },
+   "32024/libraries.list": {
+    "before": [
+     1576892,
+     1792376667
+    ],
+    "after": [
+     1577620,
+     1792376947
+    ],
+    "growth_bytes": 728
+   }
+  },
+  "growth_bytes": 197336
+ },
+ "in_run_load_1m": [
+  [
+   5.0,
+   2.19
+  ],
+  [
+   10.0,
+   2.25
+  ],
+  [
+   15.0,
+   2.47
+  ],
+  [
+   20.0,
+   2.51
+  ],
+  [
+   25.0,
+   2.55
+  ],
+  [
+   30.1,
+   2.67
+  ],
+  [
+   35.1,
+   2.77
+  ],
+  [
+   40.1,
+   2.55
+  ],
+  [
+   45.1,
+   2.67
+  ],
+  [
+   50.1,
+   2.85
+  ],
+  [
+   55.1,
+   2.62
+  ],
+  [
+   60.1,
+   2.81
+  ],
+  [
+   65.1,
+   2.83
+  ],
+  [
+   70.1,
+   2.84
+  ],
+  [
+   75.2,
+   3.1
+  ],
+  [
+   80.2,
+   3.01
+  ],
+  [
+   85.2,
+   2.93
+  ],
+  [
+   90.2,
+   2.69
+  ],
+  [
+   95.2,
+   2.56
+  ],
+  [
+   100.2,
+   2.59
+  ],
+  [
+   105.2,
+   2.38
+  ],
+  [
+   110.2,
+   2.43
+  ],
+  [
+   115.3,
+   2.48
+  ],
+  [
+   120.3,
+   2.84
+  ],
+  [
+   125.3,
+   3.09
+  ],
+  [
+   130.3,
+   2.84
+  ],
+  [
+   135.3,
+   2.62
+  ],
+  [
+   140.3,
+   2.65
+  ],
+  [
+   145.3,
+   2.51
+  ],
+  [
+   150.3,
+   2.39
+  ],
+  [
+   155.3,
+   2.52
+  ],
+  [
+   160.4,
+   2.56
+  ],
+  [
+   165.4,
+   2.67
+  ],
+  [
+   170.4,
+   2.78
+  ],
+  [
+   175.4,
+   2.88
+  ],
+  [
+   180.4,
+   2.81
+  ],
+  [
+   185.4,
+   2.9
+  ],
+  [
+   190.4,
+   2.75
+  ],
+  [
+   195.4,
+   2.53
+  ],
+  [
+   200.4,
+   2.33
+  ],
+  [
+   205.5,
+   2.54
+  ]
+ ],
+ "in_run_load_1m_maximum": 3.1,
+ "in_run_load_limit": 6.0,
+ "clean": true
+}

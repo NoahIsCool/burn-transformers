@@ -1,0 +1,93 @@
+== rounds 12; steady state from round 5 (rounds [5, 6, 7, 8, 9, 10, 11, 12]); limiting block from round 1; tolerance 0.025, z limit 3.0, window at least 8 rounds in whole blocks
+   block from round 1 against rounds 5 to 12: 9 drifting, 9 beyond tolerance
+      september/public/strict_load drift -0.0782 noise 0.0117 z 9.06 DRIFTING
+      head/public/natural_loop drift -0.0757 noise 0.0075 z 13.72 DRIFTING
+      head/public/strict_load drift -0.0755 noise 0.0052 z 19.64 DRIFTING
+      september/baseline/source_32.prefill drift -0.0581 noise 0.0115 z 6.76 DRIFTING
+      september/baseline/source_32.first_token_latency drift -0.0508 noise 0.0082 z 8.30 DRIFTING
+      september/baseline/strict_load drift -0.0446 noise 0.0110 z 5.40 DRIFTING
+      september/baseline/source_512.prefill drift -0.0314 noise 0.0074 z 5.59 DRIFTING
+      september/baseline/source_512.first_token_latency drift -0.0309 noise 0.0069 z 5.90 DRIFTING
+      september/baseline/source_32.decode_model_only drift -0.0287 noise 0.0041 z 9.28 DRIFTING
+   block from round 5 against rounds 9 to 12: 0 drifting, 1 beyond tolerance
+      head/baseline/strict_load drift +0.0343 noise 0.0400 z 0.95 within noise
+== after 8 rounds: steady state from round None; limiting block from round 1 with 9 drifting series
+   block from round 1 against rounds 5 to 8: 9 drifting, 9 beyond tolerance
+      september/public/strict_load drift -0.0855 noise 0.0074 z 13.64 DRIFTING
+      head/public/strict_load drift -0.0779 noise 0.0052 z 17.52 DRIFTING
+      head/public/natural_loop drift -0.0769 noise 0.0066 z 13.63 DRIFTING
+      september/baseline/source_32.prefill drift -0.0587 noise 0.0082 z 8.34 DRIFTING
+      september/baseline/strict_load drift -0.0569 noise 0.0069 z 9.58 DRIFTING
+      september/baseline/source_32.first_token_latency drift -0.0528 noise 0.0074 z 8.30 DRIFTING
+      september/baseline/source_512.prefill drift -0.0331 noise 0.0049 z 7.72 DRIFTING
+      september/baseline/source_512.first_token_latency drift -0.0323 noise 0.0050 z 7.47 DRIFTING
+      september/baseline/source_32.decode_model_only drift -0.0283 noise 0.0006 z 57.52 DRIFTING
+== original rule (campaign script, half-medians within 0.025 over at least 6 final rounds): earliest steady start 3
+   start 1: drifting: head/public/strict_load -0.0555
+   start 2: drifting: head/public/strict_load -0.0441
+   start 3: steady: none
+   start 4: drifting: head/baseline/strict_load +0.0307
+   start 5: drifting: head/baseline/strict_load +0.0343
+   start 6: drifting: september/baseline/strict_load +0.0340
+   start 7: drifting: september/baseline/strict_load +0.0340
+== window position counts {"head/baseline": {"1": 2, "2": 2, "3": 2, "4": 2}, "head/public": {"1": 2, "2": 2, "3": 2, "4": 2}, "september/baseline": {"1": 2, "2": 2, "3": 2, "4": 2}, "september/public": {"1": 2, "2": 2, "3": 2, "4": 2}}
+== binary head: sha256 cb7bf1b53d045b53a8fadb8cc032c732fc8d40f57ddc347cc8500f1eb0723f99 commit fa8426e5dc8cbcb269c29e211b119ea0acd61054 status '' toolchain 1.92.0-aarch64-apple-darwin features ['chat-templates', 'metal', 'std', 'tokenizers'] profile 'release (debug assertions disabled)'
+== binary september: sha256 e3f94714fa16f572d9c2fefdbb92aa4a34395300c368a9c891d55b9b63ad2eee commit c70057e82510e085bc057910a99886c1ce551567 status '' toolchain 1.92.0-aarch64-apple-darwin features ['chat-templates', 'metal', 'std', 'tokenizers'] profile 'release (debug assertions disabled)'
+== original window position counts {"head/baseline": {"1": 2, "2": 3, "3": 3, "4": 2}, "head/public": {"1": 3, "2": 2, "3": 2, "4": 3}, "september/baseline": {"1": 3, "2": 2, "3": 2, "4": 3}, "september/public": {"1": 2, "2": 3, "3": 3, "4": 2}}
+== baseline benchmark (steady-state medians in s over rounds 5 to 12; approved September 10 values from qwen-controlled-current-summary.json)
+   strict_load round-to-round noise over the window: head 0.0227, september 0.0110
+   strict_load: head 0.939649 [0.922841, 1.026705] | september 0.976618 [0.954167, 0.997631] | head/september 0.962 | approved 1.412922: head -33.5%, september -30.9% | head over rounds 3 to 12 0.933538 (+0.65%)
+   source_32.prefill round-to-round noise over the window: head 0.0175, september 0.0115
+   source_32.prefill: head 0.048583 [0.047318, 0.052933] | september 0.064475 [0.063268, 0.066017] | head/september 0.754 | approved 0.075650: head -35.8%, september -14.8% | head over rounds 3 to 12 0.048583 (+0.00%)
+   source_32.first_token_latency round-to-round noise over the window: head 0.0135, september 0.0082
+   source_32.first_token_latency: head 0.056545 [0.055208, 0.060632] | september 0.072412 [0.071132, 0.073959] | head/september 0.781 | approved 0.084213: head -32.9%, september -14.0% | head over rounds 3 to 12 0.056545 (+0.00%)
+   source_32.decode_model_only round-to-round noise over the window: head 0.0040, september 0.0041
+   source_32.decode_model_only: head 3.557070 [3.531514, 3.874706] | september 4.057053 [4.027118, 4.083846] | head/september 0.877 | approved 4.758460: head -25.2%, september -14.7% | head over rounds 3 to 12 3.559923 (-0.08%)
+   source_32.decode_including_greedy_readback round-to-round noise over the window: head 0.0037, september 0.0034
+   source_32.decode_including_greedy_readback: head 4.569030 [4.543558, 4.899909] | september 5.070784 [5.038188, 5.094220] | head/september 0.901 | approved 5.815231: head -21.4%, september -12.8% | head over rounds 3 to 12 4.571608 (-0.06%)
+   source_128.prefill round-to-round noise over the window: head 0.0010, september 0.0090
+   source_128.prefill: head 0.061025 [0.060451, 0.062363] | september 0.148860 [0.146713, 0.149888] | head/september 0.410 | approved 0.178113: head -65.7%, september -16.4% | head over rounds 3 to 12 0.060993 (+0.05%)
+   source_128.first_token_latency round-to-round noise over the window: head 0.0031, september 0.0087
+   source_128.first_token_latency: head 0.068957 [0.068291, 0.070426] | september 0.156679 [0.154571, 0.157709] | head/september 0.440 | approved 0.187561: head -63.2%, september -16.5% | head over rounds 3 to 12 0.068917 (+0.06%)
+   source_128.decode_model_only round-to-round noise over the window: head 0.0029, september 0.0061
+   source_128.decode_model_only: head 3.544734 [3.536121, 3.891677] | september 4.052669 [4.012572, 4.075992] | head/september 0.875 | approved 4.747253: head -25.3%, september -14.6% | head over rounds 3 to 12 3.547134 (-0.07%)
+   source_128.decode_including_greedy_readback round-to-round noise over the window: head 0.0027, september 0.0048
+   source_128.decode_including_greedy_readback: head 4.557876 [4.547058, 4.915361] | september 5.066359 [5.025103, 5.088503] | head/september 0.900 | approved 5.793577: head -21.3%, september -12.6% | head over rounds 3 to 12 4.560201 (-0.05%)
+   source_512.prefill round-to-round noise over the window: head 0.0037, september 0.0074
+   source_512.prefill: head 0.161342 [0.160757, 0.161905] | september 0.531240 [0.528137, 0.535716] | head/september 0.304 | approved 0.615804: head -73.8%, september -13.7% | head over rounds 3 to 12 0.161413 (-0.04%)
+   source_512.first_token_latency round-to-round noise over the window: head 0.0037, september 0.0069
+   source_512.first_token_latency: head 0.169647 [0.168779, 0.171416] | september 0.539268 [0.536003, 0.544571] | head/september 0.315 | approved 0.623614: head -72.8%, september -13.5% | head over rounds 3 to 12 0.169647 (+0.00%)
+   source_512.decode_model_only round-to-round noise over the window: head 0.0052, september 0.0033
+   source_512.decode_model_only: head 3.537419 [3.517977, 3.573947] | september 4.043467 [4.016386, 4.078619] | head/september 0.875 | approved 4.773886: head -25.9%, september -15.3% | head over rounds 3 to 12 3.541877 (-0.13%)
+   source_512.decode_including_greedy_readback round-to-round noise over the window: head 0.0042, september 0.0034
+   source_512.decode_including_greedy_readback: head 4.551288 [4.532622, 4.587470] | september 5.058981 [5.031358, 5.091952] | head/september 0.900 | approved 5.799063: head -21.5%, september -12.8% | head over rounds 3 to 12 4.556832 (-0.12%)
+   natural_loop round-to-round noise over the window: head 0.0037, september 0.0038
+   natural_loop: head 1.109537 [1.102568, 1.120526] | september 1.231543 [1.203365, 1.238727] | head/september 0.901 | approved 1.420816: head -21.9%, september -13.3% | head over rounds 3 to 12 1.110100 (-0.05%)
+   cold first token (diagnostic) head: steady median 0.1308 range [0.1196, 0.2269] | all rounds median 0.1618 range [0.1196, 0.2527] | approved 0.167520 (-21.9%) | spearman with shader-cache growth +0.740, with round -0.629
+      per round cold [0.2527, 0.149, 0.2042, 0.2053, 0.127, 0.2269, 0.1747, 0.2241, 0.1272, 0.1255, 0.1343, 0.1196] growth [312360, 246712, 246600, 164512, 164512, 180896, 197336, 197336, 164400, 98696, 115136, 98864]
+      after discarded attempts: rounds [2, 9, 10], attempts' growth [0, 328632, 0, 0, 0, 0, 0, 0, 147960, 279592, 0, 0]; spearman with growth including the attempts' +0.151
+      without those rounds: steady median 0.1545 range [0.1196, 0.2269] (6 rounds) | all rounds median 0.2042 range [0.1196, 0.2527] (9 rounds) | spearman with growth +0.714, with round -0.567
+   cold first token (diagnostic) september: steady median 0.2426 range [0.1895, 0.3605] | all rounds median 0.2954 range [0.1895, 0.5098] | approved 0.167520 (+44.8%) | spearman with shader-cache growth +0.874, with round -0.839
+      per round cold [0.5098, 0.4754, 0.3663, 0.4032, 0.27, 0.23, 0.3605, 0.2353, 0.2499, 0.3208, 0.1895, 0.2234] growth [658272, 460824, 460768, 411280, 296368, 263208, 427720, 263320, 296200, 312528, 164680, 328688]
+      after discarded attempts: rounds [1], attempts' growth [724816, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]; spearman with growth including the attempts' +0.874
+      without those rounds: steady median 0.2426 range [0.1895, 0.3605] (8 rounds) | all rounds median 0.2700 range [0.1895, 0.4754] (11 rounds) | spearman with growth +0.836, with round -0.791
+   token and prediction hashes: identical in every run of both binaries and to September 10
+== public benchmark (steady-state medians in s over rounds 5 to 12; approved September 10 values from qwen-public-summary.json)
+   strict_load round-to-round noise over the window: head 0.0052, september 0.0117
+   strict_load: head 0.934233 [0.922158, 1.011035] | september 0.979434 [0.962605, 0.993942] | head/september 0.954 | approved 1.407921: head -33.6%, september -30.4% | head over rounds 3 to 12 0.936357 (-0.23%)
+   natural_loop round-to-round noise over the window: head 0.0075, september 0.0015
+   natural_loop: head 1.412647 [1.394066, 1.502805] | september 1.577084 [1.560667, 1.581039] | head/september 0.896 | approved 1.751402: head -19.3%, september -10.0% | head over rounds 3 to 12 1.414438 (-0.13%)
+   cold first token (diagnostic) head: steady median 0.1589 range [0.1183, 0.2411] | all rounds median 0.1775 range [0.1183, 0.3660] | approved 0.365949 (-56.6%) | spearman with shader-cache growth +0.699, with round -0.769
+      per round cold [0.2733, 0.2982, 0.366, 0.1927, 0.2411, 0.1351, 0.1598, 0.1623, 0.158, 0.2331, 0.1561, 0.1183] growth [197280, 98808, 181008, 197224, 164400, 49656, 131408, 65816, 115080, 98752, 16720, 49432]
+      after discarded attempts: rounds [], attempts' growth [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]; spearman with growth including the attempts' +0.699
+      without those rounds: steady median 0.1589 range [0.1183, 0.2411] (8 rounds) | all rounds median 0.1775 range [0.1183, 0.3660] (12 rounds) | spearman with growth +0.699, with round -0.769
+   cold first token (diagnostic) september: steady median 0.2822 range [0.2482, 0.3080] | all rounds median 0.2944 range [0.2482, 0.5194] | approved 0.365949 (-22.9%) | spearman with shader-cache growth +0.725, with round -0.657
+      per round cold [0.5194, 0.46, 0.3721, 0.4431, 0.2811, 0.2539, 0.2546, 0.3032, 0.2832, 0.308, 0.2856, 0.2482] growth [329528, 460432, 328912, 263096, 263152, 197336, 197504, 197280, 164456, 246600, 197280, 131576]
+      after discarded attempts: rounds [], attempts' growth [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]; spearman with growth including the attempts' +0.725
+      without those rounds: steady median 0.2822 range [0.2482, 0.3080] (8 rounds) | all rounds median 0.2944 range [0.2482, 0.5194] (12 rounds) | spearman with growth +0.725, with round -0.657
+   token and prediction hashes: identical in every run of both binaries and to September 10
+== contaminated attempt r01.p2.september.baseline.contaminated-2026-10-19T000636+0000.host.json: admitted at load 3.19/4.37, in-run maximum 24.1, wall 266.71 s, shader-cache growth 724816 bytes, cold 0.5997 s; clean rerun: growth 658272 bytes, cold 0.5098 s
+== contaminated attempt r02.p4.head.baseline.contaminated-2026-10-19T003935+0000.host.json: admitted at load 3.33/4.1, in-run maximum 12.05, wall 211.327 s, shader-cache growth 328632 bytes, cold 0.3622 s; clean rerun: growth 246712 bytes, cold 0.1490 s
+== contaminated attempt r09.p1.head.baseline.contaminated-2026-10-19T025336+0000.host.json: admitted at load 1.89/2.31, in-run maximum 8.17, wall 213.624 s, shader-cache growth 147960 bytes, cold 0.2087 s; clean rerun: growth 164400 bytes, cold 0.1272 s
+== contaminated attempt r10.p4.head.baseline.contaminated-2026-10-19T033600+0000.host.json: admitted at load 3.88/4.53, in-run maximum 12.1, wall 206.287 s, shader-cache growth 82368 bytes, cold 0.1771 s; clean rerun: growth 98696 bytes, cold 0.1255 s
+== contaminated attempt r10.p4.head.baseline.contaminated-2026-10-19T034126+0000.host.json: admitted at load 2.99/4.8, in-run maximum 6.12, wall 206.386 s, shader-cache growth 197224 bytes, cold 0.2075 s; clean rerun: growth 98696 bytes, cold 0.1255 s

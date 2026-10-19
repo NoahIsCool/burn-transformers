@@ -1,0 +1,36 @@
+== source base: export /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/silu/base of 7bd057ecc56d60df2776639befd30058720d3c09 (now commit=7bd057ecc56d60df2776639befd30058720d3c09 files=2733 dirty=0)
+== binary /Volumes/bag of holding/cargo-targets/followups-silu/base-qwen35/release/deps/local_artifacts-2ce2a5ca8495b149 sha256 eb9d19ebe48c6030d2590d74dcbf2240445fafe2e6dd02e31558e58c851597d6
+== features std,metal,tokenizers,chat-templates (--no-default-features)
+== env TRANSFORMERS_QWEN35_DIR=/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17
+== env TRANSFORMERS_QWEN35_REFERENCE_DIR=/Volumes/bag of holding/models/transformers-acceptance
+== cwd /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/silu/base
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/followups-silu/base-qwen35/release/deps/local_artifacts-2ce2a5ca8495b149 --ignored --exact --nocapture --test-threads 1 loads_pinned_qwen35_weights_and_runs_metal_inference
+== start 2026-10-17T21:28:27+00:00 load 17.14 24.19 29.28
+
+running 1 test
+test loads_pinned_qwen35_weights_and_runs_metal_inference ... official full-vocabulary prompt-logit cosine similarity: 0.999998523
+minimum cached/official full-vocabulary cosine similarity: 0.999997671
+minimum teacher-forced/official full-vocabulary cosine similarity: 0.999997517
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 25 filtered out; finished in 13.75s
+
+       14.48 real        10.77 user         1.70 sys
+          2585657344  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              219971  page reclaims
+                 280  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                  34  voluntary context switches
+               56384  involuntary context switches
+        142130498887  instructions retired
+         44287831901  cycles elapsed
+          3553937736  peak memory footprint
+== exit=0 wall=15.3s end=2026-10-17T21:28:43+00:00 load_end 14.49 min_free_pct=88 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0

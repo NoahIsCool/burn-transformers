@@ -1,0 +1,24 @@
+== script acceptance/measurements/half-precision-review-20261018/probes/probe_torch_half.py sha256 8fce3886ab59c3854d15e10b82eec22dad3b7b1730446a8dcf94d8e630dcd9db
+== command python3 -I acceptance/measurements/half-precision-review-20261018/probes/probe_torch_half.py (cwd: the worktree)
+== start 2026-10-18T06:33:47Z load { 2.94 3.34 3.63 }
+torch 2.10.0, transformers 5.2.0, numpy 2.4.3, python 3.11.9, macOS-27.0.1-arm64-arm-64bit, devices ['cpu', 'mps']
+== 1. x * (1/sqrt(128)) with a Python float scale (0.08838834764831843) against (x.float() * s).to(dtype) on the CPU
+torch.bfloat16: 65280 finite inputs; a torch.bfloat16-rounded scale (0.08837890625) would move 1508
+   cpu torch.bfloat16: 0 of 65280 differ from the F32 product rounded once; 0 have a subnormal F32 product flushed to zero (0 of them round to a subnormal, 0 to the smallest normal), 0 other
+   mps torch.bfloat16: 1120 of 65280 differ from the F32 product rounded once; 1120 have a subnormal F32 product flushed to zero (1118 of them round to a subnormal, 2 to the smallest normal), 0 other
+torch.float16: 63488 finite inputs; a torch.float16-rounded scale (0.08837890625) would move 8722
+   cpu torch.float16: 0 of 63488 differ from the F32 product rounded once; 0 have a subnormal F32 product flushed to zero (0 of them round to a subnormal, 0 to the smallest normal), 0 other
+   mps torch.float16: 0 of 63488 differ from the F32 product rounded once; 0 have a subnormal F32 product flushed to zero (0 of them round to a subnormal, 0 to the smallest normal), 0 other
+== 2. half-precision matrix products against the exact sum rounded once
+   cpu torch.float16: 1 + 4096 * 2^-11 = 3.0; [16, 256] x [256, 16]: 0 of 256 differ from the exact sum rounded once
+   mps torch.float16: 1 + 4096 * 2^-11 = 3.0; [16, 256] x [256, 16]: 0 of 256 differ from the exact sum rounded once
+   cpu torch.bfloat16: 1 + 4096 * 2^-11 = 3.0; [16, 256] x [256, 16]: 0 of 256 differ from the exact sum rounded once
+   mps torch.bfloat16: 1 + 4096 * 2^-11 = 3.0; [16, 256] x [256, 16]: 0 of 256 differ from the exact sum rounded once
+== 3. transformers eager_attention_forward (Llama) on EagerGrid, CPU
+torch.bfloat16: eager_attention_forward against the emulation: 0 of 92 outputs differ (the fully masked row excluded); probabilities equal; 0 operand values in Flex's BF16 cast range 0x8001..=0x8007
+torch.bfloat16 fully masked row (batch 0, head 1, query 0): [0.150391, -0.050049, -0.25, -0.025024]
+torch.bfloat16 output bits [batch, head, query, value]: 3cc4 bddc 3e17 bef4 bd8c 3ddb bc48 be31 3e54 be04 bed9 3cfe 3e1a bd4d be80 bccd 3ea3 3dfe be39 be04 3e88 bcb9 be44 be5d bee0 3e5d 3ee0 be40 3c60 3e9a 3db2 bf0a bd8a 3d04 3e44 be52 bf11 3ef1 3e9e bea2 beae 3e91 3e4e bed9 3ca9 3e30 3da0 be8c be8f bda9 3f18 bcf0 bed7 bd26 3ee9 be2e 3cde bdc1 3e17 3e8e be64 bdd6 3f27 3ce4 bf11 3e41 3e9d bea3 bdb0 bd20 3e67 3e28 3de2 bf03 be26 3eb8 be82 be03 3e7b bb88 be2c bef0 3e23 3da8 bd52 bf2d 3e0a 3e4c be0b bec5 3e64 3dea 3d54 be42 bdfc 3d98
+torch.float16: eager_attention_forward against the emulation: 0 of 92 outputs differ (the fully masked row excluded); probabilities equal; 0 operand values in Flex's BF16 cast range 0x8001..=0x8007
+torch.float16 fully masked row (batch 0, head 1, query 0): [0.149902, -0.049988, -0.25, -0.024994]
+torch.float16 output bits [batch, head, query, value]: 260a aee2 30bc b7a2 ac59 2ebf a206 b187 32a4 b029 b6ca 27f4 30cc aa66 b400 a666 3520 2ff9 b1cc b01d 3437 a5cc b21f b2e1 b6ff 32dc 3701 b1fe 22e6 34d1 2d90 b84e ac51 283d 321d b294 b889 378a 34ef b512 b571 3488 3272 b6c8 2534 3185 2cfd b460 b479 ad54 38c4 a78c b6b8 a922 3748 b171 26f8 ae09 30b3 346f b319 aebe 393a 2738 b88b 320a 34e9 b516 ad78 a8fa 3334 3144 2f1a b81c b136 35c6 b413 b014 33d9 9ca4 b156 b77e 310e 2d55 aa84 b968 304e 325f b059 b629 3320 2f4f 2a8e b212 afd0 2cc0
+== exit=0 end 2026-10-18T06:33:48Z

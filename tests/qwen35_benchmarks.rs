@@ -26,6 +26,17 @@
 //! These analytical tensor payloads exclude allocation overhead and are checked
 //! against the exposed cache tensor shapes and dtypes. RSS boundary snapshots are
 //! not peaks; an external supervisor supplies whole-process memory high-water.
+//!
+//! A report is one sample of a campaign, not a verdict. The campaign protocol in
+//! `BENCHMARKS.md` (implemented by `scripts/qwen35_benchmark_protocol.py`) runs
+//! the baseline and public tests alternately for two binaries, takes medians over
+//! its steady-state rounds, and judges the warm, natural-loop and strict-load
+//! medians against the reference in
+//! `acceptance/measurements/qwen3.5-0.8b-metal-rebaseline-20261018.json`. Cold
+//! first token is one observation per process that includes lazy kernel and Metal
+//! pipeline compilation, so it also depends on the state of the operating system's
+//! shader cache: the report marks it `"gated": false`, and campaigns report its
+//! median and range without gating it.
 
 #[allow(
     dead_code,
@@ -431,6 +442,10 @@ mod qwen {
     }
 
     /// Executes the first prefill, then checks all 32 authenticated cached reference rows.
+    ///
+    /// The returned cold first-token time is a diagnostic (`"gated": false`): it
+    /// includes lazy kernel and Metal pipeline compilation, whose cost also depends
+    /// on the operating system's shader cache, not only on this crate's graph.
     fn cold_and_reference(
         model: &Qwen3_5ForCausalLm<Metal>,
         reference: &qwen35_release_reference::ReferenceBundle,
@@ -487,7 +502,7 @@ mod qwen {
         }
         assert_eq!(first, predicted[0]);
         assert!(minimum_cached_cosine >= 0.999 && minimum_teacher_cosine >= 0.999);
-        json!({"seconds":seconds,"source_token_ids":ids,"includes_cache_allocation":false,"includes_token_selection_and_readback":true,"includes_lazy_kernel_compilation":true,"prompt_reference_cosine":prompt_cosine,"minimum_cached_reference_cosine":minimum_cached_cosine,"minimum_teacher_reference_cosine":minimum_teacher_cosine,"reference_cached_decisions":32,"token_ids":predicted,"tokens_u32le_sha256":token_hash(&predicted)})
+        json!({"seconds":seconds,"gated":false,"source_token_ids":ids,"includes_cache_allocation":false,"includes_token_selection_and_readback":true,"includes_lazy_kernel_compilation":true,"prompt_reference_cosine":prompt_cosine,"minimum_cached_reference_cosine":minimum_cached_cosine,"minimum_teacher_reference_cosine":minimum_teacher_cosine,"reference_cached_decisions":32,"token_ids":predicted,"tokens_u32le_sha256":token_hash(&predicted)})
     }
 
     /// One baseline or chunked-prefill sample with honest work denominators.

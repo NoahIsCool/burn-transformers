@@ -247,3 +247,148 @@ fn scale_free_rms_norm_rejects_invalid_epsilon() {
         assert!(error.to_string().contains("rms_norm.epsilon"));
     }
 }
+
+/// Rounds an F32 value to a 16-bit float `dtype`, to nearest with ties to even, as PyTorch's casts do.
+fn round_half(dtype: DType, value: f32) -> f32 {
+    match dtype {
+        DType::BF16 => burn::tensor::bf16::from_f32(value).to_f32(),
+        DType::F16 => f16::from_f32(value).to_f32(),
+        other => unreachable!("no 16-bit float {other:?}"),
+    }
+}
+
+/// Returns how many representable values of the 16-bit float `dtype` lie between `a` and `b` (both representable).
+///
+/// The bit patterns are mapped to a monotone integer line (negative values
+/// mirrored below zero), so adjacent values are one apart and `+0` and `-0`
+/// coincide.
+fn units_apart(dtype: DType, a: f32, b: f32) -> u32 {
+    let ordered = |value: f32| -> i32 {
+        let bits = i32::from(match dtype {
+            DType::BF16 => burn::tensor::bf16::from_f32(value).to_bits(),
+            _ => f16::from_f32(value).to_bits(),
+        });
+        if bits & 0x8000 != 0 {
+            -(bits & 0x7fff)
+        } else {
+            bits
+        }
+    };
+    ordered(a).abs_diff(ordered(b))
+}
+
+/// The reference RMSNorm of one row: the unit-RMS activation computed in F64 and rounded to F32, then scaled.
+///
+/// Transformers' Llama-family `RMSNorm` computes `x * rsqrt(mean(x^2) + eps)`
+/// in F32, casts that to the activation dtype, and multiplies by the weight
+/// in the activation dtype (`round_before_scale`, one rounding of the
+/// product, which is exact in F32 for two 16-bit values). Gemma's
+/// zero-centered `RMSNorm` keeps `(1 + w) * x_f32 / rms` in F32 and rounds
+/// once. The F64 evaluation stands in for any F32 reduction order: they agree
+/// within a few F32 units, far below one unit of either 16-bit format.
+fn reference_rms_norm(
+    dtype: DType,
+    row: &[f32],
+    weight: &[f32],
+    epsilon: f64,
+    round_before_scale: bool,
+    zero_centered: bool,
+) -> Vec<f32> {
+    let mean_square = row.iter().map(|&x| f64::from(x).powi(2)).sum::<f64>() / row.len() as f64;
+    let inverse = (mean_square + epsilon).sqrt().recip();
+    row.iter()
+        .zip(weight)
+        .map(|(&x, &w)| {
+            let unit = (f64::from(x) * inverse) as f32;
+            if round_before_scale {
+                round_half(dtype, round_half(dtype, unit) * w)
+            } else {
+                let scale = if zero_centered { 1.0 + w } else { w };
+                round_half(dtype, unit * scale)
+            }
+        })
+        .collect()
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::test_runner::Config::with_cases(128))]
+
+    /// Half-precision RMSNorm lies within one unit in the last place of the references' rounding points, for both conventions.
+    ///
+    /// `round_before_scale` is the Llama-family graph (normalize in F32,
+    /// round, scale in the activation dtype); without it, zero-centered, it is
+    /// Gemma's (scale in F32, round once). One unit covers what may differ: the
+    /// F32 reduction order and root graph move the unit-RMS value by a few F32
+    /// units, which changes its rounding only at a near-tie, and Flex's F32
+    /// cast can decide a near-tie the other way (see the cast pin in
+    /// `feed_forward_tests.rs`). A norm evaluated in the activation dtype
+    /// misses it by many units (`half_precision_rms_norm_arithmetic_misses_the_bound`).
+    #[test]
+    fn half_precision_rms_norm_follows_the_reference_rounding_points(
+        width in 1_usize..96,
+        seeds in proptest::collection::vec(-30.0_f32..30.0, 96),
+        weights in proptest::collection::vec(-2.0_f32..2.0, 96),
+        bf16 in proptest::bool::ANY,
+        round_before_scale in proptest::bool::ANY,
+    ) {
+        let dtype = if bf16 { DType::BF16 } else { DType::F16 };
+        let zero_centered = !round_before_scale;
+        let device = Default::default();
+        let row: Vec<f32> = seeds[..width].iter().map(|&x| round_half(dtype, x)).collect();
+        let weight: Vec<f32> = weights[..width].iter().map(|&w| round_half(dtype, w)).collect();
+        let mut norm = RmsNormConfig::new(width)
+            .with_round_before_scale(round_before_scale)
+            .with_zero_centered(zero_centered)
+            .init::<Flex>(&device)
+            .unwrap();
+        norm.weight = Param::from_tensor(
+            Tensor::<Flex, 1>::from_data(TensorData::new(weight.clone(), [width]), &device).cast(dtype),
+        );
+        let input = Tensor::<Flex, 2>::from_data(TensorData::new(row.clone(), [1, width]), &device).cast(dtype);
+        let actual = norm.forward(input);
+        proptest::prop_assert_eq!(actual.dtype(), dtype);
+        let actual = actual.cast(DType::F32).into_data().to_vec::<f32>().unwrap();
+        let expected = reference_rms_norm(dtype, &row, &weight, norm.epsilon, round_before_scale, zero_centered);
+        for (index, (&actual, &expected)) in actual.iter().zip(&expected).enumerate() {
+            proptest::prop_assert!(
+                units_apart(dtype, actual, expected) <= 1,
+                "{:?} entry {} of {}: {} against the reference {}", dtype, index, width, actual, expected
+            );
+        }
+    }
+}
+
+/// A norm whose mean square accumulates in BF16 misses the one-unit bound by far, so the bound detects that defect.
+///
+/// Summing 4096 unit squares one at a time in BF16 stalls at `256`, where
+/// adding one is a tie that rounds back to `256`; the mean square is then
+/// `1/16` instead of `1`, and the unit-RMS value `4` instead of `1`.
+#[test]
+fn half_precision_rms_norm_arithmetic_misses_the_bound() {
+    let row = vec![1.0_f32; 4096];
+    let weight = vec![1.0_f32; 4096];
+    let mut sum = 0.0_f32;
+    for &x in &row {
+        sum = round_half(DType::BF16, sum + round_half(DType::BF16, x * x));
+    }
+    assert_eq!(sum, 256.0);
+    let defect = round_half(DType::BF16, 1.0 / (sum / 4096.0).sqrt());
+    let reference = reference_rms_norm(DType::BF16, &row, &weight, 1e-6, true, false)[0];
+    assert!(units_apart(DType::BF16, defect, reference) > 1);
+    let device = Default::default();
+    let norm = RmsNormConfig::new(4096)
+        .with_round_before_scale(true)
+        .init::<Flex>(&device)
+        .unwrap();
+    let actual = norm
+        .forward(Tensor::<Flex, 2>::ones([1, 4096], &device).cast(DType::BF16))
+        .cast(DType::F32)
+        .into_data()
+        .to_vec::<f32>()
+        .unwrap();
+    assert!(
+        actual
+            .iter()
+            .all(|&value| units_apart(DType::BF16, value, reference) <= 1)
+    );
+}

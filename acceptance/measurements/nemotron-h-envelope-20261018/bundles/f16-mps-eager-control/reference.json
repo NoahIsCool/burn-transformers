@@ -1,0 +1,893 @@
+{
+ "comparisons": {
+  "float16-cpu-eager": {
+   "cached": {
+    "cosines": [
+     0.9999992609564642,
+     0.9999736278073551,
+     0.9999977029295778,
+     0.9999988707557557,
+     0.9999990646784974,
+     0.999998602442959,
+     0.9999988728225211,
+     0.9999985431045553,
+     0.9998759683932057,
+     0.9999379352584606,
+     0.9999949275181369,
+     0.9999943725619578,
+     0.9999869442534198,
+     0.9999965017746885,
+     0.9999968912565037,
+     0.9999980664243292,
+     0.9999958350985297,
+     0.9999972817837409,
+     0.9999956462507489,
+     0.999997909975524,
+     0.999997881958865,
+     0.9998324256892116,
+     0.9984988143594082,
+     0.9999485627219002,
+     0.9999026318799723,
+     0.9992560541129418,
+     0.9990708145757005,
+     0.9999542019599033,
+     0.9999815306882619,
+     0.9996002897675536,
+     0.999850470749172,
+     0.9999346165710438
+    ],
+    "minimum": 0.9984988143594082,
+    "minimum_decision": 22,
+    "rows": 32,
+    "top1_agreements": 32
+   },
+   "prompt": {
+    "cosines": [
+     0.9999992609564642
+    ],
+    "minimum": 0.9999992609564642,
+    "minimum_decision": 0,
+    "rows": 1,
+    "top1_agreements": 1
+   },
+   "teacher": {
+    "cosines": [
+     0.9999987097962484,
+     0.999998714188054,
+     0.999986735101396,
+     0.9999968822388028,
+     0.9999973788189545,
+     0.999965288887413,
+     0.9999961416962272,
+     0.999668184475167,
+     0.9997049038536742,
+     0.999145445975032,
+     0.9999372033914168,
+     0.999971894633518,
+     0.9999840257495484,
+     0.9999880317631543,
+     0.9999693440466197,
+     0.9999351366764825,
+     0.999681965590735,
+     0.9997243385553026,
+     0.9943471408008858,
+     0.9998626434960002,
+     0.9999632343790235,
+     0.9999795366634574,
+     0.999960430960571,
+     0.9999908694467203,
+     0.9998991901756562,
+     0.9999779470252965,
+     0.9999830514493862,
+     0.9999174970170077,
+     0.9999762894143348,
+     0.9999863603304969,
+     0.9999825659522223,
+     0.9999513249112856
+    ],
+    "minimum": 0.9943471408008858,
+    "minimum_decision": 18,
+    "rows": 32,
+    "top1_agreements": 32
+   }
+  },
+  "float16-mps-oracle": {
+   "cached": {
+    "cosines": [
+     0.9999995880909938,
+     0.9999992493752312,
+     0.9999991900089982,
+     0.9999995992470864,
+     0.999999504445118,
+     0.9999992077020949,
+     0.9999994056130819,
+     0.9999989263335731,
+     0.9998697015674161,
+     0.9999376647391108,
+     0.9999954605538464,
+     0.9999948296296449,
+     0.9999985010168726,
+     0.9999982695810539,
+     0.9999979386288901,
+     0.9999986697468783,
+     0.9999973517645306,
+     0.9999982861034484,
+     0.9999976196181336,
+     0.9999982811378794,
+     0.9999984835127494,
+     0.9999987325611789,
+     0.9999984194026618,
+     0.999962039001601,
+     0.9999970693726282,
+     0.9999980563040037,
+     0.9999977369844487,
+     0.9999988343464982,
+     0.999998775221248,
+     0.9999990320121623,
+     0.9999987454841905,
+     0.9999877435407839
+    ],
+    "minimum": 0.9998697015674161,
+    "minimum_decision": 8,
+    "rows": 32,
+    "top1_agreements": 32
+   },
+   "prompt": {
+    "cosines": [
+     0.9999995880909937
+    ],
+    "minimum": 0.9999995880909937,
+    "minimum_decision": 0,
+    "rows": 1,
+    "top1_agreements": 1
+   },
+   "teacher": {
+    "cosines": [
+     1.000000000000001,
+     1.0000000000000007,
+     1.0000000000000007,
+     1.0000000000000004,
+     1.0000000000000007,
+     0.999998931050573,
+     0.9999989147380811,
+     0.9999991128709385,
+     0.9999989301912691,
+     0.9999981081359849,
+     0.9999994710682326,
+     0.9999961442146417,
+     0.9999976238081516,
+     0.9999991004953035,
+     0.9999983487051642,
+     0.999999232704296,
+     0.9999989695532927,
+     0.9999994197516583,
+     0.9999988538188443,
+     0.99999909014034,
+     0.9999991576870816,
+     0.9999993882210598,
+     0.9999993324407891,
+     0.9999992384380625,
+     0.9999991116829738,
+     0.9999991717730226,
+     0.9999993910479654,
+     0.9999992935141007,
+     0.9996862177058795,
+     0.9999727253507282,
+     0.9999839643195733,
+     0.9999965239731127
+    ],
+    "minimum": 0.9996862177058795,
+    "minimum_decision": 28,
+    "rows": 32,
+    "top1_agreements": 32
+   }
+  },
+  "float32": {
+   "cached": {
+    "cosines": [
+     0.9991981183241483,
+     0.9999492206777076,
+     0.9999623184043763,
+     0.9999919939950298,
+     0.9999896812792689,
+     0.9999922525465179,
+     0.9992808503044567,
+     0.9995414374410931,
+     0.9999149291830495,
+     0.9999130026427873,
+     0.999901783829215,
+     0.9999531767101277,
+     0.9995469612488438,
+     0.9999379085031375,
+     0.9999506279216999,
+     0.9999338178457187,
+     0.9999147665566168,
+     0.9998533985896959,
+     0.9998694221161645,
+     0.9999300910698392,
+     0.9998547794686714,
+     0.9999396865481252,
+     0.9985956044836493,
+     0.9999050223729502,
+     0.9998606221019798,
+     0.9999546184815025,
+     0.9999614517525967,
+     0.9995365129028606,
+     0.999943999563109,
+     0.9996453034276005,
+     0.9998250886826593,
+     0.9998533657816056
+    ],
+    "minimum": 0.9985956044836493,
+    "minimum_decision": 22,
+    "rows": 32,
+    "top1_agreements": 32
+   },
+   "prompt": {
+    "cosines": [
+     0.9991981183241482
+    ],
+    "minimum": 0.9991981183241482,
+    "minimum_decision": 0,
+    "rows": 1,
+    "top1_agreements": 1
+   },
+   "teacher": {
+    "cosines": [
+     0.9991787753590617,
+     0.9999527782062823,
+     0.9999859998361117,
+     0.9999901970523601,
+     0.9997579676791793,
+     0.9998691247440387,
+     0.9999485485975351,
+     0.9999607374494226,
+     0.9999620502109214,
+     0.9998702357920236,
+     0.9999669560023222,
+     0.999814122296937,
+     0.9999540030473865,
+     0.9999759756431975,
+     0.9999344234201123,
+     0.9999787084576021,
+     0.9996834034852516,
+     0.999796595211017,
+     0.9944822879133314,
+     0.9998907711129673,
+     0.9999661637203442,
+     0.9999688245187575,
+     0.9999746568391367,
+     0.9999811877548734,
+     0.9998876221635594,
+     0.9998905342473913,
+     0.9999382069418727,
+     0.9984764767225236,
+     0.9996423285519738,
+     0.9999536404266891,
+     0.9999570201953141,
+     0.9999574453184448
+    ],
+    "minimum": 0.9944822879133314,
+    "minimum_decision": 18,
+    "rows": 32,
+    "top1_agreements": 32
+   }
+  }
+ },
+ "files_sha256": {
+  "float16-cached-logits.f32le": "c92a06e4577498b2a09424f56ea4351cc898c0643e8b177ed9ae4f7c8de57039",
+  "float16-prompt-logits.f32le": "aa6c60531742a3555e21ce457bca701f9d18d8f4f9689418777eba80f2de1f0c",
+  "float16-teacher-logits.f32le": "95ed7ea2e0cfbccc003490308cadcafbb7ed33fa89aaef5ddbd8d4eda7a605ef"
+ },
+ "generated_ids": [
+  1256,
+  1010,
+  1256,
+  1010,
+  1256,
+  1010,
+  1256,
+  1010,
+  1256,
+  1010,
+  1256,
+  1010,
+  1256,
+  1010,
+  1256,
+  1010,
+  1256,
+  1010,
+  1256,
+  1010,
+  1256,
+  1010,
+  1256,
+  1010,
+  1256,
+  1010,
+  1256,
+  1010,
+  1256,
+  1010,
+  1256,
+  1010
+ ],
+ "graph": {
+  "attention_implementation": "eager",
+  "device": "mps",
+  "dtype": "float16",
+  "experts_implementation_requested": "eager",
+  "resolved": {
+   "attention_implementation": "eager",
+   "experts_implementation": "eager"
+  }
+ },
+ "prompt_ids": [
+  22177,
+  4304,
+  1044,
+  57424,
+  59417,
+  1046
+ ],
+ "provenance": {
+  "config_sha256": "a3827a0f5e311547b40943dc081e3ff2f8a277466e8c1a3df2291e8db8a7617c",
+  "environment": {
+   "HF_DEACTIVATE_ASYNC_LOAD": "1",
+   "HF_HUB_OFFLINE": "1",
+   "PYTORCH_ENABLE_MPS_FALLBACK": "0",
+   "USE_HUB_KERNELS": "0"
+  },
+  "generated_at": "2026-10-18T09:18:56+00:00",
+  "max_resident_gib": 16.0,
+  "model_dir": "/Volumes/bag of holding/models/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16-a9904d24bcc1d289a1950fa9d2b978c47cf903b9",
+  "offload_execution_devices": [
+   "mps"
+  ],
+  "offloaded_blocks": 23,
+  "oracle_dir": "/Volumes/bag of holding/models/transformers-acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24-reference.bundle",
+  "oracle_sha256": {
+   "nemotron-3.5-lightning-30b-a3b-a9904d24-cached-prefix-logits.f32le": "b3a1ae948e55e6db409e0f9973c41c8767c874c6d64b1d351cfff7bbafa72480",
+   "nemotron-3.5-lightning-30b-a3b-a9904d24-prompt-logits.f32le": "f3c014bb043e9ffa3a114a4296ca0e0c2165c4abd63b942df6d910a4383a1dff",
+   "nemotron-3.5-lightning-30b-a3b-a9904d24-reference.json": "bd3abb417f2fee82d1bef8bb654ca846fa4816351b1d9d7d0d057105f92de196",
+   "nemotron-3.5-lightning-30b-a3b-a9904d24-teacher-prefix-logits.f32le": "c1878c5e1396ddf01f3dfa85729ea58aa879ece28507399bdaf7addf4a65601b"
+  },
+  "platform": "macOS-27.0.1-arm64-arm-64bit",
+  "precision_dir": "/Volumes/bag of holding/models/transformers-acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24-precision.bundle",
+  "precision_manifest_sha256": "5da4427df4c882d3c4d42b5c2d37c2c61a4837597c944b9c67a23903a7ce73f9",
+  "precision_tool_sha256": "7d846c4b51cd31acedbdd6f6ac37467f803ccbce99145ec676e1a59d897b759f",
+  "python": "3.11.9",
+  "script": "scripts/generate_nemotron_h_f16_graph_reference.py",
+  "script_sha256": "81f5bd7735e79fde9e0d10bab5049bafa6803e8e469e3f0d9b44d0898e97b48f",
+  "self_check": {
+   "finite": true,
+   "graph": {
+    "attention_implementation": "eager",
+    "experts_implementation": "eager"
+   },
+   "harness_bitwise_equal": true,
+   "offloaded_bitwise_equal": true
+  },
+  "system_volume": [
+   {
+    "free_bytes": 21640273920,
+    "minimum_free_bytes": 16106127360,
+    "path": "/",
+    "purpose": "system volume before the MPS load"
+   },
+   {
+    "free_bytes": 22104363008,
+    "minimum_free_bytes": 10737418240,
+    "path": "/",
+    "purpose": "system volume after the evaluation"
+   }
+  ],
+  "timings": [
+   {
+    "host": {
+     "label": "start",
+     "load_average": [
+      3.44,
+      4.59,
+      4.21
+     ],
+     "top_cpu": [
+      {
+       "command": "/Library/Frameworks/Python.framework/Versions/3.11/Resources/Python.app/Contents/MacOS/Python",
+       "cpu_percent": 10.1,
+       "pid": 84333,
+       "rss_kib": 19744
+      },
+      {
+       "command": "/usr/sbin/coreaudiod",
+       "cpu_percent": 9.5,
+       "pid": 796,
+       "rss_kib": 18976
+      },
+      {
+       "command": "/Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Versions/155.0.8059.80/Helpers/Codex (Renderer).app/Contents/MacOS/Codex (Renderer)",
+       "cpu_percent": 7.5,
+       "pid": 59357,
+       "rss_kib": 561072
+      },
+      {
+       "command": "/Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Versions/155.0.8059.80/Helpers/Codex (Service).app/Contents/MacOS/Codex (Service)",
+       "cpu_percent": 2.7,
+       "pid": 59299,
+       "rss_kib": 37088
+      },
+      {
+       "command": "/Library/Frameworks/Python.framework/Versions/3.11/Resources/Python.app/Contents/MacOS/Python",
+       "cpu_percent": 2.7,
+       "pid": 84345,
+       "rss_kib": 22480
+      },
+      {
+       "command": "/Applications/Firefox.app/Contents/MacOS/firefox",
+       "cpu_percent": 1.6,
+       "pid": 6933,
+       "rss_kib": 378752
+      },
+      {
+       "command": "/Users/nover/Library/Application Support/Claude/claude-code/2.1.295/9d6405864fdc/claude.app/Contents/MacOS/claude",
+       "cpu_percent": 1.5,
+       "pid": 20184,
+       "rss_kib": 535600
+      },
+      {
+       "command": "/Applications/Firefox.app/Contents/MacOS/plugin-container.app/Contents/MacOS/plugin-container",
+       "cpu_percent": 1.5,
+       "pid": 40293,
+       "rss_kib": 583312
+      }
+     ],
+     "utc": "2026-10-18T08:34:38+00:00"
+    },
+    "phase": "start"
+   },
+   {
+    "after": {
+     "label": "after self-check",
+     "load_average": [
+      3.24,
+      4.53,
+      4.2
+     ],
+     "top_cpu": [
+      {
+       "command": "/Library/Frameworks/Python.framework/Versions/3.11/Resources/Python.app/Contents/MacOS/Python",
+       "cpu_percent": 76.1,
+       "pid": 84345,
+       "rss_kib": 892208
+      },
+      {
+       "command": "/usr/sbin/coreaudiod",
+       "cpu_percent": 5.1,
+       "pid": 796,
+       "rss_kib": 18976
+      },
+      {
+       "command": "/Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Versions/155.0.8059.80/Helpers/Codex (Service).app/Contents/MacOS/Codex (Service)",
+       "cpu_percent": 3.6,
+       "pid": 59299,
+       "rss_kib": 37104
+      },
+      {
+       "command": "/Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Versions/155.0.8059.80/Helpers/Codex (Renderer).app/Contents/MacOS/Codex (Renderer)",
+       "cpu_percent": 2.4,
+       "pid": 59357,
+       "rss_kib": 561376
+      },
+      {
+       "command": "/usr/libexec/logd",
+       "cpu_percent": 2.4,
+       "pid": 549,
+       "rss_kib": 23472
+      },
+      {
+       "command": "/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/FSEvents.framework/Versions/A/Support/fseventsd",
+       "cpu_percent": 1.7,
+       "pid": 554,
+       "rss_kib": 6688
+      },
+      {
+       "command": "/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mds_stores",
+       "cpu_percent": 1.0,
+       "pid": 859,
+       "rss_kib": 28352
+      },
+      {
+       "command": "/Applications/Firefox.app/Contents/MacOS/firefox",
+       "cpu_percent": 0.6,
+       "pid": 6933,
+       "rss_kib": 379168
+      }
+     ],
+     "utc": "2026-10-18T08:34:43+00:00"
+    },
+    "before": {
+     "label": "before self-check",
+     "load_average": [
+      3.44,
+      4.59,
+      4.21
+     ],
+     "top_cpu": [
+      {
+       "command": "/Library/Frameworks/Python.framework/Versions/3.11/Resources/Python.app/Contents/MacOS/Python",
+       "cpu_percent": 71.8,
+       "pid": 84345,
+       "rss_kib": 399376
+      },
+      {
+       "command": "/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdworker_shared",
+       "cpu_percent": 14.3,
+       "pid": 84357,
+       "rss_kib": 22656
+      },
+      {
+       "command": "/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdworker_shared",
+       "cpu_percent": 13.6,
+       "pid": 84356,
+       "rss_kib": 22624
+      },
+      {
+       "command": "/usr/sbin/coreaudiod",
+       "cpu_percent": 8.7,
+       "pid": 796,
+       "rss_kib": 18976
+      },
+      {
+       "command": "/Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Versions/155.0.8059.80/Helpers/Codex (Renderer).app/Contents/MacOS/Codex (Renderer)",
+       "cpu_percent": 5.6,
+       "pid": 59357,
+       "rss_kib": 561072
+      },
+      {
+       "command": "/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mds_stores",
+       "cpu_percent": 2.0,
+       "pid": 859,
+       "rss_kib": 28320
+      },
+      {
+       "command": "/Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Versions/155.0.8059.80/Helpers/Codex (Service).app/Contents/MacOS/Codex (Service)",
+       "cpu_percent": 1.8,
+       "pid": 59299,
+       "rss_kib": 37088
+      },
+      {
+       "command": "/Users/nover/Library/Application Support/Claude/claude-code/2.1.295/9d6405864fdc/claude.app/Contents/MacOS/claude",
+       "cpu_percent": 1.7,
+       "pid": 23675,
+       "rss_kib": 166864
+      }
+     ],
+     "utc": "2026-10-18T08:34:40+00:00"
+    },
+    "phase": "self-check",
+    "seconds": 2.99
+   },
+   {
+    "after": {
+     "label": "after load",
+     "load_average": [
+      3.21,
+      4.18,
+      4.09
+     ],
+     "top_cpu": [
+      {
+       "command": "/Library/Frameworks/Python.framework/Versions/3.11/Resources/Python.app/Contents/MacOS/Python",
+       "cpu_percent": 69.4,
+       "pid": 84345,
+       "rss_kib": 1562016
+      },
+      {
+       "command": "/usr/sbin/coreaudiod",
+       "cpu_percent": 8.7,
+       "pid": 796,
+       "rss_kib": 18976
+      },
+      {
+       "command": "/Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Versions/155.0.8059.80/Helpers/Codex (Renderer).app/Contents/MacOS/Codex (Renderer)",
+       "cpu_percent": 3.7,
+       "pid": 59357,
+       "rss_kib": 566928
+      },
+      {
+       "command": "/Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Versions/155.0.8059.80/Helpers/Codex (Service).app/Contents/MacOS/Codex (Service)",
+       "cpu_percent": 1.7,
+       "pid": 59299,
+       "rss_kib": 37104
+      },
+      {
+       "command": "/Applications/Firefox.app/Contents/MacOS/firefox",
+       "cpu_percent": 1.1,
+       "pid": 6933,
+       "rss_kib": 379504
+      },
+      {
+       "command": "/Users/nover/Library/Application Support/Claude/claude-code/2.1.295/9d6405864fdc/claude.app/Contents/MacOS/claude",
+       "cpu_percent": 0.9,
+       "pid": 20184,
+       "rss_kib": 564720
+      },
+      {
+       "command": "/Applications/Firefox.app/Contents/MacOS/plugin-container.app/Contents/MacOS/plugin-container",
+       "cpu_percent": 0.7,
+       "pid": 39210,
+       "rss_kib": 256608
+      },
+      {
+       "command": "/Users/nover/Library/Application Support/Claude/claude-code/2.1.295/9d6405864fdc/claude.app/Contents/MacOS/claude",
+       "cpu_percent": 0.7,
+       "pid": 38414,
+       "rss_kib": 159664
+      }
+     ],
+     "utc": "2026-10-18T08:36:07+00:00"
+    },
+    "before": {
+     "label": "before load",
+     "load_average": [
+      3.24,
+      4.53,
+      4.2
+     ],
+     "top_cpu": [
+      {
+       "command": "/Library/Frameworks/Python.framework/Versions/3.11/Resources/Python.app/Contents/MacOS/Python",
+       "cpu_percent": 76.1,
+       "pid": 84345,
+       "rss_kib": 893488
+      },
+      {
+       "command": "/usr/sbin/coreaudiod",
+       "cpu_percent": 5.1,
+       "pid": 796,
+       "rss_kib": 18976
+      },
+      {
+       "command": "/Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Versions/155.0.8059.80/Helpers/Codex (Service).app/Contents/MacOS/Codex (Service)",
+       "cpu_percent": 3.6,
+       "pid": 59299,
+       "rss_kib": 37088
+      },
+      {
+       "command": "/Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Versions/155.0.8059.80/Helpers/Codex (Renderer).app/Contents/MacOS/Codex (Renderer)",
+       "cpu_percent": 2.4,
+       "pid": 59357,
+       "rss_kib": 561376
+      },
+      {
+       "command": "/usr/libexec/logd",
+       "cpu_percent": 2.4,
+       "pid": 549,
+       "rss_kib": 23472
+      },
+      {
+       "command": "/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/FSEvents.framework/Versions/A/Support/fseventsd",
+       "cpu_percent": 1.7,
+       "pid": 554,
+       "rss_kib": 6688
+      },
+      {
+       "command": "/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mds_stores",
+       "cpu_percent": 1.0,
+       "pid": 859,
+       "rss_kib": 28352
+      },
+      {
+       "command": "/Applications/Firefox.app/Contents/MacOS/firefox",
+       "cpu_percent": 0.6,
+       "pid": 6933,
+       "rss_kib": 379168
+      }
+     ],
+     "utc": "2026-10-18T08:34:43+00:00"
+    },
+    "phase": "load",
+    "seconds": 83.651
+   },
+   {
+    "after": {
+     "label": "after evaluate",
+     "load_average": [
+      4.59,
+      2.62,
+      2.49
+     ],
+     "top_cpu": [
+      {
+       "command": "/Library/Frameworks/Python.framework/Versions/3.11/Resources/Python.app/Contents/MacOS/Python",
+       "cpu_percent": 93.5,
+       "pid": 84345,
+       "rss_kib": 948176
+      },
+      {
+       "command": "/usr/sbin/coreaudiod",
+       "cpu_percent": 9.7,
+       "pid": 796,
+       "rss_kib": 19280
+      },
+      {
+       "command": "/Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Versions/155.0.8059.80/Helpers/Codex (Renderer).app/Contents/MacOS/Codex (Renderer)",
+       "cpu_percent": 4.6,
+       "pid": 59357,
+       "rss_kib": 588128
+      },
+      {
+       "command": "/Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Versions/155.0.8059.80/Helpers/Codex (Service).app/Contents/MacOS/Codex (Service)",
+       "cpu_percent": 1.7,
+       "pid": 59299,
+       "rss_kib": 42640
+      },
+      {
+       "command": "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT",
+       "cpu_percent": 1.3,
+       "pid": 59276,
+       "rss_kib": 260528
+      },
+      {
+       "command": "/Applications/Firefox.app/Contents/MacOS/firefox",
+       "cpu_percent": 0.9,
+       "pid": 6933,
+       "rss_kib": 476112
+      },
+      {
+       "command": "/Applications/Firefox.app/Contents/MacOS/plugin-container.app/Contents/MacOS/plugin-container",
+       "cpu_percent": 0.8,
+       "pid": 39210,
+       "rss_kib": 497936
+      },
+      {
+       "command": "/Applications/Firefox.app/Contents/MacOS/plugin-container.app/Contents/MacOS/plugin-container",
+       "cpu_percent": 0.8,
+       "pid": 73534,
+       "rss_kib": 625696
+      }
+     ],
+     "utc": "2026-10-18T09:18:55+00:00"
+    },
+    "before": {
+     "label": "before evaluate",
+     "load_average": [
+      3.21,
+      4.18,
+      4.09
+     ],
+     "top_cpu": [
+      {
+       "command": "/Library/Frameworks/Python.framework/Versions/3.11/Resources/Python.app/Contents/MacOS/Python",
+       "cpu_percent": 62.8,
+       "pid": 84345,
+       "rss_kib": 1562080
+      },
+      {
+       "command": "/usr/sbin/coreaudiod",
+       "cpu_percent": 8.7,
+       "pid": 796,
+       "rss_kib": 18976
+      },
+      {
+       "command": "/Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Versions/155.0.8059.80/Helpers/Codex (Renderer).app/Contents/MacOS/Codex (Renderer)",
+       "cpu_percent": 4.2,
+       "pid": 59357,
+       "rss_kib": 566928
+      },
+      {
+       "command": "/Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Versions/155.0.8059.80/Helpers/Codex (Service).app/Contents/MacOS/Codex (Service)",
+       "cpu_percent": 2.0,
+       "pid": 59299,
+       "rss_kib": 37104
+      },
+      {
+       "command": "/Applications/Firefox.app/Contents/MacOS/firefox",
+       "cpu_percent": 1.1,
+       "pid": 6933,
+       "rss_kib": 379504
+      },
+      {
+       "command": "/Users/nover/Library/Application Support/Claude/claude-code/2.1.295/9d6405864fdc/claude.app/Contents/MacOS/claude",
+       "cpu_percent": 0.9,
+       "pid": 20184,
+       "rss_kib": 564720
+      },
+      {
+       "command": "/Applications/Firefox.app/Contents/MacOS/plugin-container.app/Contents/MacOS/plugin-container",
+       "cpu_percent": 0.8,
+       "pid": 73534,
+       "rss_kib": 664208
+      },
+      {
+       "command": "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT",
+       "cpu_percent": 0.8,
+       "pid": 59276,
+       "rss_kib": 214576
+      }
+     ],
+     "utc": "2026-10-18T08:36:07+00:00"
+    },
+    "phase": "evaluate",
+    "seconds": 2567.896
+   },
+   {
+    "host": {
+     "label": "end",
+     "load_average": [
+      4.59,
+      2.62,
+      2.49
+     ],
+     "top_cpu": [
+      {
+       "command": "/Library/Frameworks/Python.framework/Versions/3.11/Resources/Python.app/Contents/MacOS/Python",
+       "cpu_percent": 67.6,
+       "pid": 84345,
+       "rss_kib": 1422704
+      },
+      {
+       "command": "/usr/sbin/coreaudiod",
+       "cpu_percent": 9.4,
+       "pid": 796,
+       "rss_kib": 19280
+      },
+      {
+       "command": "/Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Versions/155.0.8059.80/Helpers/Codex (Renderer).app/Contents/MacOS/Codex (Renderer)",
+       "cpu_percent": 4.5,
+       "pid": 59357,
+       "rss_kib": 588128
+      },
+      {
+       "command": "/usr/libexec/sysmond",
+       "cpu_percent": 4.0,
+       "pid": 2175,
+       "rss_kib": 4256
+      },
+      {
+       "command": "/Applications/Firefox.app/Contents/MacOS/plugin-container.app/Contents/MacOS/plugin-container",
+       "cpu_percent": 3.7,
+       "pid": 40293,
+       "rss_kib": 652032
+      },
+      {
+       "command": "/Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Versions/155.0.8059.80/Helpers/Codex (Service).app/Contents/MacOS/Codex (Service)",
+       "cpu_percent": 2.9,
+       "pid": 59299,
+       "rss_kib": 42688
+      },
+      {
+       "command": "/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mds_stores",
+       "cpu_percent": 1.3,
+       "pid": 48211,
+       "rss_kib": 18128
+      },
+      {
+       "command": "/Applications/Firefox.app/Contents/MacOS/firefox",
+       "cpu_percent": 1.1,
+       "pid": 6933,
+       "rss_kib": 476112
+      }
+     ],
+     "utc": "2026-10-18T09:18:56+00:00"
+    },
+    "phase": "end"
+   }
+  ],
+  "torch": "2.10.0",
+  "torch_threads": 10,
+  "transformers": "5.17.0.dev0",
+  "transformers_checkout": {
+   "clean": true,
+   "revision": "cfa309cfa34b5497a32fd50af49aa97aac94c054",
+   "sources_sha256": {
+    "src/transformers/models/nemotron_h/configuration_nemotron_h.py": "00a4c60bd302d796b25c6ae25c608a5ee7e27f9a0adea92911b0c45470232052",
+    "src/transformers/models/nemotron_h/modeling_nemotron_h.py": "d42067429e3268d1163579f5d257fe0baa9a2b02edba5fcb175fb8d42c9b6af4"
+   }
+  }
+ },
+ "repository": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16",
+ "revision": "a9904d24bcc1d289a1950fa9d2b978c47cf903b9",
+ "schema_version": 1
+}

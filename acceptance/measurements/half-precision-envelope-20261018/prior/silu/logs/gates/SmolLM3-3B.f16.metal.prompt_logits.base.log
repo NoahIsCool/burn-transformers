@@ -1,0 +1,43 @@
+== source base: export /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/silu/base of 7bd057ecc56d60df2776639befd30058720d3c09 (commit=7bd057ecc56d60df2776639befd30058720d3c09 files=2733 dirty=0)
+== binary /Volumes/bag of holding/cargo-targets/followups-silu/base/release/deps/llama_family_artifacts-693e11c29d0eb894 sha256 48b39504ecde9466d766834ee38675950aea7498d71fb418191ee92c2086fa89
+== metal/f16 metal::metal_prompt_logits_match_the_reference
+== env TRANSFORMERS_LLAMA_FAMILY_BF16_REFERENCE_DIR=/Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28-bf16
+== env TRANSFORMERS_LLAMA_FAMILY_DIR=/Volumes/T9/models/HuggingFaceTB/SmolLM3-3B
+== env TRANSFORMERS_LLAMA_FAMILY_DTYPE=f16
+== env TRANSFORMERS_LLAMA_FAMILY_MIN_GREEDY=0
+== env TRANSFORMERS_LLAMA_FAMILY_REFERENCE_DIR=/Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28
+== cwd /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/silu/base
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/followups-silu/base/release/deps/llama_family_artifacts-693e11c29d0eb894 --ignored --exact --nocapture --test-threads 1 metal::metal_prompt_logits_match_the_reference
+== start 2026-10-17T21:14:51+00:00 load 19.91 25.16 36.64
+
+running 1 test
+test metal::metal_prompt_logits_match_the_reference ... F16 bounds of prompt 0: max 7.537275695800781e0, mean 1.877204010803211e-1 (1.2 × official BF16 6.281063079833984e0, 1.5643366756693425e-1; /Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28-bf16)
+F16 bounds of prompt 1: max 8.005458068847656e0, mean 9.465184055010659e-2 (1.2 × official BF16 6.671215057373047e0, 7.88765337917555e-2; /Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28-bf16)
+F16 bounds of prompt 2: max 6.393724822998046e0, mean 2.1226978368011862e-1 (1.2 × official BF16 5.328104019165039e0, 1.7689148640009886e-1; /Volumes/T9/transformers-references/SmolLM3-3B-1fa6fa28-bf16)
+F32 matrix products use F32 inputs; the F16 run is judged by the official calibration, greedy steps at 7.5372753e0
+prompt 0: 5 tokens, max |Δ| = 4.0325117111206055e-1 at position 0 (bound 7.537275695800781e0), mean |Δ| = 1.577106668689626e-2 (bound 1.877204010803211e-1)
+prompt 1: 13 tokens, max |Δ| = 5.110836029052734e-1 at position 0 (bound 8.005458068847656e0), mean |Δ| = 9.725995530783656e-3 (bound 9.465184055010659e-2)
+prompt 2: 8 tokens, max |Δ| = 4.430093765258789e-1 at position 0 (bound 6.393724822998046e0), mean |Δ| = 1.5532928600614808e-2 (bound 2.1226978368011862e-1)
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 22 filtered out; finished in 3.90s
+
+        3.92 real         2.17 user         1.65 sys
+          3438493696  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              489995  page reclaims
+                  24  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   0  voluntary context switches
+               16351  involuntary context switches
+         50348774646  instructions retired
+         13729999002  cycles elapsed
+          9256684400  peak memory footprint
+== exit=0 wall=4.1s end=2026-10-17T21:14:55+00:00 load_end 18.88 min_free_pct=86 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0

@@ -1,0 +1,15 @@
+== source 1e38eecf989a1ae568b67b2e9fcdd9b2ebdbadb8 dirty=0 2026-10-18T06:55:40Z
+fmt exit=0 wall=3s 2026-10-18T06:55:43Z
+clippy-nightly exit=0 wall=37s 2026-10-18T06:56:20Z
+clippy-1.99.1 exit=0 wall=31s 2026-10-18T06:56:51Z
+clippy-1.99.1-cpu exit=0 wall=26s 2026-10-18T06:57:17Z
+test-default exit=0 wall=75s 2026-10-18T06:58:32Z
+test-features exit=0 wall=96s 2026-10-18T07:00:08Z
+test-autodiff-lib exit=0 wall=49s 2026-10-18T07:00:57Z
+msrv-1.92.0 exit=0 wall=23s 2026-10-18T07:01:20Z
+rustdoc-private exit=0 wall=9s 2026-10-18T07:01:29Z
+rustdoc-public exit=0 wall=6s 2026-10-18T07:01:35Z
+doc-audit exit=0 wall=21s 2026-10-18T07:01:56Z
+python-tests exit=0 wall=10s 2026-10-18T07:02:06Z
+release-source exit=0 wall=233s 2026-10-18T07:05:59Z
+== done 2026-10-18T07:05:59Z

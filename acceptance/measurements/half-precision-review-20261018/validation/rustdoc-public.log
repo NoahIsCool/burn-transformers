@@ -1,0 +1,6 @@
+== source 1e38eecf989a1ae568b67b2e9fcdd9b2ebdbadb8 dirty=0
+== cmd env RUSTDOCFLAGS=-D warnings cargo doc --locked --no-deps
+ Documenting transformers v0.1.0 (/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/review3/validate-git)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 5.78s
+   Generated /Volumes/bag of holding/cargo-targets/tfm-half-followups2/doc/transformers/index.html
+== exit=0

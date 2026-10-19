@@ -1,0 +1,3 @@
+== source 1816d734e9f575b36c36fe47073f420230b0764a dirty=0
+== cmd cargo fmt --check
+== exit=0

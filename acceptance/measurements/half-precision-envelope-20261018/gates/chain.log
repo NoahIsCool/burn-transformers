@@ -1,0 +1,23 @@
+2026-10-18T01:40:59Z waiting for driver B
+2026-10-18T02:52:31Z driver B done
+2026-10-18T02:52:31Z start control
+2026-10-18T03:17:25Z end status=0
+2026-10-18T03:17:25Z start memory
+2026-10-18T03:20:54Z end status=0
+2026-10-18T03:20:54Z start muse-official
+2026-10-18T03:25:34Z end status=0
+2026-10-18T03:25:34Z start probe
+2026-10-18T03:25:35Z end status=0
+2026-10-18T03:25:35Z start diag-burn
+2026-10-18T03:29:00Z end status=0
+2026-10-18T03:29:00Z start diag-torch
+2026-10-18T03:29:49Z end status=0
+2026-10-18T03:29:49Z start qwen38-quantized
+2026-10-18T03:51:18Z end status=0
+2026-10-18T03:51:18Z start silu-cost
+2026-10-18T04:31:04Z end status=0
+2026-10-18T04:31:04Z chain done
+2026-10-18T04:31:33Z start nemotron attribution
+2026-10-18T04:46:24Z end nemotron attribution status=0
+2026-10-18T04:46:32Z start diag-burn2
+2026-10-18T04:49:32Z end diag-burn2 status=0

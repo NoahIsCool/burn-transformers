@@ -1,0 +1,35 @@
+== source 603ec5c41d4fcb8b4895010157f347dda4f57e26 dirty=0
+== cmd cargo test --locked --test nemotron_h_artifacts reports_official_f16_floors_and_four_graph_envelope -- --ignored --exact --nocapture
+== env CARGO_TARGET_DIR=/Volumes/bag of holding/cargo-targets/tfm-nemotron-envelope
+== env TRANSFORMERS_NEMOTRON_H_F16_GRAPHS_DIR=/Volumes/bag of holding/models/transformers-acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24-f16-graphs
+== env TRANSFORMERS_NEMOTRON_H_PRECISION_DIR=/Volumes/bag of holding/models/transformers-acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24-precision.bundle
+== env TRANSFORMERS_NEMOTRON_H_REFERENCE_DIR=/Volumes/bag of holding/models/transformers-acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24-reference.bundle
+== start 2026-10-18T23:35:44+00:00 uptime 19:35  up 17 days,  4:56, 3 users, load averages: 5.65 9.82 10.38
+== start free /Volumes/bag of holding 169.4 GiB
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.22s
+     Running tests/nemotron_h_artifacts.rs (/Volumes/bag of holding/cargo-targets/tfm-nemotron-envelope/debug/deps/nemotron_h_artifacts-c1d2771349eaf8a5)
+
+running 1 test
+Nemotron official F16 floors (the gate's rule) [prompt, teacher, cached]: [0.999194145, 0.994466421, 0.998635047]
+Nemotron four-graph F16 envelope diagnostic (not a gate) Prompt: official cpu-eager worst delta 4.014610e-2 (cosine 0.999194145) at decision 0, leave-one-out 1.0002
+Nemotron four-graph F16 envelope diagnostic (not a gate) Prompt: official cpu-sdpa worst delta 4.000650e-2 (cosine 0.999199740) at decision 0, leave-one-out 0.9965
+Nemotron four-graph F16 envelope diagnostic (not a gate) Prompt: official mps-eager worst delta 4.013720e-2 (cosine 0.999194502) at decision 0, leave-one-out 0.9998
+Nemotron four-graph F16 envelope diagnostic (not a gate) Prompt: official mps-sdpa worst delta 3.996200e-2 (cosine 0.999201519) at decision 0, leave-one-out 0.9954
+Nemotron four-graph F16 envelope diagnostic (not a gate) Prompt: envelope 4.014610e-2 (cpu-eager); largest leave-one-out 1.0002 (cpu-eager); the registered method's slack 1.1 (cosine floor 0.999024916) is not adopted and judges no row
+Nemotron four-graph F16 envelope diagnostic (not a gate) Teacher: official cpu-eager worst delta 5.230607e-2 (cosine 0.998632038) at decision 27, leave-one-out 0.4951
+Nemotron four-graph F16 envelope diagnostic (not a gate) Teacher: official cpu-sdpa worst delta 1.056400e-1 (cosine 0.994420097) at decision 18, leave-one-out 1.0042
+Nemotron four-graph F16 envelope diagnostic (not a gate) Teacher: official mps-eager worst delta 1.052006e-1 (cosine 0.994466421) at decision 18, leave-one-out 0.9958
+Nemotron four-graph F16 envelope diagnostic (not a gate) Teacher: official mps-sdpa worst delta 1.048258e-1 (cosine 0.994505771) at decision 18, leave-one-out 0.9923
+Nemotron four-graph F16 envelope diagnostic (not a gate) Teacher: envelope 1.056400e-1 (cpu-sdpa); largest leave-one-out 1.0042 (cpu-sdpa); the registered method's slack 1.1 (cosine floor 0.993248318) is not adopted and judges no row
+Nemotron four-graph F16 envelope diagnostic (not a gate) Cached: official cpu-eager worst delta 4.249860e-2 (cosine 0.999096934) at decision 26, leave-one-out 0.8097
+Nemotron four-graph F16 envelope diagnostic (not a gate) Cached: official cpu-sdpa worst delta 4.000650e-2 (cosine 0.999199740) at decision 0, leave-one-out 0.7622
+Nemotron four-graph F16 envelope diagnostic (not a gate) Cached: official mps-eager worst delta 5.224850e-2 (cosine 0.998635047) at decision 22, leave-one-out 0.9954
+Nemotron four-graph F16 envelope diagnostic (not a gate) Cached: official mps-sdpa worst delta 5.248829e-2 (cosine 0.998622490) at decision 22, leave-one-out 1.0046
+Nemotron four-graph F16 envelope diagnostic (not a gate) Cached: envelope 5.248829e-2 (mps-sdpa); largest leave-one-out 1.0046 (mps-sdpa); the registered method's slack 1.1 (cosine floor 0.998333213) is not adopted and judges no row
+test reports_official_f16_floors_and_four_graph_envelope ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 51 filtered out; finished in 8.71s
+
+== end 2026-10-18T23:35:53+00:00 wall=9.0s
+== source after run 603ec5c41d4fcb8b4895010157f347dda4f57e26 dirty=0
+== exit=0

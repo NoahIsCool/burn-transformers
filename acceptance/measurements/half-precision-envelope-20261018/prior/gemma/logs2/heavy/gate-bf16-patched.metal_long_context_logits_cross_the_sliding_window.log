@@ -1,0 +1,354 @@
+== step gate-bf16-patched.metal_long_context_logits_cross_the_sliding_window
+== start 2026-10-17T22:43:14Z load (133.22607421875, 59.50830078125, 28.6513671875)
+== env {'TRANSFORMERS_GEMMA_DTYPE': 'bf16', 'TRANSFORMERS_GEMMA_DIR': '/Volumes/T9/models/google/gemma-3-4b-it', 'TRANSFORMERS_GEMMA_REFERENCE_DIR': '/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38', 'TRANSFORMERS_GEMMA_BF16_REFERENCE_DIR': '/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-bf16', 'TRANSFORMERS_GEMMA_LONG_REFERENCE_DIR': '/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long', 'TRANSFORMERS_GEMMA_LONG_BF16_REFERENCE_DIR': '/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long-bf16'}
+== cmd ['/Volumes/bag of holding/cargo-targets/followups-gemma-patched/release/deps/gemma_artifacts-34288ae37266667d', '--ignored', '--exact', '--nocapture', '--test-threads', '1', 'metal::metal_long_context_logits_cross_the_sliding_window']
+
+running 1 test
+test metal::metal_long_context_logits_cross_the_sliding_window ... BF16 bounds of prompt 0: max 9.686213636398316e0, mean 7.939982029344071e-2 (1.2 × official BF16 8.071844696998596e0, 6.61665169112006e-2; /Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-long-bf16)
+F32 matrix products use F32 inputs; the BF16 run is judged by the official calibration, greedy steps at 9.6862135e0
+load: 439 vision-tower tensors intentionally ignored
+
+thread 'DSD-4-0' (40077924) panicked at /Users/nover/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-29.0.4/src/backend/wgpu_core.rs:1113:30:
+wgpu error: Validation Error
+
+Caused by:
+  In Device::create_shader_module_passthrough, label = 'unary_float_f_bf16_n_1'
+    Failed to generate the backend-specific code
+
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'DSD-4-0' (40077924) panicked at /Users/nover/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-29.0.4/src/backend/wgpu_core.rs:1113:30:
+wgpu error: Validation Error
+
+Caused by:
+  In Device::create_shader_module_passthrough, label = 'unary_float_f_bf16_n_1'
+    Failed to generate the backend-specific code
+
+
+
+thread 'DSD-4-0' (40077924) panicked at /Users/nover/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-29.0.4/src/backend/wgpu_core.rs:1113:30:
+wgpu error: Validation Error
+
+Caused by:
+  In Device::create_shader_module_passthrough, label = 'unary_float_f_bf16_n_1'
+    Failed to generate the backend-specific code
+
+
+
+thread 'DSD-4-0' (40077924) panicked at /Users/nover/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-29.0.4/src/backend/wgpu_core.rs:1113:30:
+wgpu error: Validation Error
+
+Caused by:
+  In Device::create_shader_module_passthrough, label = 'unary_float_f_bf16_n_1'
+    Failed to generate the backend-specific code
+
+
+
+thread 'DSD-4-0' (40077924) panicked at /Users/nover/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-29.0.4/src/backend/wgpu_core.rs:1113:30:
+wgpu error: Validation Error
+
+Caused by:
+  In Device::create_shader_module_passthrough, label = 'unary_float_f_bf16_n_1'
+    Failed to generate the backend-specific code
+
+
+
+thread 'DSD-4-0' (40077924) panicked at /Users/nover/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-29.0.4/src/backend/wgpu_core.rs:1113:30:
+wgpu error: Validation Error
+
+Caused by:
+  In Device::create_shader_module_passthrough, label = 'unary_float_f_bf16_n_1'
+    Failed to generate the backend-specific code
+
+
+
+thread 'DSD-4-0' (40077924) panicked at /Users/nover/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-29.0.4/src/backend/wgpu_core.rs:1113:30:
+wgpu error: Validation Error
+
+Caused by:
+  In Device::create_shader_module_passthrough, label = 'unary_float_f_bf16_n_1'
+    Failed to generate the backend-specific code
+
+
+
+thread 'DSD-4-0' (40077924) panicked at /Users/nover/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-29.0.4/src/backend/wgpu_core.rs:1113:30:
+wgpu error: Validation Error
+
+Caused by:
+  In Device::create_shader_module_passthrough, label = 'unary_float_f_bf16_n_1'
+    Failed to generate the backend-specific code
+
+
+
+thread 'DSD-4-0' (40077924) panicked at /Users/nover/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-29.0.4/src/backend/wgpu_core.rs:1113:30:
+wgpu error: Validation Error
+
+Caused by:
+  In Device::create_shader_module_passthrough, label = 'unary_float_f_bf16_n_1'
+    Failed to generate the backend-specific code
+
+
+
+thread 'DSD-4-0' (40077924) panicked at /Users/nover/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-29.0.4/src/backend/wgpu_core.rs:1113:30:
+wgpu error: Validation Error
+
+Caused by:
+  In Device::create_shader_module_passthrough, label = 'unary_float_f_bf16_n_1'
+    Failed to generate the backend-specific code
+
+
+
+thread 'DSD-4-0' (40077924) panicked at /Users/nover/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-29.0.4/src/backend/wgpu_core.rs:1113:30:
+wgpu error: Validation Error
+
+Caused by:
+  In Device::create_shader_module_passthrough, label = 'unary_float_f_bf16_n_1'
+    Failed to generate the backend-specific code
+
+
+
+thread 'DSD-4-0' (40077924) panicked at /Users/nover/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-29.0.4/src/backend/wgpu_core.rs:1113:30:
+wgpu error: Validation Error
+
+Caused by:
+  In Device::create_shader_module_passthrough, label = 'unary_float_f_bf16_n_1'
+    Failed to generate the backend-specific code
+
+
+
+thread 'DSD-4-0' (40077924) panicked at /Users/nover/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-29.0.4/src/backend/wgpu_core.rs:1113:30:
+wgpu error: Validation Error
+
+Caused by:
+  In Device::create_shader_module_passthrough, label = 'unary_float_f_bf16_n_1'
+    Failed to generate the backend-specific code
+
+
+
+thread 'DSD-4-0' (40077924) panicked at /Users/nover/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-29.0.4/src/backend/wgpu_core.rs:1113:30:
+wgpu error: Validation Error
+
+Caused by:
+  In Device::create_shader_module_passthrough, label = 'unary_float_f_bf16_n_1'
+    Failed to generate the backend-specific code
+
+
+
+thread 'DSD-4-0' (40077924) panicked at /Users/nover/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-29.0.4/src/backend/wgpu_core.rs:1113:30:
+wgpu error: Validation Error
+
+Caused by:
+  In Device::create_shader_module_passthrough, label = 'unary_float_f_bf16_n_1'
+    Failed to generate the backend-specific code
+
+
+
+thread 'DSD-4-0' (40077924) panicked at /Users/nover/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-29.0.4/src/backend/wgpu_core.rs:1113:30:
+wgpu error: Validation Error
+
+Caused by:
+  In Device::create_shader_module_passthrough, label = 'unary_float_f_bf16_n_1'
+    Failed to generate the backend-specific code
+
+
+
+thread 'DSD-4-0' (40077924) panicked at /Users/nover/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-29.0.4/src/backend/wgpu_core.rs:1113:30:
+wgpu error: Validation Error
+
+Caused by:
+  In Device::create_shader_module_passthrough, label = 'unary_float_f_bf16_n_1'
+    Failed to generate the backend-specific code
+
+
+
+thread 'DSD-4-0' (40077924) panicked at /Users/nover/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-29.0.4/src/backend/wgpu_core.rs:1113:30:
+wgpu error: Validation Error
+
+Caused by:
+  In Device::create_shader_module_passthrough, label = 'unary_float_f_bf16_n_1'
+    Failed to generate the backend-specific code
+
+
+
+thread 'DSD-4-0' (40077924) panicked at /Users/nover/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-29.0.4/src/backend/wgpu_core.rs:1113:30:
+wgpu error: Validation Error
+
+Caused by:
+  In Device::create_shader_module_passthrough, label = 'unary_float_f_bf16_n_1'
+    Failed to generate the backend-specific code
+
+
+
+thread 'DSD-4-0' (40077924) panicked at /Users/nover/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-29.0.4/src/backend/wgpu_core.rs:1113:30:
+wgpu error: Validation Error
+
+Caused by:
+  In Device::create_shader_module_passthrough, label = 'unary_float_f_bf16_n_1'
+    Failed to generate the backend-specific code
+
+
+
+thread 'DSD-4-0' (40077924) panicked at /Users/nover/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-29.0.4/src/backend/wgpu_core.rs:1113:30:
+wgpu error: Validation Error
+
+Caused by:
+  In Device::create_shader_module_passthrough, label = 'unary_float_f_bf16_n_1'
+    Failed to generate the backend-specific code
+
+
+
+thread 'DSD-4-0' (40077924) panicked at /Users/nover/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-29.0.4/src/backend/wgpu_core.rs:1113:30:
+wgpu error: Validation Error
+
+Caused by:
+  In Device::create_shader_module_passthrough, label = 'unary_float_f_bf16_n_1'
+    Failed to generate the backend-specific code
+
+
+
+thread 'DSD-4-0' (40077924) panicked at /Users/nover/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-29.0.4/src/backend/wgpu_core.rs:1113:30:
+wgpu error: Validation Error
+
+Caused by:
+  In Device::create_shader_module_passthrough, label = 'unary_float_f_bf16_n_1'
+    Failed to generate the backend-specific code
+
+
+
+thread 'DSD-4-0' (40077924) panicked at /Users/nover/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-29.0.4/src/backend/wgpu_core.rs:1113:30:
+wgpu error: Validation Error
+
+Caused by:
+  In Device::create_shader_module_passthrough, label = 'unary_float_f_bf16_n_1'
+    Failed to generate the backend-specific code
+
+
+
+thread 'DSD-4-0' (40077924) panicked at /Users/nover/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-29.0.4/src/backend/wgpu_core.rs:1113:30:
+wgpu error: Validation Error
+
+Caused by:
+  In Device::create_shader_module_passthrough, label = 'unary_float_f_bf16_n_1'
+    Failed to generate the backend-specific code
+
+
+
+thread 'DSD-4-0' (40077924) panicked at /Users/nover/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-29.0.4/src/backend/wgpu_core.rs:1113:30:
+wgpu error: Validation Error
+
+Caused by:
+  In Device::create_shader_module_passthrough, label = 'unary_float_f_bf16_n_1'
+    Failed to generate the backend-specific code
+
+
+
+thread 'DSD-4-0' (40077924) panicked at /Users/nover/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-29.0.4/src/backend/wgpu_core.rs:1113:30:
+wgpu error: Validation Error
+
+Caused by:
+  In Device::create_shader_module_passthrough, label = 'unary_float_f_bf16_n_1'
+    Failed to generate the backend-specific code
+
+
+
+thread 'DSD-4-0' (40077924) panicked at /Users/nover/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-29.0.4/src/backend/wgpu_core.rs:1113:30:
+wgpu error: Validation Error
+
+Caused by:
+  In Device::create_shader_module_passthrough, label = 'unary_float_f_bf16_n_1'
+    Failed to generate the backend-specific code
+
+
+
+thread 'DSD-4-0' (40077924) panicked at /Users/nover/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-29.0.4/src/backend/wgpu_core.rs:1113:30:
+wgpu error: Validation Error
+
+Caused by:
+  In Device::create_shader_module_passthrough, label = 'unary_float_f_bf16_n_1'
+    Failed to generate the backend-specific code
+
+
+
+thread 'DSD-4-0' (40077924) panicked at /Users/nover/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-29.0.4/src/backend/wgpu_core.rs:1113:30:
+wgpu error: Validation Error
+
+Caused by:
+  In Device::create_shader_module_passthrough, label = 'unary_float_f_bf16_n_1'
+    Failed to generate the backend-specific code
+
+
+
+thread 'DSD-4-0' (40077924) panicked at /Users/nover/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-29.0.4/src/backend/wgpu_core.rs:1113:30:
+wgpu error: Validation Error
+
+Caused by:
+  In Device::create_shader_module_passthrough, label = 'unary_float_f_bf16_n_1'
+    Failed to generate the backend-specific code
+
+
+
+thread 'DSD-4-0' (40077924) panicked at /Users/nover/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-29.0.4/src/backend/wgpu_core.rs:1113:30:
+wgpu error: Validation Error
+
+Caused by:
+  In Device::create_shader_module_passthrough, label = 'unary_float_f_bf16_n_1'
+    Failed to generate the backend-specific code
+
+
+
+thread 'DSD-4-0' (40077924) panicked at /Users/nover/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-29.0.4/src/backend/wgpu_core.rs:1113:30:
+wgpu error: Validation Error
+
+Caused by:
+  In Device::create_shader_module_passthrough, label = 'unary_float_f_bf16_n_1'
+    Failed to generate the backend-specific code
+
+
+
+thread 'DSD-4-0' (40077924) panicked at /Users/nover/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wgpu-29.0.4/src/backend/wgpu_core.rs:1113:30:
+wgpu error: Validation Error
+
+Caused by:
+  In Device::create_shader_module_passthrough, label = 'unary_float_f_bf16_n_1'
+    Failed to generate the backend-specific code
+
+
+windowed: positions 0..4: max |Δ| = inf
+windowed: positions 1016..1024: max |Δ| = inf
+windowed: positions 1024..1032: max |Δ| = inf
+windowed: positions 1032..1088: max |Δ| = inf
+windowed: positions 1088..1237: max |Δ| = inf
+long prompt (1237 tokens, window 1024): max |Δ| = inf before the window, inf at or beyond it
+
+thread 'metal::metal_long_context_logits_cross_the_sliding_window' (40077923) panicked at tests/support/half_precision_calibration.rs:667:9:
+long prompt: the compared logits hold a non-finite value
+FAILED
+
+failures:
+
+failures:
+    metal::metal_long_context_logits_cross_the_sliding_window
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 26 filtered out; finished in 105.01s
+
+      105.10 real        35.43 user        11.19 sys
+          9147662336  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             1055160  page reclaims
+                  45  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   0  voluntary context switches
+              269949  involuntary context switches
+        158463723080  instructions retired
+         63993805160  cycles elapsed
+         20748572360  peak memory footprint
+
+== exit=101 wall=105.1s end 2026-10-17T22:45:00Z

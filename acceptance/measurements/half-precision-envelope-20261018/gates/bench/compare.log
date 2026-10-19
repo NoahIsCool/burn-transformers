@@ -1,0 +1,37 @@
+== baseline: qwen-controlled-current-summary.json (September 10) against qwen35-baseline-benchmark.json
+   benchmark ids: qwen35_08b_f16_baseline / qwen35_08b_f16_baseline
+   cold_first_token: 0.167520 s -> 0.432347 s (+158.1%) REGRESSION-CANDIDATE
+   strict_load: 1.412922 s -> 1.049542 s (-25.7%) ok
+   natural_greedy_total: 1.420816 s -> 1.198606 s (-15.6%) ok
+   source 32 prefill: 0.075650 s -> 0.046553 s (-38.5%) ok
+   source 32 first_token_latency: 0.084213 s -> 0.054288 s (-35.5%) ok
+   source 32 decode_model_only: 4.758460 s -> 3.432705 s (-27.9%) ok
+   source 32 decode_including_greedy_readback: 5.815231 s -> 4.429889 s (-23.8%) ok
+   source 128 prefill: 0.178113 s -> 0.060415 s (-66.1%) ok
+   source 128 first_token_latency: 0.187561 s -> 0.068137 s (-63.7%) ok
+   source 128 decode_model_only: 4.747253 s -> 3.660567 s (-22.9%) ok
+   source 128 decode_including_greedy_readback: 5.793577 s -> 4.658235 s (-19.6%) ok
+   source 512 prefill: 0.615804 s -> 0.162335 s (-73.6%) ok
+   source 512 first_token_latency: 0.623614 s -> 0.170190 s (-72.7%) ok
+   source 512 decode_model_only: 4.773886 s -> 3.628918 s (-24.0%) ok
+   source 512 decode_including_greedy_readback: 5.799063 s -> 4.622709 s (-20.3%) ok
+   cold tokens: 39ca0198c6fcae83b36801500e037213bd15de2c59b1a490dc3a35ebfa11e131 -> 39ca0198c6fcae83b36801500e037213bd15de2c59b1a490dc3a35ebfa11e131 identical
+   natural tokens: 39ca0198c6fcae83b36801500e037213bd15de2c59b1a490dc3a35ebfa11e131 -> 39ca0198c6fcae83b36801500e037213bd15de2c59b1a490dc3a35ebfa11e131 identical
+   prompt cosine: 0.9999986125515824 -> 0.9999984863984825 DIFFERENT
+   minimum cached cosine: 0.9999978151215553 -> 0.9999956215912804 DIFFERENT
+   minimum teacher cosine: 0.999997879365516 -> 0.9999978193236092 DIFFERENT
+   source 32 predictions: eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c -> eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c identical
+   source 128 predictions: eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c -> eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c identical
+   source 512 predictions: eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c -> eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c identical
+== public causal greedy: qwen-public-summary.json (September 10) against qwen35-public-causal-greedy-benchmark.json
+   benchmark ids: qwen35_08b_f16_public_causal_greedy / qwen35_08b_f16_public_causal_greedy
+   cold_first_token: 0.365949 s -> 0.410578 s (+12.2%) REGRESSION-CANDIDATE
+   strict_load: 1.407921 s -> 0.981604 s (-30.3%) ok
+   natural_greedy_total: 1.751402 s -> 1.458297 s (-16.7%) ok
+   cold tokens: 39ca0198c6fcae83b36801500e037213bd15de2c59b1a490dc3a35ebfa11e131 -> 39ca0198c6fcae83b36801500e037213bd15de2c59b1a490dc3a35ebfa11e131 identical
+   natural tokens: 39ca0198c6fcae83b36801500e037213bd15de2c59b1a490dc3a35ebfa11e131 -> 39ca0198c6fcae83b36801500e037213bd15de2c59b1a490dc3a35ebfa11e131 identical
+   prompt cosine: 0.9999986125515824 -> 0.9999984863984825 DIFFERENT
+   minimum cached cosine: 0.9999978151215553 -> 0.9999956215912804 DIFFERENT
+   minimum teacher cosine: 0.999997879365516 -> 0.9999978193236092 DIFFERENT
+   public log probabilities: 32 values, max |change| 0.00837 DIFFERENT
+== most positive warm or natural-loop median change -15.6% (cold first token and strict load are single samples)

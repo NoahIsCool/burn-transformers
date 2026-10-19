@@ -36,9 +36,14 @@ struct Model<B: Backend> {
 }
 
 /// Width of the fixture's residual stream.
-const WIDTH: usize = 64;
-/// Fixture vocabulary size.
-const VOCABULARY: usize = 512;
+///
+/// [`WIDTH`] and [`VOCABULARY`] were 64 and 512. Both grow by `3/2`, so every
+/// weight matrix holds `(3/2)^2 = 2.25` times as many samples, which keeps
+/// each absolute mean bound of [`assert_normal`] unchanged while it moves
+/// from four to [`MEAN_STANDARD_ERRORS`] standard errors.
+const WIDTH: usize = 96;
+/// Fixture vocabulary size; see [`WIDTH`].
+const VOCABULARY: usize = 768;
 
 /// Identity mapper that materializes lazy parameters, keeping identity, mapper, and trainability.
 struct Materialize;
@@ -99,7 +104,29 @@ fn moments(values: &[f64]) -> (f64, f64) {
     (mean, variance.sqrt())
 }
 
+/// Standard errors of the sample mean that [`assert_normal`] admits.
+///
+/// The mean of `n` independent `N(0, σ²)` draws is `N(0, σ²/n)`, so a bound of
+/// `z σ / sqrt(n)` rejects a correct initializer with probability
+/// `erfc(z / sqrt(2))`: `6.3e-5` at `z = 4` and `2.0e-9` at `z = 6`. The draws
+/// come from Burn Flex's process-wide generator, which parallel tests share,
+/// so on any run they are effectively random whatever a test seeds (one test
+/// does not seed at all). At `z = 4` the two statistical tests below failed
+/// 4 of 10,000 and 2 of 10,000 seeded draws, matching that rate over their six
+/// and four calls. At `z = 6`, with the fixture grown 2.25-fold (see
+/// [`WIDTH`]), each absolute bound is the same number as before, so a biased
+/// initializer is rejected at least as reliably, and a correct one fails
+/// about once in 50 million runs. Over 2,500 seeds (15,000 calls of the
+/// role test's six checks) the largest mean reached 0.65 of this bound and
+/// the largest standard-deviation error 1.7%.
+const MEAN_STANDARD_ERRORS: f64 = 6.0;
+
 /// Asserts a tensor looks like `N(0, std^2)`: standard deviation within 5%, mean near zero.
+///
+/// The standard deviation's relative standard error is about `1 / sqrt(2n)`,
+/// below `0.004` for every fixture matrix, so 5% lies more than twelve
+/// standard errors out. The mean bound is [`MEAN_STANDARD_ERRORS`] standard
+/// errors of the mean.
 fn assert_normal<const D: usize>(tensor: Tensor<B, D>, std: f64, name: &str) {
     let samples = values(tensor);
     let (mean, actual) = moments(&samples);
@@ -108,7 +135,7 @@ fn assert_normal<const D: usize>(tensor: Tensor<B, D>, std: f64, name: &str) {
         "{name}: std {actual} != {std}"
     );
     assert!(
-        mean.abs() < 4.0 * std / (samples.len() as f64).sqrt(),
+        mean.abs() < MEAN_STANDARD_ERRORS * std / (samples.len() as f64).sqrt(),
         "{name}: mean {mean}"
     );
 }

@@ -1,0 +1,51 @@
+# Official bfloat16 graph envelope
+
+## SmolLM-135M-1d461723 (calibrated)
+- prompt 0: E max 1.46372, mean 0.191528; leave-one-out max/mean: cpu-eager 1.0000/0.9935; cpu-sdpa 1.0000/1.0023; mps-eager 0.9695/0.9303; mps-sdpa 0.9695/0.9977
+- prompt 1: E max 1.10125, mean 0.0966286; leave-one-out max/mean: cpu-eager 1.0000/0.7812; cpu-sdpa 1.0000/1.0506; mps-eager 0.9810/0.8852; mps-sdpa 0.9810/0.9518
+- prompt 2: E max 1.71808, mean 0.154789; leave-one-out max/mean: cpu-eager 0.9617/0.4557; cpu-sdpa 0.9617/0.8327; mps-eager 1.0000/1.2008; mps-sdpa 1.0000/0.6846
+- decode rows: E max 0.582322, mean 0.095845; leave-one-out max/mean: cpu-eager 1.0505/0.9977; cpu-sdpa 0.9514/0.8768; mps-eager 0.9519/0.9357; mps-sdpa 0.8392/1.0023
+- prompt-decode rows: E max 1.60125, mean 0.102938; leave-one-out max/mean: cpu-eager 0.6877/0.7333; cpu-sdpa 0.6877/0.9387; mps-eager 1.0000/0.9348; mps-sdpa 1.0000/1.0653
+
+## Qwen3-4B-531c80e2 (calibrated)
+- prompt 0: E max 0.700028, mean 0.0779709; leave-one-out max/mean: cpu-eager 1.0000/1.0586; cpu-sdpa 1.0000/0.7880; mps-eager 1.0000/0.9446; mps-sdpa 1.0000/0.6262
+- prompt 1: E max 0.857345, mean 0.0631744; leave-one-out max/mean: cpu-eager 0.8178/0.6865; cpu-sdpa 0.8178/0.7279; mps-eager 1.0000/0.8929; mps-sdpa 1.0000/1.1199
+- prompt 2: E max 0.879524, mean 0.0538487; leave-one-out max/mean: cpu-eager 1.0000/1.2988; cpu-sdpa 1.0000/0.7420; mps-eager 1.0000/0.7699; mps-sdpa 1.0000/0.7411
+- decode rows: E max 0.702825, mean 0.0772793; leave-one-out max/mean: cpu-eager 1.0265/1.0256; cpu-sdpa 0.7908/0.9750; mps-eager 0.9742/0.8901; mps-sdpa 0.6966/0.8388
+- prompt-decode rows: E max 0.888595, mean 0.0560894; leave-one-out max/mean: cpu-eager 0.7890/0.7732; cpu-sdpa 0.7890/0.7962; mps-eager 1.0000/1.0775; mps-sdpa 1.0000/0.9281
+
+## SmolLM3-3B-1fa6fa28 (calibrated)
+- prompt 0: E max 6.28106, mean 0.177363; leave-one-out max/mean: cpu-eager 1.0000/0.8820; cpu-sdpa 1.0000/0.8882; mps-eager 1.0000/1.1259; mps-sdpa 1.0000/0.8699
+- prompt 1: E max 6.67122, mean 0.0971052; leave-one-out max/mean: cpu-eager 1.0000/0.8123; cpu-sdpa 1.0000/0.8340; mps-eager 1.0000/0.8914; mps-sdpa 1.0000/1.1219
+- prompt 2: E max 5.3281, mean 0.205016; leave-one-out max/mean: cpu-eager 1.0000/0.8628; cpu-sdpa 1.0000/0.8374; mps-eager 1.0000/0.7482; mps-sdpa 1.0000/1.1590
+- decode rows: E max 0.740957, mean 0.0789569; leave-one-out max/mean: cpu-eager 0.9801/0.9048; cpu-sdpa 1.0203/0.9532; mps-eager 0.9489/1.0491; mps-sdpa 0.9059/0.9158
+- prompt-decode rows: E max 6.67122, mean 0.0940431; leave-one-out max/mean: cpu-eager 1.0000/0.8387; cpu-sdpa 1.0000/0.8612; mps-eager 1.0000/1.1318; mps-sdpa 1.0000/0.8835
+
+## Qwen2-7B-453ed157-f64 (calibrated)
+- prompt 0: E max 8.52016, mean 0.42101; leave-one-out max/mean: cpu-eager 0.9963/1.1020; cpu-sdpa 0.9963/0.6625; mps-eager 1.0000/0.9075; mps-sdpa 1.0000/0.6546
+- prompt 1: E max 6.84564, mean 0.312065; leave-one-out max/mean: cpu-eager 1.0000/1.0199; cpu-sdpa 1.0000/0.4959; mps-eager 0.9817/0.9805; mps-sdpa 0.9817/0.4664
+- prompt 2: E max 10.8786, mean 0.675007; leave-one-out max/mean: cpu-eager 0.9856/1.0509; cpu-sdpa 0.9856/0.5344; mps-eager 1.0000/0.9516; mps-sdpa 1.0000/0.5523
+- decode rows: E max 2.10666, mean 0.283775; leave-one-out max/mean: cpu-eager 1.0489/1.0402; cpu-sdpa 0.1607/0.1803; mps-eager 0.9534/0.9614; mps-sdpa 0.1931/0.2218
+- prompt-decode rows: E max 6.84564, mean 0.312121; leave-one-out max/mean: cpu-eager 1.0000/1.0278; cpu-sdpa 1.0000/0.4726; mps-eager 0.9817/0.9730; mps-sdpa 0.9817/0.4784
+
+## Llama-3.1-8B-d04e592b (calibrated)
+- prompt 0: E max 0.144024, mean 0.0194625; leave-one-out max/mean: cpu-eager 0.9541/0.8822; cpu-sdpa 0.8659/0.8721; mps-eager 1.0178/1.0351; mps-sdpa 0.9825/0.9661
+- prompt 1: E max 0.212174, mean 0.0221179; leave-one-out max/mean: cpu-eager 1.2961/1.1057; cpu-sdpa 0.7177/0.9029; mps-eager 0.7715/0.9044; mps-sdpa 0.7483/0.8832
+- prompt 2: E max 0.184303, mean 0.023225; leave-one-out max/mean: cpu-eager 0.9867/1.0889; cpu-sdpa 0.9579/0.8460; mps-eager 0.9027/0.9184; mps-sdpa 1.0134/0.7950
+- decode rows: E max 0.231113, mean 0.0182324; leave-one-out max/mean: cpu-eager 0.7278/0.9535; cpu-sdpa 1.0958/0.9667; mps-eager 0.8629/0.9652; mps-sdpa 0.9125/1.0345
+- prompt-decode rows: E max 0.212174, mean 0.0221179; leave-one-out max/mean: cpu-eager 1.3045/1.0459; cpu-sdpa 0.7666/0.8984; mps-eager 0.7465/0.9561; mps-sdpa 0.7607/0.8817
+
+## gemma-3-4b-it-093f9f38 (calibrated)
+- prompt 0: E max 0.413345, mean 0.0442036; leave-one-out max/mean: cpu-eager 0.9280/0.8531; cpu-sdpa 0.8731/0.9076; mps-eager 1.0776/1.0556; mps-sdpa 0.9203/0.9474
+- prompt 1: E max 0.616711, mean 0.053166; leave-one-out max/mean: cpu-eager 0.9602/0.9817; cpu-sdpa 1.0414/0.9106; mps-eager 0.8667/1.0186; mps-sdpa 0.8901/0.9303
+- prompt 2: E max 1.28998, mean 0.0698989; leave-one-out max/mean: cpu-eager 0.5797/0.9068; cpu-sdpa 0.4491/0.7930; mps-eager 0.7039/1.0416; mps-sdpa 1.4206/0.9601
+- decode rows: E max 1.5193, mean 0.059998; leave-one-out max/mean: cpu-eager 1.1891/1.0593; cpu-sdpa 0.6683/0.9062; mps-eager 0.8410/0.9440; mps-sdpa 0.6718/0.9355
+- prompt-decode rows: E max 0.616711, mean 0.054467; leave-one-out max/mean: cpu-eager 0.9602/0.9583; cpu-sdpa 1.0019/0.8889; mps-eager 0.9981/1.0435; mps-sdpa 0.8455/0.8931
+
+## gemma-3-4b-it-093f9f38-long (calibrated)
+- prompt 0: E max 10.1837, mean 0.0661665; leave-one-out max/mean: cpu-eager 0.7926/1.0177; cpu-sdpa 0.5841/0.8573; mps-eager 0.7839/0.9826; mps-sdpa 1.2616/0.8303
+- decode rows: E max 0.573631, mean 0.04649; leave-one-out max/mean: cpu-eager 0.7877/0.8976; cpu-sdpa 0.6419/0.8151; mps-eager 1.2694/1.1141; mps-sdpa 0.7617/0.8597
+
+max slack 1.5 from 1.4206 (gemma-3-4b-it-093f9f38 prompt 2, mps-sdpa); by kind: prompt 1.4206, decode 1.2694, prompt_decode 1.3045; 128 ratios pooled
+
+mean slack 1.3 from 1.2988 (Qwen3-4B-531c80e2 prompt 2, cpu-eager); by kind: prompt 1.2988, decode 1.1141, prompt_decode 1.1318; 128 ratios pooled

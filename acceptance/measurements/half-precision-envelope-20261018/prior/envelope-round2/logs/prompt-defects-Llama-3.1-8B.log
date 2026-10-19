@@ -1,0 +1,37 @@
+== source 7bd057ecc56d60df2776639befd30058720d3c09
+== script sha256 963497c156f58e7dd70e61840ae206e8ace994033e20ffa0eb060d3a14fcc376
+== start 2026-10-17T22:39:01Z
+none                 prompt 0: max 0.137412 at 4 mean 0.0171696
+none                 prompt 1: max 0.212174 at 5 mean 0.0221179
+none                 prompt 2: max 0.181859 at 7 mean 0.023225
+silu-twice-rounded   prompt 0: max 0.128742 at 4 mean 0.017771
+silu-twice-rounded   prompt 1: max 0.204257 at 2 mean 0.0234131
+silu-twice-rounded   prompt 2: max 0.154731 at 2 mean 0.0213316
+rmsnorm-bf16         prompt 0: max 0.170013 at 0 mean 0.020504
+rmsnorm-bf16         prompt 1: max 0.210732 at 10 mean 0.0260852
+rmsnorm-bf16         prompt 2: max 0.173305 at 3 mean 0.0263219
+softmax-bf16         prompt 0: max 0.131158 at 4 mean 0.0163794
+softmax-bf16         prompt 1: max 0.198884 at 8 mean 0.0210819
+softmax-bf16         prompt 2: max 0.200953 at 7 mean 0.0227842
+rope-angles-bf16     prompt 0: max 0.163843 at 4 mean 0.0201929
+rope-angles-bf16     prompt 1: max 0.209762 at 12 mean 0.0235235
+rope-angles-bf16     prompt 2: max 0.163448 at 5 mean 0.0206186
+       12.01 real        65.55 user         4.95 sys
+         15503966208  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              956900  page reclaims
+                  16  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   3  voluntary context switches
+              424857  involuntary context switches
+       1110215009438  instructions retired
+        243920505835  cycles elapsed
+           348024736  peak memory footprint
+== exit=0 end 2026-10-17T22:39:13Z

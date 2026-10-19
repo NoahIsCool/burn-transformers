@@ -1,0 +1,138 @@
+2026-10-18T23:54:34+00:00 start logs/r01.p1.head.baseline.log attempt 1
+2026-10-19T00:04:36+00:00 done logs/r01.p1.head.baseline.log attempt 1
+2026-10-19T00:04:36+00:00 start logs/r01.p2.september.baseline.log attempt 1
+2026-10-19T00:11:03+00:00 contaminated logs/r01.p2.september.baseline.log attempt 1
+2026-10-19T00:11:03+00:00 start logs/r01.p2.september.baseline.log attempt 2
+2026-10-19T00:20:07+00:00 done logs/r01.p2.september.baseline.log attempt 2
+2026-10-19T00:20:07+00:00 start logs/r01.p3.head.public.log attempt 1
+2026-10-19T00:22:38+00:00 done logs/r01.p3.head.public.log attempt 1
+2026-10-19T00:22:38+00:00 start logs/r01.p4.september.public.log attempt 1
+2026-10-19T00:25:10+00:00 done logs/r01.p4.september.public.log attempt 1
+2026-10-19T00:25:10+00:00 start logs/r02.p1.september.public.log attempt 1
+2026-10-19T00:27:43+00:00 done logs/r02.p1.september.public.log attempt 1
+2026-10-19T00:27:43+00:00 start logs/r02.p2.head.public.log attempt 1
+2026-10-19T00:30:59+00:00 done logs/r02.p2.head.public.log attempt 1
+2026-10-19T00:30:59+00:00 start logs/r02.p3.september.baseline.log attempt 1
+2026-10-19T00:37:35+00:00 done logs/r02.p3.september.baseline.log attempt 1
+2026-10-19T00:37:35+00:00 start logs/r02.p4.head.baseline.log attempt 1
+2026-10-19T00:43:06+00:00 contaminated logs/r02.p4.head.baseline.log attempt 1
+2026-10-19T00:43:06+00:00 start logs/r02.p4.head.baseline.log attempt 2
+2026-10-19T00:48:34+00:00 done logs/r02.p4.head.baseline.log attempt 2
+2026-10-19T00:48:34+00:00 start logs/r03.p1.head.public.log attempt 1
+2026-10-19T01:12:51+00:00 done logs/r03.p1.head.public.log attempt 1
+2026-10-19T01:12:51+00:00 start logs/r03.p2.september.public.log attempt 1
+2026-10-19T01:15:22+00:00 done logs/r03.p2.september.public.log attempt 1
+2026-10-19T01:15:22+00:00 start logs/r03.p3.head.baseline.log attempt 1
+2026-10-19T01:20:49+00:00 done logs/r03.p3.head.baseline.log attempt 1
+2026-10-19T01:20:49+00:00 start logs/r03.p4.september.baseline.log attempt 1
+2026-10-19T01:26:43+00:00 done logs/r03.p4.september.baseline.log attempt 1
+2026-10-19T01:26:43+00:00 start logs/r04.p1.september.baseline.log attempt 1
+2026-10-19T01:32:53+00:00 done logs/r04.p1.september.baseline.log attempt 1
+2026-10-19T01:32:53+00:00 start logs/r04.p2.head.baseline.log attempt 1
+2026-10-19T01:38:20+00:00 done logs/r04.p2.head.baseline.log attempt 1
+2026-10-19T01:38:20+00:00 start logs/r04.p3.september.public.log attempt 1
+2026-10-19T01:42:10+00:00 done logs/r04.p3.september.public.log attempt 1
+2026-10-19T01:42:10+00:00 start logs/r04.p4.head.public.log attempt 1
+2026-10-19T01:44:43+00:00 done logs/r04.p4.head.public.log attempt 1
+2026-10-19T01:44:43+00:00 start logs/r05.p1.head.baseline.log attempt 1
+2026-10-19T01:50:21+00:00 done logs/r05.p1.head.baseline.log attempt 1
+2026-10-19T01:50:21+00:00 start logs/r05.p2.september.public.log attempt 1
+2026-10-19T01:52:52+00:00 done logs/r05.p2.september.public.log attempt 1
+2026-10-19T01:52:52+00:00 start logs/r05.p3.head.public.log attempt 1
+2026-10-19T01:55:21+00:00 done logs/r05.p3.head.public.log attempt 1
+2026-10-19T01:55:21+00:00 start logs/r05.p4.september.baseline.log attempt 1
+2026-10-19T02:01:15+00:00 done logs/r05.p4.september.baseline.log attempt 1
+2026-10-19T02:01:15+00:00 start logs/r06.p1.september.public.log attempt 1
+2026-10-19T02:03:46+00:00 done logs/r06.p1.september.public.log attempt 1
+2026-10-19T02:03:46+00:00 start logs/r06.p2.head.baseline.log attempt 1
+2026-10-19T02:09:13+00:00 done logs/r06.p2.head.baseline.log attempt 1
+2026-10-19T02:09:13+00:00 start logs/r06.p3.september.baseline.log attempt 1
+2026-10-19T02:15:07+00:00 done logs/r06.p3.september.baseline.log attempt 1
+2026-10-19T02:15:07+00:00 start logs/r06.p4.head.public.log attempt 1
+2026-10-19T02:17:36+00:00 done logs/r06.p4.head.public.log attempt 1
+2026-10-19T02:17:36+00:00 start logs/r07.p1.head.public.log attempt 1
+2026-10-19T02:20:05+00:00 done logs/r07.p1.head.public.log attempt 1
+2026-10-19T02:20:05+00:00 start logs/r07.p2.september.baseline.log attempt 1
+2026-10-19T02:26:00+00:00 done logs/r07.p2.september.baseline.log attempt 1
+2026-10-19T02:26:00+00:00 start logs/r07.p3.head.baseline.log attempt 1
+2026-10-19T02:31:28+00:00 done logs/r07.p3.head.baseline.log attempt 1
+2026-10-19T02:31:28+00:00 start logs/r07.p4.september.public.log attempt 1
+2026-10-19T02:33:59+00:00 done logs/r07.p4.september.public.log attempt 1
+2026-10-19T02:33:59+00:00 start logs/r08.p1.september.baseline.log attempt 1
+2026-10-19T02:39:53+00:00 done logs/r08.p1.september.baseline.log attempt 1
+2026-10-19T02:39:53+00:00 start logs/r08.p2.head.public.log attempt 1
+2026-10-19T02:42:22+00:00 done logs/r08.p2.head.public.log attempt 1
+2026-10-19T02:42:22+00:00 start logs/r08.p3.september.public.log attempt 1
+2026-10-19T02:44:53+00:00 done logs/r08.p3.september.public.log attempt 1
+2026-10-19T02:44:53+00:00 start logs/r08.p4.head.baseline.log attempt 1
+2026-10-19T02:50:19+00:00 done logs/r08.p4.head.baseline.log attempt 1
+skip (done) logs/r01.p1.head.baseline.log
+skip (done) logs/r01.p2.september.baseline.log
+skip (done) logs/r01.p3.head.public.log
+skip (done) logs/r01.p4.september.public.log
+skip (done) logs/r02.p1.september.public.log
+skip (done) logs/r02.p2.head.public.log
+skip (done) logs/r02.p3.september.baseline.log
+skip (done) logs/r02.p4.head.baseline.log
+skip (done) logs/r03.p1.head.public.log
+skip (done) logs/r03.p2.september.public.log
+skip (done) logs/r03.p3.head.baseline.log
+skip (done) logs/r03.p4.september.baseline.log
+skip (done) logs/r04.p1.september.baseline.log
+skip (done) logs/r04.p2.head.baseline.log
+skip (done) logs/r04.p3.september.public.log
+skip (done) logs/r04.p4.head.public.log
+skip (done) logs/r05.p1.head.baseline.log
+skip (done) logs/r05.p2.september.public.log
+skip (done) logs/r05.p3.head.public.log
+skip (done) logs/r05.p4.september.baseline.log
+skip (done) logs/r06.p1.september.public.log
+skip (done) logs/r06.p2.head.baseline.log
+skip (done) logs/r06.p3.september.baseline.log
+skip (done) logs/r06.p4.head.public.log
+skip (done) logs/r07.p1.head.public.log
+skip (done) logs/r07.p2.september.baseline.log
+skip (done) logs/r07.p3.head.baseline.log
+skip (done) logs/r07.p4.september.public.log
+skip (done) logs/r08.p1.september.baseline.log
+skip (done) logs/r08.p2.head.public.log
+skip (done) logs/r08.p3.september.public.log
+skip (done) logs/r08.p4.head.baseline.log
+2026-10-19T02:51:36+00:00 start logs/r09.p1.head.baseline.log attempt 1
+2026-10-19T02:57:10+00:00 contaminated logs/r09.p1.head.baseline.log attempt 1
+2026-10-19T02:57:10+00:00 start logs/r09.p1.head.baseline.log attempt 2
+2026-10-19T03:03:24+00:00 done logs/r09.p1.head.baseline.log attempt 2
+2026-10-19T03:03:24+00:00 start logs/r09.p2.september.baseline.log attempt 1
+2026-10-19T03:09:18+00:00 done logs/r09.p2.september.baseline.log attempt 1
+2026-10-19T03:09:18+00:00 start logs/r09.p3.head.public.log attempt 1
+2026-10-19T03:11:46+00:00 done logs/r09.p3.head.public.log attempt 1
+2026-10-19T03:11:46+00:00 start logs/r09.p4.september.public.log attempt 1
+2026-10-19T03:14:18+00:00 done logs/r09.p4.september.public.log attempt 1
+2026-10-19T03:14:18+00:00 start logs/r10.p1.september.public.log attempt 1
+2026-10-19T03:16:49+00:00 done logs/r10.p1.september.public.log attempt 1
+2026-10-19T03:16:49+00:00 start logs/r10.p2.head.public.log attempt 1
+2026-10-19T03:19:20+00:00 done logs/r10.p2.head.public.log attempt 1
+2026-10-19T03:19:20+00:00 start logs/r10.p3.september.baseline.log attempt 1
+2026-10-19T03:34:00+00:00 done logs/r10.p3.september.baseline.log attempt 1
+2026-10-19T03:34:00+00:00 start logs/r10.p4.head.baseline.log attempt 1
+2026-10-19T03:39:26+00:00 contaminated logs/r10.p4.head.baseline.log attempt 1
+2026-10-19T03:39:26+00:00 start logs/r10.p4.head.baseline.log attempt 2
+2026-10-19T03:44:53+00:00 contaminated logs/r10.p4.head.baseline.log attempt 2
+2026-10-19T03:44:53+00:00 start logs/r10.p4.head.baseline.log attempt 3
+2026-10-19T03:50:19+00:00 done logs/r10.p4.head.baseline.log attempt 3
+2026-10-19T03:50:19+00:00 start logs/r11.p1.head.public.log attempt 1
+2026-10-19T03:52:48+00:00 done logs/r11.p1.head.public.log attempt 1
+2026-10-19T03:52:48+00:00 start logs/r11.p2.september.public.log attempt 1
+2026-10-19T03:55:19+00:00 done logs/r11.p2.september.public.log attempt 1
+2026-10-19T03:55:19+00:00 start logs/r11.p3.head.baseline.log attempt 1
+2026-10-19T04:00:46+00:00 done logs/r11.p3.head.baseline.log attempt 1
+2026-10-19T04:00:46+00:00 start logs/r11.p4.september.baseline.log attempt 1
+2026-10-19T04:06:40+00:00 done logs/r11.p4.september.baseline.log attempt 1
+2026-10-19T04:06:40+00:00 start logs/r12.p1.september.baseline.log attempt 1
+2026-10-19T04:12:34+00:00 done logs/r12.p1.september.baseline.log attempt 1
+2026-10-19T04:12:34+00:00 start logs/r12.p2.head.baseline.log attempt 1
+2026-10-19T04:18:01+00:00 done logs/r12.p2.head.baseline.log attempt 1
+2026-10-19T04:18:01+00:00 start logs/r12.p3.september.public.log attempt 1
+2026-10-19T04:20:32+00:00 done logs/r12.p3.september.public.log attempt 1
+2026-10-19T04:20:32+00:00 start logs/r12.p4.head.public.log attempt 1
+2026-10-19T04:23:00+00:00 done logs/r12.p4.head.public.log attempt 1

@@ -1,0 +1,19 @@
+[
+ {
+  "log": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/probe-evidence/probe_metal_overflow.log",
+  "cmd": [
+   "/Volumes/bag of holding/cargo-targets/tfm-half-followups2-probe/release/deps/probe_metal_overflow-94fb383c477b470e",
+   "--exact",
+   "--nocapture",
+   "--test-threads",
+   "1",
+   "metal_f16_overflow_semantics"
+  ],
+  "cwd": "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/probe",
+  "header": [
+   "probe tests/probe_metal_overflow.rs sha256 59232b7595baeeff393a45e4c8dc133d123e76a1e9d5c5d061f0d164f918c44d (calls Burn 0.21.0 only, in the scratch probe tree)",
+   "binary /Volumes/bag of holding/cargo-targets/tfm-half-followups2-probe/release/deps/probe_metal_overflow-94fb383c477b470e sha256 afeef62674fd31a5ca3836ce12c0de70e0440a9947d5ff2fd11bc231f581f156",
+   "Metal F16 overflow semantics above 65,504: cast, add, multiply, square, matmul, sum, mean"
+  ]
+ }
+]

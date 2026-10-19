@@ -77,12 +77,41 @@
 use serde::{Deserialize, Serialize};
 
 use super::architecture::GemmaArchitecture;
-use crate::models::config::{
-    ConfigError, ModelConfig, RopeParameterSet, RopeParameters, TokenIds, Validate, token_ids,
+use crate::{
+    checkpoint::{RangeHazard, TensorDType},
+    models::config::{
+        ConfigError, ModelConfig, RopeParameterSet, RopeParameters, TokenIds, Validate, token_ids,
+    },
 };
 
 /// Family name used for configuration errors that precede `model_type` resolution.
 pub(super) const FAMILY: &str = "gemma";
+
+/// Gemma 3's declared F16 overflow, the hazard of [`GemmaVariant::Gemma3Text`].
+///
+/// One channel of the residual stream grows past F16's largest finite value
+/// in the reference implementation itself. In gemma-3-4b-it that is channel
+/// 443, whose post-sublayer norm gains `|1 + w|` reach 1,369 (block 33's
+/// post-feed-forward norm), meeting the BOS position's massive activation.
+/// Every branch tensor fits F16; the sum does not. The overflow is therefore
+/// a property of the published weights, and no faithful F16 evaluation is
+/// finite. The declaration is family-wide (a default policy):
+/// it also covers sizes and fine-tunes nobody measured, and the evidence says
+/// which were measured.
+const GEMMA3_F16_OVERFLOW: RangeHazard = RangeHazard::new(
+    "Gemma 3 (model_type gemma3 or gemma3_text)",
+    TensorDType::F16,
+    "measured on google/gemma-3-4b-it (revision 093f9f38): the residual addition after block \
+     5's MLP reaches 73,509.6 at the BOS position, channel 443 (51,941.5 + 21,568.1 in F32), \
+     beyond F16's largest finite value 65,504, and Transformers 5.2.0's CPU and MPS F16 graphs \
+     and this crate's Metal and Flex F16 graphs all overflow there and return non-finite \
+     logits; gemma-3-12b-it and gemma-3-27b-it first exceed 65,504 at the BOS position of \
+     blocks 6 and 8 (83,968 and 83,456 in Transformers' CPU BF16 graphs), and their \
+     Transformers CPU F16 graphs are non-finite from there. Unmeasured: other sizes (such as \
+     1B and 270M) and fine-tunes, which this family-wide default refuses too. Records: \
+     acceptance/measurements/half-precision-envelope-20261018.json and decision (d) of \
+     acceptance/measurements/half-precision-followups-20261017.json",
+);
 
 /// The Hugging Face text `model_type` values this family executes.
 ///
@@ -122,6 +151,29 @@ impl GemmaVariant {
         Self::ALL
             .into_iter()
             .find(|variant| variant.model_type() == model_type)
+    }
+
+    /// Returns the numeric-range hazards declared for this variant's checkpoints.
+    ///
+    /// Gemma 3 (`gemma3_text`, which a multimodal `gemma3` checkpoint's
+    /// `text_config` also names) declares F16: its published checkpoints
+    /// overflow F16 in Transformers too (see the evidence the declaration
+    /// carries). Gemma 2 declares none, because no Gemma 2 checkpoint has
+    /// been measured in F16; that is an absence of evidence, not a
+    /// measurement. The checkpoint contract's mapping plan carries these
+    /// declarations, so the shared planner
+    /// ([`crate::checkpoint::build_load_plan`]) refuses a matching plan unless
+    /// [`LoadOptions::range_hazards`](crate::checkpoint::LoadOptions::range_hazards)
+    /// accepts it ([`crate::checkpoint::check_range_hazards`]). The
+    /// declaration certifies no packed path, because the automatic loader
+    /// does not accept a packed sidecar for Gemma, so the refusal does not
+    /// offer packed weights.
+    #[must_use]
+    pub const fn range_hazards(self) -> &'static [RangeHazard] {
+        match self {
+            Self::Gemma2 => &[],
+            Self::Gemma3Text => &[GEMMA3_F16_OVERFLOW],
+        }
     }
 
     /// Returns the pinned reference defaults for absent fields.

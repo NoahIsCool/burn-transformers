@@ -1,0 +1,28 @@
+== source base: export /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/silu/base of 7bd057ecc56d60df2776639befd30058720d3c09 (now commit=7bd057ecc56d60df2776639befd30058720d3c09 files=2733 dirty=0)
+== binary /Volumes/bag of holding/cargo-targets/followups-silu/tools-base/release/silu-bench sha256 0649431d691b49b63d421bc4a2c74a823e65afd7c81e0a2d25870f4929b6b44c
+== round 3
+== cwd /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/silu/base
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/followups-silu/tools-base/release/silu-bench act metal f16 14336 1,128,512 200
+== start 2026-10-17T22:22:54+00:00 load 3.53 4.25 6.96
+{"kind":"act","backend":"cubecl<wgpu<msl>>","dtype":"F16","tokens":1,"intermediate":14336,"reps":200,"median_us":1531.625,"min_us":1338.083,"max_us":1670.625}
+{"kind":"act","backend":"cubecl<wgpu<msl>>","dtype":"F16","tokens":128,"intermediate":14336,"reps":200,"median_us":1541.750,"min_us":1316.125,"max_us":1721.000}
+{"kind":"act","backend":"cubecl<wgpu<msl>>","dtype":"F16","tokens":512,"intermediate":14336,"reps":200,"median_us":2668.500,"min_us":2358.917,"max_us":2922.458}
+        1.23 real         0.14 user         0.14 sys
+           172933120  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+               11955  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   0  voluntary context switches
+               12213  involuntary context switches
+          1469474227  instructions retired
+           910963646  cycles elapsed
+           664224584  peak memory footprint
+== exit=0 wall=2.0s end=2026-10-17T22:22:56+00:00 load_end 3.53 min_free_pct=88 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0

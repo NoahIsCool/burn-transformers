@@ -1,0 +1,50 @@
+== source 818160545802c1374f7607d26ce20cc86d2d758d dirty=0
+== checkout /Users/nover/repos/transformers-worktrees/tfm-half-followups2 (branch claude/tfm-half-followups2)
+== binary /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/llama_family_artifacts-693e11c29d0eb894 sha256 72a204e1c37262448b47e772e980a72cba33fc8ae1618af1385ad521009db738
+== flex/BF16 flex_batched_prefill_matches_the_reference
+== env TRANSFORMERS_LLAMA_FAMILY_DECODE_TRUTH_DIR=/Volumes/T9/transformers-references/Qwen2-7B-453ed157-f64-cpu-eager
+== env TRANSFORMERS_LLAMA_FAMILY_DIR=/Volumes/T9/models/Qwen/Qwen2-7B
+== env TRANSFORMERS_LLAMA_FAMILY_DTYPE=bf16
+== env TRANSFORMERS_LLAMA_FAMILY_OFFICIAL_DIRS=/Volumes/T9/transformers-references/Qwen2-7B-453ed157-f64-bf16-cpu-eager-7a50e44:/Volumes/T9/transformers-references/Qwen2-7B-453ed157-f64-bf16-cpu-sdpa-7a50e44:/Volumes/T9/transformers-references/Qwen2-7B-453ed157-f64-bf16-mps-eager-7a50e44:/Volumes/T9/transformers-references/Qwen2-7B-453ed157-f64-bf16-mps-sdpa-7a50e44
+== env TRANSFORMERS_LLAMA_FAMILY_REFERENCE_DIR=/Volumes/T9/transformers-references/Qwen2-7B-453ed157-f64
+== cwd /Users/nover/repos/transformers-worktrees/tfm-half-followups2
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/llama_family_artifacts-693e11c29d0eb894 --ignored --exact --nocapture --test-threads 1 flex_batched_prefill_matches_the_reference
+== start 2026-10-18T05:17:42+00:00 load 2.49 2.95 2.97 free 90%
+
+running 1 test
+test flex_batched_prefill_matches_the_reference ... BF16 bounds of prompt 0: max 1.2780247271060944e1, mean 5.473126552042529e-1 (1.5 and 1.3 times the official envelope 8.520164847373962e0, 4.210097347725022e-1)
+BF16 bounds of prompt 1: max 1.0268454909324646e1, mean 4.056851430412151e-1 (1.5 and 1.3 times the official envelope 6.845636606216431e0, 3.1206549464708855e-1)
+BF16 bounds of prompt 2: max 1.631784224510193e1, mean 8.775089451077622e-1 (1.5 and 1.3 times the official envelope 1.087856149673462e1, 6.750068808521248e-1)
+BF16 bounds of decode rows: max 3.1599912643432617e0, mean 3.6890774234442947e-1 (1.5 and 1.3 times the official envelope 2.106660842895508e0, 2.837751864187919e-1)
+BF16 bounds of prompt 1 decoded rows: max 1.0268454909324646e1, mean 4.0575731669712156e-1 (1.5 and 1.3 times the official envelope 6.845636606216431e0, 3.1212101284393967e-1)
+F32 matrix products use F32 inputs; the BF16 run is judged by the official envelope, greedy steps at 1.2780247e1
+batched row 0: max |Δ| = 6.25e-2 to the stateless pass (provisional tolerance 5e-1)
+batched row 0: max |Δ| = 1.3512945175170898e-1 to the reference (bound 1.2780247271060944e1)
+batched row 1: max |Δ| = 1.5625e-2 to the stateless pass (provisional tolerance 5e-1)
+batched row 1: max |Δ| = 1.3350892066955566e-1 to the reference (bound 1.0268454909324646e1)
+batched row 2: max |Δ| = 3.125e-2 to the stateless pass (provisional tolerance 5e-1)
+batched row 2: max |Δ| = 1.4154911041259766e-1 to the reference (bound 1.631784224510193e1)
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 33 filtered out; finished in 10.18s
+
+       10.21 real        37.71 user         7.72 sys
+         19304005632  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             1184012  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   0  voluntary context switches
+              238930  involuntary context switches
+        273515204132  instructions retired
+        153313197733  cycles elapsed
+         19303463288  peak memory footprint
+== exit=0 wall=11.2s min_free_pct=90 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+== source after run 818160545802c1374f7607d26ce20cc86d2d758d dirty=0

@@ -1,10 +1,18 @@
 # Support policy
 
-This document defines what a support claim means for the `transformers` crate.
-It does not broaden the [model status page](ARCHITECTURE_COMPATIBILITY.md) or
-any committed acceptance record.
+This document defines what a support claim means for the `transformers`
+library, whose Cargo package is `burn-transformers`. It does not broaden the
+[model status page](ARCHITECTURE_COMPATIBILITY.md) or any committed
+acceptance record.
 
 ## Version compatibility
+
+The package is named `burn-transformers` because the crates.io name
+`transformers` belongs to another publisher; the library keeps the name
+`transformers`, so imports do not depend on the package name. This project
+has published nothing to crates.io under either name. Version 0.1.0 was a
+source release of the package `transformers`; a dependency on it changes its
+key when upgrading ([MIGRATION.md](MIGRATION.md#dependency)).
 
 Version 0.1 requires Rust 1.92 or newer and pins Burn 0.21. Before 1.0, a minor
 crate release may contain source-breaking API changes. Patch releases preserve
@@ -112,6 +120,29 @@ they are experimentally validated, not supported. That includes the
 half-precision runs of the Llama-family and Gemma gates. No real-checkpoint
 gate has been recorded on CUDA, so no checkpoint is validated there.
 
+Gemma 3 is not supported in F16, and the crate says so instead of returning
+NaN. The measured Gemma 3 checkpoints (gemma-3-4b-it, 12b-it, and 27b-it)
+overflow F16 in Transformers as well: in gemma-3-4b-it the residual addition
+after block 5's MLP reaches `73,509.6`, beyond F16's `65,504`, and the logits
+are non-finite. Gemma 3 therefore declares F16 a numeric-range hazard, and
+loading a `gemma3` or `gemma3_text` checkpoint whose parameters (and so
+activations) would be F16, cast or stored, fails before any weight is read
+with `CheckpointError::RangeHazard` (through `AutoCausalLm::load_local`,
+`Error::CheckpointPlan`). The refusal is family-wide: it also covers the
+unmeasured sizes (such as 1B and 270M) and fine-tunes. Load these checkpoints
+in F32, or in BF16 on a backend that can store it (Burn 0.21's Metal backend
+cannot). Packed Q4/Q8 weights with F32 activations would keep the residual
+stream in F32 as well (llama.cpp reportedly does so for 4-bit GGUF files;
+neither llama.cpp nor GGUF has been measured here), but this crate's
+automatic packed path is not certified for Gemma: the refusal says so
+instead of offering it, and `AutoCausalLm::load_local` rejects a quantized
+Burnpack sidecar for Gemma with `Error::BackendCapability`. Setting
+`LoadOptions::range_hazards` to `RangeHazardPolicy::Accept` is the explicit
+opt-in for experiments that need the faithful F16 graph (studying the
+overflow, truncated stacks, interventions); its logits are expected to be
+non-finite, and generation from them has no defined result. Gemma 2 declares
+no hazard: no Gemma 2 checkpoint has been measured in F16.
+
 Version 0.1 promotes exactly three profiles on the validated Apple M3 Max host:
 
 - Qwen3.5-0.8B, revision `2fc06364715b967f1860aea9cf38778875588b17`,
@@ -126,6 +157,42 @@ must not be inferred from a family-wide implementation. Qwen's historical
 approximately 25% throughput slowdown is accepted as an unresolved limitation;
 the user approved the controlled September 10 baseline for future comparisons,
 not a claim that the historical regression was explained or repaired.
+
+### Performance gate of the Qwen3.5-0.8B profile
+
+On October 18 the maintainer re-baselined the Qwen3.5-0.8B benchmarks on the
+validated host as it is now (Mac15,11, macOS 27.0.1 build 26A434) and made
+cold first token a diagnostic rather than a pass/fail gate. The profile's
+performance reference is the `reference` block (label `head`) of the
+[re-baseline record](acceptance/measurements/qwen3.5-0.8b-metal-rebaseline-20261018.json),
+measured at `fa8426e` with rustc 1.92.0 and the profile's features under the
+[campaign protocol](BENCHMARKS.md#qwen35-08b-benchmark-campaign-protocol).
+A later source is judged by a campaign of that protocol:
+
+- gated, at the existing thresholds: the warm prefill, first-token, model-only
+  decode, and readback-inclusive decode medians at 32, 128, and 512 source
+  tokens; the 32-token natural model-API and public-coordinator loops; and
+  strict load. A median that changes by more than 5% alerts; one more than 10%
+  slower fails only when a controlled rerun, alternating the candidate with
+  the reference binary, confirms it against both the recorded value and the
+  reference binary's own median. The reference binary is the executable the
+  reference block identifies by its SHA-256, or a build of `fa8426e` from a
+  clean tree with the same rustc, rustup toolchain, features, and profile,
+  and it must reproduce the reference's tokens; the protocol refuses any
+  other binary in that role;
+- reported, never gated: cold first token, as a median and range. It is one
+  observation per process and includes lazy kernel and Metal pipeline
+  compilation, whose cost also depends on the operating system's shader
+  cache;
+- not comparable: a run on another host model or OS build, built with another
+  compiler (rustc or rustup toolchain), with other features, or with other
+  tokens. When the reference binary is itself more
+  than 10% slower than its recorded value, the series has changed, and a new
+  reference is again a maintainer decision.
+
+The re-baseline changes no support claim. It supersedes the September 10
+baseline for future comparisons only; the release record, the September
+summaries, and the historical slowdown stay as recorded.
 
 ## Artifact and provenance boundary
 

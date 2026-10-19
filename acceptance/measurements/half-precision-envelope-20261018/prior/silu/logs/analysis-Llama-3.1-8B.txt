@@ -1,0 +1,113 @@
+### Llama-3.1-8B: truth Llama-3.1-8B-d04e592b (float32), official BF16 Llama-3.1-8B-d04e592b-bf16
+== prompt 0 (6 tokens): bounds max 0.164894 mean 0.020604 (official BF16 max 0.137412 mean 0.017170)
+  flex-bf16-base         max 0.128534 @pos 3 (0.779 of bound) mean 0.017537 (0.851 of bound) [ok, ok] hooked==plain True
+                         distance official-bf16 max 0.187500 mean 0.020531; official-bf16-cpu-sdpa max 0.156250 mean 0.020873; official-bf16-mps-eager max 0.156250 mean 0.021589; official-bf16-mps-sdpa max 0.187500 mean 0.024413; torch-cpu-float16-eager max 0.201614 mean 0.018744; torch-mps-float16-eager max 0.192520 mean 0.019069
+  flex-bf16-patched      max 0.153820 @pos 4 (0.933 of bound) mean 0.017984 (0.873 of bound) [ok, ok] hooked==plain True
+                         distance official-bf16 max 0.187500 mean 0.019665; official-bf16-cpu-sdpa max 0.156250 mean 0.018359; official-bf16-mps-eager max 0.159180 mean 0.016764; official-bf16-mps-sdpa max 0.203125 mean 0.022580; torch-cpu-float16-eager max 0.177734 mean 0.019145; torch-mps-float16-eager max 0.173828 mean 0.019359
+  metal-f16-base         max 0.103754 @pos 0 (0.629 of bound) mean 0.004241 (0.206 of bound) [ok, ok] hooked==plain True
+                         distance official-bf16 max 0.173828 mean 0.018170; official-bf16-cpu-sdpa max 0.173828 mean 0.018318; official-bf16-mps-eager max 0.173828 mean 0.020371; official-bf16-mps-sdpa max 0.173828 mean 0.019800; torch-cpu-float16-eager max 0.019531 mean 0.002176; torch-mps-float16-eager max 0.019531 mean 0.002462
+  metal-f16-patched      max 0.102686 @pos 0 (0.623 of bound) mean 0.004383 (0.213 of bound) [ok, ok] hooked==plain True
+                         distance official-bf16 max 0.171875 mean 0.018017; official-bf16-cpu-sdpa max 0.171875 mean 0.018458; official-bf16-mps-eager max 0.171875 mean 0.020841; official-bf16-mps-sdpa max 0.171875 mean 0.019249; torch-cpu-float16-eager max 0.023438 mean 0.002259; torch-mps-float16-eager max 0.023438 mean 0.002639
+== prompt 1 (14 tokens): bounds max 0.254608 mean 0.026541 (official BF16 max 0.212174 mean 0.022118)
+  flex-bf16-base         max 0.160371 @pos 11 (0.630 of bound) mean 0.019058 (0.718 of bound) [ok, ok] hooked==plain True
+                         distance official-bf16 max 0.210938 mean 0.026371; official-bf16-cpu-sdpa max 0.187500 mean 0.022906; official-bf16-mps-eager max 0.218750 mean 0.023181; official-bf16-mps-sdpa max 0.187500 mean 0.024695; torch-cpu-float16-eager max 0.201614 mean 0.019728; torch-mps-float16-eager max 0.192932 mean 0.019732
+  flex-bf16-patched      max 0.171086 @pos 13 (0.672 of bound) mean 0.018888 (0.712 of bound) [ok, ok] hooked==plain True
+                         distance official-bf16 max 0.210938 mean 0.024525; official-bf16-cpu-sdpa max 0.218750 mean 0.022868; official-bf16-mps-eager max 0.210938 mean 0.023140; official-bf16-mps-sdpa max 0.171875 mean 0.022453; torch-cpu-float16-eager max 0.182129 mean 0.019637; torch-mps-float16-eager max 0.181396 mean 0.019780
+  metal-f16-base         max 0.103754 @pos 0 (0.408 of bound) mean 0.004072 (0.153 of bound) [ok, ok] hooked==plain True
+                         distance official-bf16 max 0.203613 mean 0.022912; official-bf16-cpu-sdpa max 0.173828 mean 0.020164; official-bf16-mps-eager max 0.179688 mean 0.020485; official-bf16-mps-sdpa max 0.173828 mean 0.020358; torch-cpu-float16-eager max 0.027344 mean 0.003150; torch-mps-float16-eager max 0.031250 mean 0.003274
+  metal-f16-patched      max 0.102686 @pos 0 (0.403 of bound) mean 0.003753 (0.141 of bound) [ok, ok] hooked==plain True
+                         distance official-bf16 max 0.226562 mean 0.022821; official-bf16-cpu-sdpa max 0.171875 mean 0.020327; official-bf16-mps-eager max 0.183594 mean 0.020403; official-bf16-mps-sdpa max 0.171875 mean 0.020262; torch-cpu-float16-eager max 0.027344 mean 0.002998; torch-mps-float16-eager max 0.027344 mean 0.003138
+== prompt 2 (9 tokens): bounds max 0.218231 mean 0.027870 (official BF16 max 0.181859 mean 0.023225)
+  flex-bf16-base         max 0.133957 @pos 2 (0.614 of bound) mean 0.019370 (0.695 of bound) [ok, ok] hooked==plain True
+                         distance official-bf16 max 0.187500 mean 0.025062; official-bf16-cpu-sdpa max 0.156250 mean 0.021375; official-bf16-mps-eager max 0.187500 mean 0.023776; official-bf16-mps-sdpa max 0.187500 mean 0.021102; torch-cpu-float16-eager max 0.201614 mean 0.020665; torch-mps-float16-eager max 0.192520 mean 0.020833
+  flex-bf16-patched      max 0.151182 @pos 5 (0.693 of bound) mean 0.019794 (0.710 of bound) [ok, ok] hooked==plain True
+                         distance official-bf16 max 0.250000 mean 0.023138; official-bf16-cpu-sdpa max 0.156250 mean 0.019257; official-bf16-mps-eager max 0.187500 mean 0.021247; official-bf16-mps-sdpa max 0.140625 mean 0.019514; torch-cpu-float16-eager max 0.177734 mean 0.021051; torch-mps-float16-eager max 0.173828 mean 0.021085
+  metal-f16-base         max 0.103754 @pos 0 (0.475 of bound) mean 0.004130 (0.148 of bound) [ok, ok] hooked==plain True
+                         distance official-bf16 max 0.187500 mean 0.024516; official-bf16-cpu-sdpa max 0.175781 mean 0.020512; official-bf16-mps-eager max 0.175781 mean 0.022604; official-bf16-mps-sdpa max 0.173828 mean 0.019308; torch-cpu-float16-eager max 0.024414 mean 0.003277; torch-mps-float16-eager max 0.027344 mean 0.002998
+  metal-f16-patched      max 0.102686 @pos 0 (0.471 of bound) mean 0.003969 (0.142 of bound) [ok, ok] hooked==plain True
+                         distance official-bf16 max 0.189453 mean 0.024225; official-bf16-cpu-sdpa max 0.179688 mean 0.020544; official-bf16-mps-eager max 0.171875 mean 0.022240; official-bf16-mps-sdpa max 0.175781 mean 0.019226; torch-cpu-float16-eager max 0.023438 mean 0.003065; torch-mps-float16-eager max 0.023438 mean 0.002903
+== block 0 (Llama-3.1-8B)
+  flex-bf16-base:
+    layer0-all   vs cpu-bfloat16-eager                 differing    80791 of    118784 ( 68.015%) max |delta| 0.00195312
+    layer0-all   vs cpu-bfloat16-eager-burnsilu        differing    79255 of    118784 ( 66.722%) max |delta| 0.00195312
+    layer0-all   vs mps-bfloat16-eager                 differing    80645 of    118784 ( 67.892%) max |delta| 0.00195312
+    layer0-all   vs mps-bfloat16-eager-burnsilu        differing    79019 of    118784 ( 66.523%) max |delta| 0.00195312
+    layer0-pos0  vs cpu-bfloat16-eager                 differing     1419 of     12288 ( 11.548%) max |delta| 0.000244141
+    layer0-pos0  vs cpu-bfloat16-eager-burnsilu        differing      489 of     12288 (  3.979%) max |delta| 0.00012207
+    layer0-pos0  vs mps-bfloat16-eager                 differing     1348 of     12288 ( 10.970%) max |delta| 0.000244141
+    layer0-pos0  vs mps-bfloat16-eager-burnsilu        differing      327 of     12288 (  2.661%) max |delta| 0.00012207
+    pre-all      vs cpu-bfloat16-eager                 differing   294807 of    415744 ( 70.911%) max |delta| 0.0664062
+    pre-all      vs cpu-bfloat16-eager-burnsilu        differing   294807 of    415744 ( 70.911%) max |delta| 0.0664062
+    pre-all      vs mps-bfloat16-eager                 differing   292834 of    415744 ( 70.436%) max |delta| 0.0664062
+    pre-all      vs mps-bfloat16-eager-burnsilu        differing   292834 of    415744 ( 70.436%) max |delta| 0.0664062
+    pre-pos0     vs cpu-bfloat16-eager                 differing     6423 of     43008 ( 14.934%) max |delta| 0.000488281
+    pre-pos0     vs cpu-bfloat16-eager-burnsilu        differing     6423 of     43008 ( 14.934%) max |delta| 0.000488281
+    pre-pos0     vs mps-bfloat16-eager                 differing     4552 of     43008 ( 10.584%) max |delta| 0.000488281
+    pre-pos0     vs mps-bfloat16-eager-burnsilu        differing     4552 of     43008 ( 10.584%) max |delta| 0.000488281
+    silu         vs F.silu-cpu                         differing   111741 of    415744 ( 26.877%) max |delta| 0.00390625
+    silu         vs F.silu-mps                         differing   111741 of    415744 ( 26.877%) max |delta| 0.00390625
+    silu         vs x*sigmoid(x)-cpu                   differing        0 of    415744 (  0.000%) max |delta| 0
+    silu         vs x*sigmoid(x)-mps                   differing        0 of    415744 (  0.000%) max |delta| 0
+  flex-bf16-patched:
+    layer0-all   vs cpu-bfloat16-eager                 differing    79044 of    118784 ( 66.544%) max |delta| 0.00244141
+    layer0-all   vs cpu-bfloat16-eager-burnsilu        differing    80676 of    118784 ( 67.918%) max |delta| 0.00244141
+    layer0-all   vs mps-bfloat16-eager                 differing    78909 of    118784 ( 66.431%) max |delta| 0.00244141
+    layer0-all   vs mps-bfloat16-eager-burnsilu        differing    80657 of    118784 ( 67.902%) max |delta| 0.00244141
+    layer0-pos0  vs cpu-bfloat16-eager                 differing      453 of     12288 (  3.687%) max |delta| 0.00012207
+    layer0-pos0  vs cpu-bfloat16-eager-burnsilu        differing     1398 of     12288 ( 11.377%) max |delta| 0.000244141
+    layer0-pos0  vs mps-bfloat16-eager                 differing      315 of     12288 (  2.563%) max |delta| 0.00012207
+    layer0-pos0  vs mps-bfloat16-eager-burnsilu        differing     1366 of     12288 ( 11.117%) max |delta| 0.000244141
+    pre-all      vs cpu-bfloat16-eager                 differing   294807 of    415744 ( 70.911%) max |delta| 0.0664062
+    pre-all      vs cpu-bfloat16-eager-burnsilu        differing   294807 of    415744 ( 70.911%) max |delta| 0.0664062
+    pre-all      vs mps-bfloat16-eager                 differing   292834 of    415744 ( 70.436%) max |delta| 0.0664062
+    pre-all      vs mps-bfloat16-eager-burnsilu        differing   292834 of    415744 ( 70.436%) max |delta| 0.0664062
+    pre-pos0     vs cpu-bfloat16-eager                 differing     6423 of     43008 ( 14.934%) max |delta| 0.000488281
+    pre-pos0     vs cpu-bfloat16-eager-burnsilu        differing     6423 of     43008 ( 14.934%) max |delta| 0.000488281
+    pre-pos0     vs mps-bfloat16-eager                 differing     4552 of     43008 ( 10.584%) max |delta| 0.000488281
+    pre-pos0     vs mps-bfloat16-eager-burnsilu        differing     4552 of     43008 ( 10.584%) max |delta| 0.000488281
+    silu         vs F.silu-cpu                         differing       63 of    415744 (  0.015%) max |delta| 1.52588e-05
+    silu         vs F.silu-mps                         differing       63 of    415744 (  0.015%) max |delta| 1.52588e-05
+    silu         vs x*sigmoid(x)-cpu                   differing   111678 of    415744 ( 26.862%) max |delta| 0.00390625
+    silu         vs x*sigmoid(x)-mps                   differing   111678 of    415744 ( 26.862%) max |delta| 0.00390625
+  metal-f16-base:
+    layer0-all   vs cpu-float16-eager                  differing    85317 of    118784 ( 71.825%) max |delta| 0.00195312
+    layer0-all   vs cpu-float16-eager-burnsilu         differing    76720 of    118784 ( 64.588%) max |delta| 0.000244141
+    layer0-all   vs mps-float16-eager                  differing    85264 of    118784 ( 71.781%) max |delta| 0.00195312
+    layer0-all   vs mps-float16-eager-burnsilu         differing    76539 of    118784 ( 64.435%) max |delta| 0.000244141
+    layer0-pos0  vs cpu-float16-eager                  differing     8871 of     12288 ( 72.192%) max |delta| 0.00195312
+    layer0-pos0  vs cpu-float16-eager-burnsilu         differing      552 of     12288 (  4.492%) max |delta| 1.52588e-05
+    layer0-pos0  vs mps-float16-eager                  differing     8881 of     12288 ( 72.274%) max |delta| 0.00195312
+    layer0-pos0  vs mps-float16-eager-burnsilu         differing      591 of     12288 (  4.810%) max |delta| 1.52588e-05
+    pre-all      vs cpu-float16-eager                  differing   283788 of    415744 ( 68.260%) max |delta| 0.00878906
+    pre-all      vs cpu-float16-eager-burnsilu         differing   283788 of    415744 ( 68.260%) max |delta| 0.00878906
+    pre-all      vs mps-float16-eager                  differing   283495 of    415744 ( 68.190%) max |delta| 0.00878906
+    pre-all      vs mps-float16-eager-burnsilu         differing   283495 of    415744 ( 68.190%) max |delta| 0.00878906
+    pre-pos0     vs cpu-float16-eager                  differing     5064 of     43008 ( 11.775%) max |delta| 6.10352e-05
+    pre-pos0     vs cpu-float16-eager-burnsilu         differing     5064 of     43008 ( 11.775%) max |delta| 6.10352e-05
+    pre-pos0     vs mps-float16-eager                  differing     4752 of     43008 ( 11.049%) max |delta| 6.10352e-05
+    pre-pos0     vs mps-float16-eager-burnsilu         differing     4752 of     43008 ( 11.049%) max |delta| 6.10352e-05
+    silu         vs F.silu-cpu                         differing   106511 of    415744 ( 25.619%) max |delta| 0.00390625
+    silu         vs F.silu-mps                         differing   106511 of    415744 ( 25.619%) max |delta| 0.00390625
+    silu         vs x*sigmoid(x)-cpu                   differing       35 of    415744 (  0.008%) max |delta| 3.8147e-06
+    silu         vs x*sigmoid(x)-mps                   differing       24 of    415744 (  0.006%) max |delta| 3.8147e-06
+  metal-f16-patched:
+    layer0-all   vs cpu-float16-eager                  differing    75991 of    118784 ( 63.974%) max |delta| 0.000244141
+    layer0-all   vs cpu-float16-eager-burnsilu         differing    85288 of    118784 ( 71.801%) max |delta| 0.00195312
+    layer0-all   vs mps-float16-eager                  differing    75775 of    118784 ( 63.792%) max |delta| 0.000244141
+    layer0-all   vs mps-float16-eager-burnsilu         differing    85077 of    118784 ( 71.623%) max |delta| 0.00195312
+    layer0-pos0  vs cpu-float16-eager                  differing      486 of     12288 (  3.955%) max |delta| 3.05176e-05
+    layer0-pos0  vs cpu-float16-eager-burnsilu         differing     8901 of     12288 ( 72.437%) max |delta| 0.00195312
+    layer0-pos0  vs mps-float16-eager                  differing      492 of     12288 (  4.004%) max |delta| 3.05176e-05
+    layer0-pos0  vs mps-float16-eager-burnsilu         differing     8904 of     12288 ( 72.461%) max |delta| 0.00195312
+    pre-all      vs cpu-float16-eager                  differing   283788 of    415744 ( 68.260%) max |delta| 0.00878906
+    pre-all      vs cpu-float16-eager-burnsilu         differing   283788 of    415744 ( 68.260%) max |delta| 0.00878906
+    pre-all      vs mps-float16-eager                  differing   283495 of    415744 ( 68.190%) max |delta| 0.00878906
+    pre-all      vs mps-float16-eager-burnsilu         differing   283495 of    415744 ( 68.190%) max |delta| 0.00878906
+    pre-pos0     vs cpu-float16-eager                  differing     5064 of     43008 ( 11.775%) max |delta| 6.10352e-05
+    pre-pos0     vs cpu-float16-eager-burnsilu         differing     5064 of     43008 ( 11.775%) max |delta| 6.10352e-05
+    pre-pos0     vs mps-float16-eager                  differing     4752 of     43008 ( 11.049%) max |delta| 6.10352e-05
+    pre-pos0     vs mps-float16-eager-burnsilu         differing     4752 of     43008 ( 11.049%) max |delta| 6.10352e-05
+    silu         vs F.silu-cpu                         differing        8 of    415744 (  0.002%) max |delta| 1.90735e-06
+    silu         vs F.silu-mps                         differing        8 of    415744 (  0.002%) max |delta| 1.90735e-06
+    silu         vs x*sigmoid(x)-cpu                   differing   106554 of    415744 ( 25.630%) max |delta| 0.00390625
+    silu         vs x*sigmoid(x)-mps                   differing   106543 of    415744 ( 25.627%) max |delta| 0.00390625

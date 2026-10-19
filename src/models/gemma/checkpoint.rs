@@ -63,7 +63,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::checkpoint::{
     CheckpointError, CheckpointManifest, ExpectedTensor, KeyMatcher, LoadOptions, LoadPlan,
-    MappingPlan, build_load_plan,
+    MappingPlan, RangeHazard, build_load_plan,
 };
 use crate::models::config::ConfigError;
 
@@ -168,11 +168,17 @@ pub struct GemmaCheckpointOptions {
 }
 
 /// The complete expected tensor inventory, its mapping, and the vision exemptions.
+///
+/// The mapping plan also declares the variant's range hazards
+/// ([`super::GemmaVariant::range_hazards`]), so the shared
+/// [`build_load_plan`] refuses a Gemma 3 plan in F16 whether it is called
+/// through [`Self::build_load_plan`] or with [`Self::expected_tensors`] and
+/// [`Self::mappings`] directly.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GemmaCheckpointContract {
     /// Required model fields and shapes, in deterministic topology order.
     expected: Vec<ExpectedTensor>,
-    /// Checkpoint-name to model-field mappings, including the tied-head alias.
+    /// Checkpoint-name to model-field mappings, including the tied-head alias, and the variant's range hazards.
     mappings: MappingPlan,
     /// Prefixes of intentionally unexecuted vision tensors.
     allow_unexpected: Vec<KeyMatcher>,
@@ -185,7 +191,7 @@ impl GemmaCheckpointContract {
         &self.expected
     }
 
-    /// Returns the exact checkpoint-name to model-field mapping.
+    /// Returns the exact checkpoint-name to model-field mapping, which declares the variant's range hazards.
     #[must_use]
     pub const fn mappings(&self) -> &MappingPlan {
         &self.mappings
@@ -197,14 +203,29 @@ impl GemmaCheckpointContract {
         &self.allow_unexpected
     }
 
+    /// Returns the numeric-range hazards the variant declares (F16 for Gemma 3, none for Gemma 2).
+    ///
+    /// These are the declarations of [`Self::mappings`]
+    /// ([`MappingPlan::range_hazards`]).
+    #[must_use]
+    pub fn range_hazards(&self) -> &[RangeHazard] {
+        self.mappings.range_hazards()
+    }
+
     /// Strictly compares a discovered manifest with the complete contract.
     ///
     /// The vision exemptions are added to the caller's policy; the caller's
-    /// own allowlists and dtype policy are honored.
+    /// own allowlists and dtype policy are honored. The shared planner then
+    /// checks the finished plan against [`Self::range_hazards`] under the
+    /// caller's [`LoadOptions::range_hazards`] policy, so a Gemma 3 plan whose
+    /// parameters are F16 (cast, or stored and kept by
+    /// [`crate::checkpoint::DTypePolicy::Auto`]) is refused before any
+    /// payload is read unless the caller accepts the overflow.
     ///
     /// # Errors
     ///
-    /// Returns the checkpoint planning error for any mismatch.
+    /// Returns the checkpoint planning error for any mismatch, and
+    /// [`CheckpointError::RangeHazard`] for a refused range hazard.
     pub fn build_load_plan(
         &self,
         manifest: &CheckpointManifest,
@@ -241,7 +262,7 @@ impl GemmaConfig {
             contract.add_layer(&architecture, layer);
         }
         contract.add_head(architecture.tie_word_embeddings);
-        Ok(contract.finish())
+        Ok(contract.finish(architecture.variant.range_hazards()))
     }
 }
 
@@ -441,8 +462,10 @@ impl ContractBuilder {
         }
     }
 
-    /// Returns the finished contract with the source's vision exemptions.
-    fn finish(self) -> GemmaCheckpointContract {
+    /// Returns the finished contract with the source's vision exemptions, declaring the variant's `range_hazards` on its mapping plan.
+    fn finish(mut self, range_hazards: &'static [RangeHazard]) -> GemmaCheckpointContract {
+        self.mappings
+            .declare_range_hazards(range_hazards.iter().copied());
         GemmaCheckpointContract {
             expected: self.expected,
             mappings: self.mappings,

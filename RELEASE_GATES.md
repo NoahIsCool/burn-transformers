@@ -136,8 +136,9 @@ stay within `2e-5 + 2e-5 · scale` of Flex; on an Apple M3 Max the largest
 Metal deviation is `9.5e-6` (Gemma 2, logit scale 25.6) and the largest
 relative one `1.2e-6`. On CUDA GPUs of compute capability 8.0 and newer,
 Burn 0.21 rounds F32 matrix inputs to TF32, so those runs are held to
-`1e-2 + 1e-2 · scale` (derived in `tests/support/backend_numerics.rs`) and
-qualify execution rather than F32 numerics. No CUDA run has been recorded
+`1e-2 + 1e-2 · scale` (derived in `tests/support/backend_numerics.rs` for
+the suite's pinned random weights; other draws of the same tiny models can
+exceed it) and qualify execution rather than F32 numerics. No CUDA run has been recorded
 yet. The suite found two DeltaNet defects on CubeCL backends that every CPU
 test missed (see the changelog).
 
@@ -246,7 +247,8 @@ writes from Transformers on CPU with eager attention:
 ```sh
 python3 -I scripts/generate_causal_lm_reference.py --model-dir MODEL_DIR \
   --output BUNDLE_DIR --repository OWNER/NAME --revision COMMIT \
-  [--dtype {float32,float64,bfloat16}] [--num-hidden-layers N] [--prompt TEXT ...] [--greedy-tokens N]
+  [--dtype {float32,float64,bfloat16,float16}] [--device {cpu,mps}] [--attn-implementation {eager,sdpa}] \
+  [--decode-tokens-from TRUTH] [--prompt-decode] [--num-hidden-layers N] [--prompt TEXT ...] [--greedy-tokens N]
 ```
 
 Each test verifies the checkpoint/bundle pairing through the bundle's
@@ -256,8 +258,8 @@ Each test verifies the checkpoint/bundle pairing through the bundle's
 
 | Gate | Command (after `cargo test --release`) | Environment | Default tolerances |
 | --- | --- | --- | --- |
-| Llama family | `--test llama_family_artifacts -- --ignored --nocapture --test-threads 1` | `TRANSFORMERS_LLAMA_FAMILY_DIR`, `TRANSFORMERS_LLAMA_FAMILY_REFERENCE_DIR`; optional `_TOLERANCE`, `_MIN_GREEDY`; `_DTYPE` (`f32` default, `bf16`, `f16`), which for half precision needs `_BF16_REFERENCE_DIR` and refuses `_TOLERANCE` | F32: `1e-3` absolute logits (F32 drift `7.6e-5` to `3.83e-4` on SmolLM-135M, Qwen3-4B, SmolLM3-3B, and Llama-3.1-8B, Flex and Metal); at least 2 decisive greedy tokens. Qwen2-7B's first-position activations reach about 7,000, so an F32 bundle's own rounding (`1.6e-3`) exceeds the tolerance: qualify it against a `--dtype float64` bundle, where Flex stays within `2.9e-4` and Metal reaches `1.9e-3` at one first-position logit, run with `TRANSFORMERS_LLAMA_FAMILY_TOLERANCE=2.5e-3`. Half precision: per prompt `1.2` times the official BF16 maximum and mean deviation from the same F32 or F64 bundle (see below) |
-| Gemma | `--test gemma_artifacts -- --ignored --nocapture --test-threads 1` | `TRANSFORMERS_GEMMA_DIR`, `TRANSFORMERS_GEMMA_REFERENCE_DIR`, `TRANSFORMERS_GEMMA_LONG_REFERENCE_DIR`; optional `_TOLERANCE`, `_LONG_TOLERANCE`, `_MIN_GREEDY`; `_DTYPE` (`f32` default, `bf16`, `f16`), which for half precision needs `_BF16_REFERENCE_DIR` and `_LONG_BF16_REFERENCE_DIR` and refuses both tolerances | F32: `1e-3`; `5e-3` across the sliding window, where Transformers' own eager and SDPA graphs differ by `3.2e-3`. Half precision: the Llama-family rule |
+| Llama family | `--test llama_family_artifacts -- --ignored --nocapture --test-threads 1` | `TRANSFORMERS_LLAMA_FAMILY_DIR`, `TRANSFORMERS_LLAMA_FAMILY_REFERENCE_DIR`, `_DECODE_TRUTH_DIR` (cached greedy); optional `_TOLERANCE`, `_MIN_GREEDY`; `_DTYPE` (`f32` default, `bf16`, `f16`), which for half precision needs `_OFFICIAL_DIRS` (four official graphs) and refuses `_TOLERANCE` | F32: `1e-3` absolute logits (F32 drift `7.6e-5` to `3.83e-4` on SmolLM-135M, Qwen3-4B, SmolLM3-3B, and Llama-3.1-8B, Flex and Metal); at least 2 decisive greedy tokens. Qwen2-7B's first-position activations reach about 7,000, so an F32 bundle's own rounding (`1.6e-3`) exceeds the tolerance: qualify it against a `--dtype float64` bundle, where Flex stays within `2.9e-4` and Metal reaches `1.9e-3` at one first-position logit, run with `TRANSFORMERS_LLAMA_FAMILY_TOLERANCE=2.5e-3`. Half precision: per prompt `s_max` and `s_mean` times the envelope of the four official graphs' deviation from the same F32 or F64 bundle (BF16 `1.5`/`1.3`, F16 `1.7`/`1.7`; see below) |
+| Gemma | `--test gemma_artifacts -- --ignored --nocapture --test-threads 1` | `TRANSFORMERS_GEMMA_DIR`, `TRANSFORMERS_GEMMA_REFERENCE_DIR`, `TRANSFORMERS_GEMMA_LONG_REFERENCE_DIR`, `_DECODE_TRUTH_DIR` and `_LONG_DECODE_TRUTH_DIR` (cached tests); optional `_TOLERANCE`, `_LONG_TOLERANCE`, `_MIN_GREEDY`; `_DTYPE` (`f32` default, `bf16`; `f16` expects the library's Gemma 3 refusal, and with `_RANGE_HAZARDS=accept` evaluates the faithful graph and fails), which for BF16 needs `_OFFICIAL_DIRS` and `_LONG_OFFICIAL_DIRS`, and in half precision refuses both tolerances | F32: `1e-3`; `5e-3` across the sliding window, where Transformers' own eager and SDPA graphs differ by `3.2e-3`. Half precision: the Llama-family rule |
 | gpt-oss | `--test gpt_oss_artifacts -- --ignored --nocapture --test-threads 1` | `TRANSFORMERS_GPT_OSS_DIR`, `TRANSFORMERS_GPT_OSS_REFERENCE_DIR`; optional `_DTYPE` (defaults to the bundle's dtype), `_TOLERANCE`, `_MEAN_TOLERANCE`, `_MIN_GREEDY` | F32 run and bundle: `1e-3` max, `1e-4` mean; any half-precision side: `2.7` max, Transformers' own full-model BF16 deviation from the full F32 reference (`2.665`) rounded up, and `0.15` mean, kept from the earlier four-block calibration (the official BF16 mean is at most `0.108`, the crate's Flex/BF16 mean `0.112`) |
 
 Every cached-greedy check feeds the reference's tokens back and compares each
@@ -302,84 +304,156 @@ it from the two bundles alone (`TRANSFORMERS_GPT_OSS_BF16_REFERENCE_DIR`,
 model, so its pass is not a gate pass.
 
 Half-precision Llama-family and Gemma runs (`TRANSFORMERS_LLAMA_FAMILY_DTYPE`
-or `TRANSFORMERS_GEMMA_DTYPE`: `bf16` on Flex, `f16` on Metal, either on
-CUDA) are judged
-against the same F32 bundles (F64 for Qwen2-7B), with bounds read at run time
-from the official implementation's own BF16 evaluation instead of a constant.
-Each F32 bundle has a BF16 twin, generated by the same script with `--dtype
-bfloat16`, the same prompts, and the same greedy length, and named by
-`TRANSFORMERS_LLAMA_FAMILY_BF16_REFERENCE_DIR`,
-`TRANSFORMERS_GEMMA_BF16_REFERENCE_DIR`, or
-`TRANSFORMERS_GEMMA_LONG_BF16_REFERENCE_DIR`.
+or `TRANSFORMERS_GEMMA_DTYPE`: `bf16` on Flex, `f16` on Metal for the Llama
+family, either on CUDA; Gemma 3's `f16` runs check the library's refusal instead, below) are judged against the same F32
+bundles (F64 for Qwen2-7B), the *truths*, with bounds read at run time from
+the official implementation itself. Each truth has four official graphs in
+the run's dtype, written by the same script with the truth's prompts and
+greedy length: Transformers 5.2.0 / PyTorch 2.10.0 on the CPU and on MPS, with
+eager and SDPA attention (`--device`, `--attn-implementation`), each with
+`--decode-tokens-from TRUTH` and, for the short truths, `--prompt-decode`.
+They are named by `TRANSFORMERS_LLAMA_FAMILY_OFFICIAL_DIRS`,
+`TRANSFORMERS_GEMMA_OFFICIAL_DIRS`, or `TRANSFORMERS_GEMMA_LONG_OFFICIAL_DIRS`
+(four directories, separated as in `PATH`). Each truth also has a *decode
+truth*, its own CPU-eager graph in its own dtype with decode rows, whose
+prompt logits equal the truth's byte for byte
+(`TRANSFORMERS_LLAMA_FAMILY_DECODE_TRUTH_DIR`,
+`TRANSFORMERS_GEMMA_DECODE_TRUTH_DIR`, `TRANSFORMERS_GEMMA_LONG_DECODE_TRUTH_DIR`;
+the round-2 `-f32-cpu-eager` bundles, and `Qwen2-7B-453ed157-f64-cpu-eager`).
 [`tests/support/half_precision_calibration.rs`](tests/support/half_precision_calibration.rs)
-pairs them fail closed (configuration and weight digests, model, versions,
-vocabulary, truncation, prompts and token IDs, dtype labels) and applies one
-rule to every checkpoint: if the official BF16 logits of a prompt deviate from
-its F32 logits by at most `M` and on average by `μ`, a Burn run must stay
-within `1.2 M` at every position and `1.2 μ` on average, and its cached
-prefill, batched rows, and long-context chunk ends within `1.2 M`. The slack
-`1.2` is the largest per-prompt ratio of a Burn half-precision statistic to
-the official one measured on gpt-oss-20b, `1.1725` (the Flex/BF16 prompt-2
-mean against Transformers' own BF16 run, from the
-[follow-up record](acceptance/measurements/reference-precision-followups-20261016.json)),
-rounded up to two significant digits, as `2.665` was to `2.7`; with `1` that
-run would fail four of its eight statistics. It was fixed before any
-Llama-family or Gemma half-precision run. The bounds calibrate BF16 runs
-only. The generator writes no `float16` bundle, so a Metal/F16 run is held
-to the same BF16 bounds, reused as an upper limit in the way gpt-oss applies
-one bound to any half-precision side. They do not reflect F16's rounding
-unit, which is eight times smaller (on gpt-oss-20b, Metal/F16 reached `0.007`
-to `0.874` of the official BF16 statistics), so an F16 pass is weaker
-evidence than a BF16 pass. Cached prefills, long-context chunk ends, and
-batched rows must also agree with the stateless pass within gpt-oss's self-consistency
-tolerance (`0.5` for F16 and BF16). The greedy continuation follows the
-shared teacher-forced rule above with prompt 0's `1.2 M` as its tolerance:
-every step whose reference margin exceeds `2.4 M` is compared and every other
-step is skipped as a tie (`Bound::greedy_tolerance` is the F32 tolerance at
-which `check_teacher_forced_greedy` decides exactly those steps whenever
-`1.2 M` lies in F32's normal range and below `2^127`; every recorded prompt-0
-bound lies between `0.16` and `10.2`). Whatever the
-margins, the cached greedy tests also check the decode path: every decode
-step must agree with the same run's stateless pass at its position within
-the self-consistency tolerance, and the longest prompt, prefilled for its first quarter and
-decoded token by token, must meet both bounds of its prompt, as gpt-oss's
-cached long-prompt test does. The F32 tolerance
-overrides are refused in half precision; the F32 gates are unchanged. The
-seven official bundles and their calibration are recorded in the
-[half-precision calibration record](acceptance/measurements/half-precision-calibration-20261017.json):
+pairs them fail closed: each of the four `(device, attention)` graphs exactly
+once, in the run's dtype, not `--bf16-resident`, all from one generator
+script SHA-256; the truth's configuration and weight digests, model, versions,
+vocabulary, truncation, prompts and token IDs, and greedy length; decode rows
+at the truth's greedy positions, fed the truth's tokens, naming the truth's
+manifest digest as their source; and the decode truth's identity and prompt
+digests. The single-bundle variables of the previous rule
+(`*_BF16_REFERENCE_DIR`) are refused.
 
-| Official BF16 bundle in `/Volumes/T9/transformers-references` | `reference.json` SHA-256 | Max \|Δ\| per prompt | Mean \|Δ\| per prompt | Decisive greedy steps |
-| --- | --- | --- | --- | --- |
-| `SmolLM-135M-1d461723-bf16` | `5f7bfb10…` | `1.46`, `1.10`, `1.65` | `0.190`, `0.075`, `0.071` | 0 of 32 |
-| `Qwen3-4B-531c80e2-bf16` | `4722fa13…` | `0.700`, `0.701`, `0.880` | `0.078`, `0.043`, `0.054` | 26 of 32 |
-| `SmolLM3-3B-1fa6fa28-bf16` | `47cf6ca7…` | `6.28`, `6.67`, `5.33` | `0.156`, `0.079`, `0.177` | 0 of 32 |
-| `Qwen2-7B-453ed157-f64-bf16` (against the F64 bundle) | `b570f1c8…` | `8.49`, `6.85`, `10.7` | `0.421`, `0.312`, `0.675` | 0 of 32 |
-| `Llama-3.1-8B-d04e592b-bf16` | `2d909999…` | `0.137`, `0.212`, `0.182` | `0.017`, `0.022`, `0.023` | 27 of 32 |
-| `gemma-3-4b-it-093f9f38-bf16` | `013c2862…` | `0.384`, `0.592`, `0.748` | `0.038`, `0.052`, `0.063` | 26 of 32 |
-| `gemma-3-4b-it-093f9f38-long-bf16` | `7b9ed384…` | `8.07` | `0.066` | 0 of 8 |
+The rule is the *official-graph envelope*. Per prompt, `E_max` and `E_mean`
+are the largest maximum and mean `|Δ|` from the truth over the four official
+graphs. A run passes when its maximum is at most `s_max E_max` and its mean
+at most `s_mean E_mean`, inclusive; single rows (cached prefill, batched rows,
+chunk ends) use `s_max E_max`. The slacks come from the official graphs only,
+never from Burn: each graph's leave-one-out ratio is its statistic over the
+largest of the other three graphs', and the slack is the largest such ratio,
+pooled over every prompt, decode-row, and prompt-decode statistic of every
+calibrated truth of the dtype, rounded up to two significant digits by
+[`scripts/derive_half_precision_envelope.py`](scripts/derive_half_precision_envelope.py):
 
-Where no greedy step is decisive, the cached greedy test needs
-`TRANSFORMERS_LLAMA_FAMILY_MIN_GREEDY=0` or `TRANSFORMERS_GEMMA_MIN_GREEDY=0`,
-as the gpt-oss half-precision greedy tests do; that drops only the argmax
-floor, not the decode checks. The Gemma variable is read by both cached
-tests, so its long cached test runs alone (`--exact`) with the minimum at
-`0`, while the short one keeps the default minimum of 2 over its 26 decisive
-steps; the Llama-family variable is read by its cached greedy test only. On
-the long Gemma prompt the
-maximum bound (`9.7`) exceeds what a missing sliding window moves at the
-window's first positions, so a half-precision run requires only that the run
-without the window fails the rule; the F32 run keeps the tenfold check. That
-bound cannot catch a ring that keeps or evicts the wrong keys either, so at
-half precision the long cached test holds both chunk ends and all 8 decode
-steps after the wrap to the self-consistency tolerance against the same run's
-stateless sliding-window pass, which the long logits test ties to the bundle;
-the F32 run catches such a ring through its `5e-3` tolerance. The
-ignored tests `official_bf16_reference_calibrates_the_half_precision_bounds`
-(Llama family) and `official_bf16_references_calibrate_the_half_precision_bounds`
-(Gemma) reproduce the figures from the bundles alone; they evaluate no Burn
-model, so their passes are not gate passes. The first Burn half-precision
-runs of these two gates are recorded in the
-[Mac validation round](#mac-validation-round-october-17) below.
+| Dtype | Calibrated truths (ratios) | `s_max` (largest ratio) | `s_mean` (largest ratio) |
+| --- | --- | --- | --- |
+| BF16 | all seven (128) | `1.5` (`1.4206`, gemma-3-4b-it prompt 2, MPS SDPA) | `1.3` (`1.2988`, Qwen3-4B prompt 2, CPU eager) |
+| F16 | SmolLM-135M, Qwen3-4B, SmolLM3-3B, Llama-3.1-8B (80) | `1.7` (`1.6660`, Qwen3-4B prompt 0, MPS eager) | `1.7` (`1.6981`, the same) |
+
+They are compiled constants (`MAX_SLACK`, `MEAN_SLACK`), re-derived by that
+procedure, never tuned, whenever a graph, a version, a prompt, or a checkpoint
+changes; the bundle-only test `official_graphs_admit_each_other_leave_one_out`
+fails if any official graph falls outside the envelope of the other three
+under them. The BF16 mean slack has `0.09%` headroom over its derivation, and
+one MPS-eager graph decides both F16 slacks (without it they would be
+`1.3774` and `1.5060`). A leave-one-out maximum over about a hundred ratios
+leaves an exchangeable new implementation roughly a one-in-a-hundred chance
+per statistic of exceeding it, so an exceedance is a finding to diagnose with
+per-block dumps and operation-level comparison, never an automatic defect
+verdict and never a reason to widen the rule. No logit rule can see one extra
+rounding, because the official graphs themselves spread `1.42`/`1.30`
+leave-one-out; exact operation-level tests pin the rounding points instead
+(SiLU, tanh GELU, the sigmoid gate, RMSNorm, RoPE, eager and fused attention
+scores in `src/*_tests.rs`).
+
+F16 is calibrated on the official F16 graphs exactly like BF16; no scale
+relates the two dtypes' deviations. A truth whose official graph is
+non-finite in the run's dtype has no envelope there, and the run fails as
+`uncalibrated` before the checkpoint loads: Qwen2-7B in F16 (official CPU and
+MPS eager F16 logits are NaN on every prompt) and gemma-3-4b-it in F16 (all
+four graphs overflow, as below), whose `f16` runs now check the library's
+refusal before any envelope is read.
+
+Decoding is judged by *truth-anchored rows*. The decode truth's stateless rows
+at the truth's teacher-forced greedy positions are the reference; `E_dec` is
+the largest deviation of the four official graphs' cached and stateless rows
+from them. A run's cached decode rows, and its stateless rows at the same
+positions, must each meet `s_max E_dec,max` and `s_mean E_dec,mean`; their
+gap from each other, then bounded by `2 s_max E_dec,max`, is printed as a
+diagnostic only. F32 runs compare their cached decode rows with the decode
+truth at their F32 tolerance. The longest prompt (the first of equal ones),
+prefilled for `max(T / 4, 1)` tokens and then decoded token by token, is
+judged against the envelope of the official graphs' own cached decode under
+that protocol. A greedy step is compared when the truth's margin exceeds
+twice the larger of prompt 0's and the decode rows' maximum bounds. The `0.5`
+self-consistency tolerance (gpt-oss's batched-row value) remains only for
+cached prefills, batched rows, and Gemma's long-prompt chunk ends, explicitly
+provisional and uncalibrated until the generator records the official graphs'
+own batched and chunked rows; Transformers' own BF16 cached decode exceeds it
+(up to `1.75`), which is why decode steps no longer use it. Where no greedy
+step is decisive, the cached greedy test needs
+`TRANSFORMERS_LLAMA_FAMILY_MIN_GREEDY=0` or `TRANSFORMERS_GEMMA_MIN_GREEDY=0`;
+that drops only the argmax floor, not the decode checks, and Gemma's long
+cached test then runs alone (`--exact`). The F32 tolerance overrides are
+refused in half precision. On the long Gemma prompt the maximum bound exceeds
+what a missing sliding window moves at the window's first positions, so a
+half-precision run requires only that the run without the window fails the
+rule; the F32 run keeps the tenfold check.
+
+The official bundles (`<truth>-<bf16|f16>-<cpu|mps>-<eager|sdpa>-7a50e44` in
+`/Volumes/T9/transformers-references`, from the generator at `7a50e44`,
+SHA-256 `a4ed0db4…`), every file digest, the derivation tables, and the Burn
+runs at the gate head `f9f78b5` are recorded in the
+[half-precision envelope record](acceptance/measurements/half-precision-envelope-20261018.json).
+Their rerun at the integrated head `8181605`, and the decisions behind the
+rule, are in the
+[half-precision follow-ups record](acceptance/measurements/half-precision-followups-20261017.json).
+The bundle-only tests `official_graphs_calibrate_the_half_precision_envelope`
+and `official_graphs_admit_each_other_leave_one_out` (both families) and
+`official_f16_graphs_overflow_so_gemma_has_no_f16_envelope` read the bundles
+alone; they evaluate no Burn model, so their passes are not gate passes. The
+previous single-bundle calibration stays recorded, unchanged, in the
+[half-precision calibration record](acceptance/measurements/half-precision-calibration-20261017.json).
+
+Gemma 3 F16 is refused by the library (all official F16 graphs overflow).
+gemma-3-4b-it overflows F16 in Transformers
+too: the first value beyond `65,504` is the residual addition after block 5's
+MLP at the BOS position (`51,941.5 + 21,568.1 = 73,509.6` in F32), identically
+in torch CPU and MPS F16 and in this crate's Metal and Flex F16;
+gemma-3-12b-it and gemma-3-27b-it overflow at blocks 6 and 8. Metal's Gemma
+qualification is F32, and Flex/BF16 (and CUDA BF16) are its half-precision
+profiles. Metal cannot run BF16 on the pinned Burn 0.21 (CubeCL 0.10 declares
+no BF16 storage, its MSL math functions have no `bfloat` overloads, and
+cubek-matmul refuses BF16), so a Metal BF16 gate fails at load with the
+existing `backend cannot store checkpoint dtype BF16` error (measured at
+`8181605` on SmolLM-135M and gemma-3-4b-it, at the first parameter
+`model.embed_tokens.weight`); a probe of Burn 0.22
+passes every step, which an upgrade (a maintainer decision: MSRV 1.95 and the
+backend-erased tensor API) would revisit.
+
+Following the maintainer's decision (d) of October 18, Gemma 3 declares F16 a
+numeric-range hazard (`GemmaVariant::range_hazards`, a `RangeHazard` with the
+measured evidence) on the Gemma contract's `MappingPlan`, and the generic
+check `check_range_hazards`, which the shared planner `build_load_plan` runs
+after strict planning for the hazards a mapping plan declares, refuses any
+plan whose parameters are F16 (cast, or stored and kept by
+`DTypePolicy::Auto`) with
+`CheckpointError::RangeHazard`, before any payload is read and, through
+`AutoCausalLm::load_local`, before the graph is allocated. The message names
+Gemma 3, F16, the measured overflow and the unmeasured sizes, the alternatives
+(F32, and BF16 where the backend can store it; packed Q4/Q8 weights with F32
+activations are named as not offered, since no Gemma packed path is
+certified), and the opt-in: `LoadOptions::range_hazards =
+RangeHazardPolicy::Accept`, which loads the faithful, overflowing graph for
+experiments. The refusal is family-wide (all `gemma3` and `gemma3_text`
+checkpoints, measured or not); Gemma 2 declares no hazard, because no Gemma 2
+checkpoint has been measured in F16. No model name enters the shared check.
+A `TRANSFORMERS_GEMMA_DTYPE=f16` gate run therefore expects that refusal: it
+loads with the default policy, requires `CheckpointError::RangeHazard` with the
+declared hazard, prints it, and passes without judging logits, so its pass
+qualifies the refusal and not F16 numerics. With
+`TRANSFORMERS_GEMMA_RANGE_HAZARDS=accept` the run loads the faithful graph,
+prints the first non-finite hidden state and the number of non-finite logits
+of the bundle's first prompt, and fails, since no F16 envelope exists. The
+Gemma gate has no Metal/F16 profile: Metal qualifies Gemma in F32, and Flex
+(and CUDA) qualify it in BF16. Neither F16 path has been recorded in an
+acceptance record yet.
 
 These gates establish experimental validation only; none promotes a
 checkpoint. The Flex and Metal F32 runs at `f4c56c4` and the runs of the Mac
@@ -398,11 +472,13 @@ requires the gate's tolerance variables (`TRANSFORMERS_LLAMA_FAMILY_TOLERANCE`;
 `TRANSFORMERS_GPT_OSS_TOLERANCE` and `_MEAN_TOLERANCE`) and is recorded as
 TF32 evidence, not F32 qualification; half-precision gpt-oss runs keep their
 defaults. Half-precision Llama-family and Gemma runs (the same `_DTYPE`
-variables, `bf16` or `f16`) keep the official calibration above on every
-device and refuse those tolerance variables, since TF32 rounds F32 operands
-and their matrix products take the stored F16 or BF16 tensors (read from the
-source, not measured). gemma-3-4b-it overflows F16, so `bf16` is its
-meaningful half-precision run on CUDA. The FLAN-T5-small release gate qualifies F32 numerics at
+variables, `bf16` or, for the Llama family, `f16`) keep the official envelope
+above on every device and refuse those tolerance variables, since TF32 rounds
+F32 operands and their matrix products take the stored F16 or BF16 tensors
+(read from the source, not measured). The envelope's official graphs ran on
+this Mac's CPU and MPS; no official CUDA graph is part of it. Gemma 3's
+`f16` runs check the library's refusal everywhere, so `bf16` is its
+half-precision run on CUDA. The FLAN-T5-small release gate qualifies F32 numerics at
 `atol = rtol = 1e-4` and refuses a TF32 device:
 
 ```sh
@@ -668,37 +744,522 @@ The round did not run the Qwen3.5-0.8B and DeepSeek-V2-Lite gates (last at
 gate, the Qwen3.8, Nemotron, and FLAN-T5-XXL gates, quantized quality, or the
 CUDA and ROCm checks; the record's `not_run` gives each reason.
 
-Still open after these replays, the follow-ups, and the Mac validation round:
+### Official-envelope round (October 18)
+
+The [half-precision envelope record](acceptance/measurements/half-precision-envelope-20261018.json)
+records the round that settles the Mac validation round's four
+half-precision questions. Its campaign directory holds the 57 new official
+bundles' generation logs and file digests (four BF16 and four F16 graphs for
+each of the seven truths, and Qwen2-7B's F64 decode truth; the bundles
+themselves stay on the external volume), the derivation tables, and every
+gate, benchmark, memory, probe, and diagnosis log with its harness, each
+authenticated by digest; `scripts/tests/test_half_precision_envelope_record.py`
+ties every quoted figure, status, and identity to them. Every gate ran in its
+own process at `f9f78b5`, from a verified git-archive export (the Muse
+official gate from a clean Git clone of the same commit, since it records Git
+provenance), under the shared heavy-model lock and the earlier rounds' memory
+watchdog, which never fired. The source checks passed at `1816d73`, which
+differs from `f9f78b5` only by a `///` comment on a test-only field. The
+record promotes no checkpoint.
+
+- Derivation, from the official graphs alone: BF16's pooled leave-one-out
+  maxima over 128 ratios are `1.4206` (maximum) and `1.2988` (mean), as in
+  round 2, so its slacks stay `1.5` and `1.3`; F16's over 80 ratios are
+  `1.6660` and `1.6981`, both from Qwen3-4B prompt 0's MPS-eager graph, so
+  its slacks are `1.7` and `1.7`. Qwen2-7B and both gemma truths are
+  uncalibrated in F16.
+- Llama family: all 30 F32 gates, all 15 Flex/BF16 gates (the five that
+  failed on October 17 among them), and the 12 Metal/F16 gates of the four
+  F16-calibrated checkpoints pass. Qwen2-7B's three Metal/F16 gates fail as
+  uncalibrated before loading, as decided. The Llama-family statistic nearest
+  its bound is SmolLM-135M Metal/F16's prompt-0 mean (`0.0359` against
+  `0.0385`).
+- Gemma: all 10 F32 and all 5 Flex/BF16 gates pass, the cached greedy gate
+  among them; its cached decode row at step 13 (`2.153` against `2.279`,
+  94.5% of the bound) is the round's nearest margin. `f16` is refused, and the
+  bundle-only test confirms all eight official F16 graphs are non-finite.
+- Qwen3.5-0.8B, the advertised profile, requalified after the SiLU change:
+  official parity passes with prompt cosine `0.999998486`, minimum cached
+  `0.999995622` (`0.999997671` at `f4c56c4`), and minimum teacher-forced
+  `0.999997690`, against the `0.999` gate. Against the approved September 10
+  baseline every warm and natural-loop median is 16 to 74% faster and both greedy
+  continuations are unchanged, but the single-sample cold first token (which
+  includes lazy kernel compilation) reads `0.432` s against `0.168` s and
+  `0.411` s against `0.366` s. A controlled rerun alternating `7bd057e` and
+  `f9f78b5` binaries three times shows the slowdown is not attributable to
+  this branch: the head's median cold first token is lower (`0.299` against
+  `0.368` s, and `0.302` against `0.406` s in the public benchmark), and every
+  warm median stays within `+3.2%` of the base's. Against the approved
+  baseline it confirms the breach in the baseline benchmark, where all six
+  cold samples of both binaries (`0.228` to `0.760` s) exceed `1.1 x 0.168`
+  s; in the public benchmark the base binary's median (`0.406` s, `+11.0%`)
+  exceeds `1.1 x 0.366` s and the head's three samples (`0.234` to `0.307` s)
+  do not. The breach of the approved baseline awaits the maintainer
+  ([review record](acceptance/measurements/half-precision-review-20261018.json));
+  the maintainer has since re-baselined (see "Qwen3.5-0.8B benchmark
+  re-baseline (October 18)" below).
+  The supervised memory run passes its 93 phases with
+  no sampling or validation error and a kernel lifetime maximum of 3.67 GB.
+- Larger checkpoints whose numerics the SiLU change touches: the Qwen3.8-27B
+  official gate (prompt cosine `0.999999873`, 32/32 greedy tokens) and MTP
+  smoke, the Muse-Glimmer-30B official gate (minimum hidden cosine
+  `0.999931849`, 32/32 greedy tokens; Muse's numerics also moved with the
+  eager-scale change, since its F16/BF16 default is the eager graph with
+  128-wide heads, and no control separates the two), streaming audit, and Q8/Q4 packed
+  smokes, the DeepSeek-V2-Lite metadata gate and smoke, the Qwen3-30B-A3B F16,
+  Q8, and Q4 smokes and packed-kernel audits, and the Nemotron-H smoke pass.
+  Fresh create-only Qwen3.8-27B Q8 and Q4 conversions, under `c15f24e`'s
+  install order, reproduce the `8a4404a` Burnpacks byte for byte and pass
+  their packed Metal smokes (top-1 `271`, cached cosine `1.0`). The Nemotron-H
+  official-precision gate fails: its recurrent cached row at decision 22 is
+  `0.998558` from the official F32 row, below the `0.998635` floor that the
+  official F16 evaluations' own worst cached row sets. Two controls attribute
+  it to one site: the base `7bd057e`, and `f9f78b5` with only the Mamba-2
+  convolution's SiLU composed as before, both pass with every statistic equal
+  to the `9a9c730` run (cached minimum `0.998777` at the same decision), and a
+  second run at `f9f78b5` reproduces the failure to the last digit. The
+  once-rounded SiLU matches the reference's `F.silu` at the operation level,
+  so this is a finding about the floor rule and Burn's recurrent decode, not a
+  reason to change either without review.
+- Diagnostics: Qwen2-7B's official eager F16 graphs are non-finite because
+  block 27's eager product `q k^T`, which Transformers computes in the model
+  dtype before scaling, reaches `155,078` (measured in F32) on two heads,
+  beyond F16's `65,504`; both SDPA graphs stay finite.
+  Burn's Metal/F16 eager graph shows why Burn's logits stay finite: the same
+  scores overflow to `-inf`, and a row whose every allowed score did so is
+  treated as fully excluded, with zero context. Its default graph matches the
+  eager graph's block-27 statistics, and in both block 27's residual at
+  positions after the first moves by up to `77.5` from Burn's F32 run. Metal
+  F16 arithmetic overflows as IEEE F16 does (a cast, sum, or product beyond
+  `65,504` gives infinity). The eager attention graph
+  (`AttentionPrecisionMode::EagerFp32Softmax`: opt-in for the Llama family,
+  the F16/BF16 default of Muse-Glimmer, the default of GPT-2 and GPT-NeoX, and
+  the graph of score and pattern hooks) still exceeds the envelope in Flex/BF16
+  cached decode on Qwen3-4B (`1.106` against `1.054`, mean `0.157` against
+  `0.100`) although its prompts
+  and stateless rows stay within it; a fused dump reproduces the gate's own
+  statistics exactly. End to end, once-rounded SiLU moves SmolLM-135M's
+  Flex/BF16 prefill medians by `-3.7%` and `+0.7%` and its decode medians by
+  `-0.2%` and `+4.7%` over three alternated rounds.
+
+### Integrated-head rerun (October 18)
+
+The [half-precision follow-ups record](acceptance/measurements/half-precision-followups-20261017.json)
+completes the round above. It repeats the round's six decisions verbatim,
+with their rationale, rejected alternatives, and review flags; decision (d)
+and its Metal BF16 part await the maintainer. It also records a rerun of
+every Llama-family and Gemma gate at the integrated head `8181605`, the
+envelope record's own commit. That commit differs from `f9f78b5` only by a
+`///` comment on a test-only field, Markdown, and the envelope record with its
+campaign directory and Python test. Each of the 106 tests ran in its own
+process in the worktree itself, which was clean
+before and after every run. Every real-checkpoint group held the heavy-model
+lock, and the memory watchdog never fired. The record's campaign directory
+holds the logs, the harness, and the digests of every bundle, checkpoint
+configuration, and binary the runs read.
+`scripts/tests/test_half_precision_followups_record.py` recomputes every
+status and comparison from the committed logs.
+
+- Build: the first build compiled nothing. The envelope round had built its
+  binaries from a git-archive export into the same `CARGO_TARGET_DIR`, and
+  cargo judged them fresh for the worktree. After the worktree's `src/lib.rs`
+  modification time was updated (its bytes and Git blob unchanged), cargo
+  recompiled the crate from the worktree. Both test binaries are
+  byte-identical to the `f9f78b5` gate binaries (`llama_family_artifacts`
+  `72a204e1…`, `gemma_artifacts` `533d5d9c…`). A stage that switches source
+  trees in a shared target directory must force or verify a rebuild before
+  it attributes a run to a checkout.
+- Results: 94 runs pass and 12 fail as expected. The expected failures are
+  Qwen2-7B's three Metal/F16 gates and two F16 calibration tests
+  (uncalibrated), the five Metal Gemma gates with `f16` (refused before
+  loading), and Metal BF16 on SmolLM-135M and gemma-3-4b-it (the contextual
+  load error). No run fails unexpectedly. The Llama family passes all 30 F32
+  gates, all 15 Flex/BF16 gates, and the 12 Metal/F16 gates of its four
+  F16-calibrated checkpoints. gemma-3-4b-it passes all 10 F32 and all 5
+  Flex/BF16 gates. The other 21 bundle-only tests, which evaluate no Burn
+  model, pass, and so does the ordinary unit test of Gemma's F16 refusal.
+- Reproduction: the 99 runs that the envelope round also ran produce the same
+  test output (thread ids and timings masked) and the same exit status. Their
+  peak footprints differ from it by `-3.7%` to `+0.6%`; the largest peak is
+  44.0 GB, in Llama-3.1-8B's Metal/F32 batched prefill. All 40 F32 gates repeat
+  verbatim every printed `|Δ|` line and greedy count of the last pre-SiLU F32
+  runs (Llama family at `53f167b`, Gemma at `c2936fe`). The once-rounded SiLU
+  therefore leaves F32 unchanged at printed precision; the F32 decode-truth
+  rows are new and have no earlier counterpart.
+- Margins: unchanged. The two nearest are still Gemma's Flex/BF16 cached
+  decode row at step 13 (`2.153` against `2.279`, 94.5% of its bound) and
+  SmolLM-135M Metal/F16's prompt-0 mean (`0.03593` against `0.03848`, 93.4%).
+  Under the envelope tolerance no greedy step is decisive for SmolLM-135M,
+  SmolLM3-3B, or Qwen2-7B in Flex/BF16, or for Gemma's long prompt.
+- Not rerun: the larger checkpoints (Nemotron-H, Qwen3.5-0.8B, Qwen3.8-27B,
+  Muse-Glimmer-30B, DeepSeek-V2-Lite, Qwen3-30B-A3B), gpt-oss, FLAN-T5, CUDA
+  and ROCm, coverage, and the package gate. At `8181605` only the Python
+  tests, the documentation audit, and `cargo fmt --check` ran again. The other
+  source checks passed at `1816d73`, and no Rust source changed after it. The
+  Nemotron-H official-precision failure at `f9f78b5` therefore stands at the
+  integrated head, and the round does not pass.
+
+Still open after these replays, the follow-ups, the Mac validation round, the
+official-envelope round (which closes the Mac validation round's
+calibration-rule, decode-tolerance, and SiLU questions and the Gemma Metal/F16
+profile), and its integrated-head rerun:
 
 - real-weight Nemotron MTP parity, and official F32 hidden traces for its
   base gate;
-- the Burn-side half-precision deviation at Nemotron teacher decision 30
-  (`0.997612` from F32, where both official F16 evaluations reach `0.99996`),
-  which passes only because each path's floor is set by its worst official
-  F16 row;
+- the Nemotron-H official-precision failure, an open finding: cached decision
+  22 is `0.998558` against its `0.998635` floor, measured at `f9f78b5` (above;
+  not rerun at `8181605`, which compiles the same library code) and at the
+  current source inferred from the rows measured at `2cf83d7` (the restored
+  gate was not rerun), traced to the once-rounded Mamba-2 convolution SiLU.
+  The gate's floors are each path's worst row of the two official F16
+  evaluations it is calibrated on, not of every official F16 graph: measured
+  by the envelope round's derivation, CPU SDPA at teacher decision 18
+  (`0.994420097` against `0.994466421`), MPS SDPA at cached decision 22
+  (`0.998622490` against `0.998635047`), and the MPS eager repeat of the
+  oracle's graph at cached decision 22 (`0.998595604`) fall below them, which
+  is diagnostic context and does not change the rule. With no slack, Burn-side
+  half-precision deviations such as teacher decision 30 (`0.997612` from F32
+  at `7bd057e` and `0.996039` at `2cf83d7`, where the official F16 graphs
+  reach `0.999958` CPU eager, `0.999346` CPU SDPA, `0.999968` MPS eager, and
+  `0.999954` MPS SDPA) and cached decision 22 pass or fail by margins no
+  calibration explains. The Nemotron-H envelope round below proposed a
+  four-graph envelope under which the gate passed; the maintainer did not
+  adopt it (October 18), because its slacks are the rounding of leave-one-out
+  ratios of at most `1.0046` and Burn's cached decision 22 lies at `1.023` of
+  the envelope. The four-graph data is a printed diagnostic, and the failure
+  stands;
 - Q8/Q4 quantized-reference and quality gates (Qwen3.8, Qwen3-30B-A3B, Muse),
   and an official reference for Qwen3-30B-A3B (no bundle exists);
-- the Qwen3.8-27B Q8/Q4 create-only conversions and packed Metal smokes under
-  `c15f24e`'s install order (last run at `8a4404a`; the Muse-Glimmer-30B
-  counterparts reran at `c2936fe` in the Mac validation round, and its
-  official gate and streaming audit at `c15f24e`);
-- the failing Flex/BF16 Llama-family and Gemma half-precision gates: a
-  reviewed decision on the prompt-bound rule (its `1.2` slack over one
-  official evaluation is narrower than Transformers' own BF16 spread), on
-  the decode self-consistency tolerance (gpt-oss's batched-row `0.5`, never
-  calibrated on decode steps), and on evaluating half-precision SiLU in F32,
-  followed by a rerun of every half-precision gate those decisions touch;
-- the Gemma Metal/F16 profile, which cannot pass because gemma-3-4b-it
-  overflows F16: refuse F16 for Gemma 3 with a contextual error, drop the
-  profile, or qualify Metal in BF16;
-- the packed Muse Q8 smoke's unexplained peak variance at `c2936fe` (31.87 to
-  45.68 GB across three runs, against 44.09 and 44.08 GB for the two
-  `9a9c730` controls), to investigate with more alternated rounds (no bound
-  applies);
+- the packed Muse Q8 smoke's unexplained peak variance (31.87 to 45.68 GB
+  across three runs at `c2936fe`; 31.89 GB at `f9f78b5`), to investigate with
+  more alternated rounds (no bound applies);
+- Qwen2-7B in F16: uncalibrated, since two official graphs overflow (above),
+  and Burn's finite Metal/F16 logits rest on treating fully overflowed score
+  rows as excluded; no F16 claim is possible until an envelope exists (for
+  example from the SDPA graphs alone, which the current rule does not allow);
+- the opt-in eager attention graph's Flex/BF16 cached decode on Qwen3-4B,
+  outside the envelope (`1.106` against `1.054`, mean `0.157` against `0.100`)
+  where the default graph passes;
+- gemma-3-4b-it's Flex/BF16 cached decode row at step 13 (`2.153`, 94.5% of
+  its bound), the nearest margin of the round, which deserves a targeted look;
+- official batched and chunked rows from the generator, to replace the
+  provisional `0.5` self-consistency tolerance of cached prefills, batched
+  rows, and Gemma's long chunk ends;
+- a position-0-split envelope, derived offline from the existing bundles,
+  which may be sharper where position 0 dominates (SmolLM3-3B, Qwen2-7B); in
+  Flex/BF16 no greedy step of SmolLM-135M, SmolLM3-3B, Qwen2-7B, or Gemma's
+  long prompt is decisive under the envelope tolerance, so those cached
+  greedy tests rest on the decode rows alone;
+- F16 measurements of Gemma 3 1B and 270m and of Gemma 2 (no local
+  checkpoints). The maintainer has since decided the library-level Gemma 3
+  F16 policy (decision (d)), now implemented as a family-declared range hazard
+  with a default refusal and an explicit opt-in (above, under the Gemma F16
+  paragraph of the experimental gates), which also refuses those unmeasured
+  Gemma 3 sizes; Gemma 2 declares no hazard until it is measured (the
+  gate-level refusal recorded here had anticipated the decision and was
+  withdrawn in the review round below);
+- Metal BF16, unavailable on the pinned Burn 0.21; the maintainer decided
+  (October 18) to migrate to Burn 0.22 (MSRV 1.95 and the backend-erased
+  tensor API) in a separate pull request after this one;
+- a non-finite guard in generation (a maintainer decision) and a
+  post-attention-add hook (the residual between a block's two additions);
+- three Burn Flex deviations pinned by tests, to report upstream: the
+  F32-to-BF16 cast ignores the three lowest F32 bits, the F16 matmul keeps
+  F16 partial sums, and tanh GELU overflows for BF16 inputs of at least
+  `2^127`; and an audit of the other sites where Burn rounds a scalar to the
+  tensor dtype before multiplying, which PyTorch keeps in F32 (fixed here for
+  the eager attention scale);
 - real Mistral and OLMo 2 checkpoints (tiny goldens only);
 - a first CUDA run of the real-checkpoint gates, F32 (with explicit
   tolerances on a TF32 device) and the Llama-family and Gemma half-precision
   profiles; no CUDA run of any gate has been recorded.
+
+### Review round (October 18)
+
+The [half-precision review record](acceptance/measurements/half-precision-review-20261018.json)
+answers a review of the two rounds above. Every binary was built from the code
+head `1e38eec`, and each of its 33 runs ran in its own process in the clean
+worktree, under the heavy-model lock except for the bundle-only tests.
+
+- Eager attention: a new operation-level test pins all five rounding points
+  of Transformers' eager attention (`Q K^T` summed in F32 and rounded, the
+  unrounded scale in F32, the mask and bias added in the dtype, an F32
+  softmax rounded once, and `P V` summed in F32 and rounded) on grouped heads
+  with a causal mask, a bias, and a fully masked row. It compares a host
+  emulation and Transformers 5.2.0's own `eager_attention_forward` bit for
+  bit. BF16 matched; F16 on Flex did not (10 of 120 probabilities and 45 of
+  96 outputs), because Flex's F16 GEMM keeps F16 partial sums, so on inference
+  Flex the eager graph now forms its two F16 products from F32 operands
+  (`90f6152`). Metal's F16 products are F32 sums rounded once, and Metal's
+  eager graph, Muse-Glimmer's half-precision default, equals Transformers'
+  eager attention on the grid (ignored Metal tests); no gate profile changes.
+  A torch 2.10.0 probe supplies the PyTorch evidence the eager-scale change
+  lacked: on the CPU, `x * (1/sqrt(128))` with a Python float equals the F32
+  product rounded once on every finite BF16 and F16 value, while MPS flushes
+  the 1,120 BF16 values whose F32 product is subnormal to zero.
+- The once-rounded SiLU is pinned at the Mamba-2 and Gated DeltaNet
+  convolution sites (`f7b8d99`). Seven mutations, run in a scratch clone,
+  each fail their test: either convolution call site reverted to
+  `activation::silu`, either eager product formed by Flex's own F16 GEMM, the
+  softmax in the dtype, the dtype-rounded scale, and an F16 Gemma run reading
+  the BF16 graphs.
+- Gemma F16 is uncalibrated (all official F16 graphs overflow). The
+  gate-level refusal of `f16` anticipated decision (d) and was withdrawn
+  (`e2f7279`), so the five Metal/F16 gates fail as uncalibrated before
+  loading. All 10 F32 and 5 Flex/BF16 Gemma gates and the two BF16 bundle-only
+  tests reproduce their `8181605` output exactly, and Metal BF16 still fails
+  with the contextual load error. Of the 33 runs, 27 pass and 6 fail as
+  expected.
+- Documentation: the Nemotron-H official-precision gate passed at `9a9c730`
+  and fails at `f9f78b5`, pending review of the floor rule; the eager graph is
+  also the half-precision default of Muse-Glimmer (and the default of GPT-2
+  and GPT-NeoX), so Muse's `f9f78b5` statistics reflect both the SiLU and the
+  eager-scale changes.
+- Benchmarks: Qwen3.5-0.8B's single-sample cold first token breaches the
+  approved September 10 baseline. In the baseline benchmark all six
+  controlled samples of both binaries exceed `1.1x`; in the public benchmark
+  the gate run (`+12.2%`) and the base binary's median (`+11.0%`) do, and the
+  head's three samples do not. The base binary `7bd057e` shows the breach
+  too, so it is not attributable to this branch. The breach of the approved
+  baseline awaits the maintainer, and nothing is re-baselined (the maintainer
+  has since re-baselined; see the October 18 re-baseline below).
+- Source validation at `1e38eec` (formatting, warning-denied Clippy on
+  nightly and 1.99.1, the Rust tests in three feature sets, MSRV 1.92, both
+  rustdoc builds, the documentation audit, the Python tests, and
+  `check_release.py --gate source --offline`) passes. Not run: the
+  Llama-family gates (no change reaches them), the Metal checkpoint gates
+  (Metal's graph is unchanged), the Nemotron-H gate (its failure stands), the
+  benchmarks, CUDA, and coverage. `scripts/tests/test_half_precision_review_record.py`
+  recomputes every status, quote, benchmark figure, and identity from the
+  committed evidence.
+
+### Qwen3.5-0.8B benchmark re-baseline (October 18)
+
+On October 18 the maintainer decided to "re-baseline the Qwen3.5-0.8B
+benchmarks on the current host (macOS 27.0.1, same Mac15,11), and report cold
+first token as a diagnostic rather than a pass/fail gate." This answers the
+benchmark item the review round above left to the maintainer. The
+[re-baseline record](acceptance/measurements/qwen3.5-0.8b-metal-rebaseline-20261018.json)
+carries the decision, and `scripts/tests/test_qwen35_rebaseline_record.py`
+recomputes every sample, statistic, and identity in it from the committed
+reports.
+
+- Protocol: the [campaign protocol](BENCHMARKS.md#qwen35-08b-benchmark-campaign-protocol)
+  replaces the review's confounded reruns. The two binaries alternate inside
+  every round, and two 4 x 4 Latin squares counterbalance the binary and
+  benchmark order. Every sample waits out a 120 s cooldown and is admitted at
+  1- and 5-minute loads of at most 4.0 and 6.0; a sample whose in-run load
+  exceeds 6.0 is rerun. Load and Metal shader-cache growth are recorded
+  around every process. A campaign takes at least 8 rounds and must reach a
+  steady state: since the review amendment below, a window of whole blocks
+  in which no block's gated medians differ from the later rounds' by more
+  than 2.5% and three standard errors of their noise.
+  `scripts/qwen35_benchmark_protocol.py` implements it, with
+  synthetic-campaign tests.
+- Binaries: the head `fa8426e`, built from its worktree, and the September
+  source `c70057e` (the September 10 series' `src` tree), rebuilt in a
+  temporary detached worktree that was then removed. Both were built with
+  rustc 1.92.0, `std,metal,tokenizers,chat-templates`, and the release
+  profile, and ran under the heavy-model lock on the Mac15,11 with macOS
+  27.0.1 (26A434) on AC power. The September 10 series ran on macOS 15.7.9
+  (Metal 3), a different series.
+- Execution: a first attempt, which admitted samples on the 1-minute load
+  alone, ran one contaminated sample and was stopped; it is kept and unused.
+  The campaign then ran 48 clean processes in 12 rounds. Five attempts
+  contaminated by other CPU work (in-run loads 6.1 to 24.1) were rerun. The
+  planned 8 rounds were not steady, so one block was added. Under the
+  corrected rule rounds 5 to 12 are steady, two whole blocks in which every
+  cell ran twice in every position; the record's first version, under the
+  original rule, reported rounds 3 to 12.
+- Reference (head, medians over rounds 5 to 12): model-only decode of 128
+  steps `3.557`, `3.545`, and `3.537` s at 32, 128, and 512 source tokens;
+  prefill `48.6`, `61.0`, and `161.3` ms; natural loops `1.110` s (model API)
+  and `1.413` s (public coordinator); strict load `0.940` and `0.934` s. On the
+  same host the head takes 0.30 to 0.96 of the September source's time on
+  every gated metric. Every gated median of both binaries is below its
+  September 10 value, and every token hash is unchanged. These medians, not
+  the September 10 summaries, are what later sources are judged against, at
+  the unchanged 5% alert and confirmed 10% failure thresholds.
+- Cold first token (diagnostic, not gated): head median `0.131` s (range
+  `0.120` to `0.227` s) in the baseline benchmark and `0.159` s (`0.118` to
+  `0.241` s) in the public one; September source `0.243` s and `0.282` s.
+  In every cell it correlates with the shader-cache growth of the same
+  process (Spearman +0.70 to +0.87) and falls over the rounds. The five
+  contaminated attempts ran the same binary and benchmark as their reruns
+  and grew the shader cache by 82,368 to 724,816 bytes just before them, so
+  those reruns started warmer. The head's baseline cell has two such reruns
+  in rounds 5 to 12; without them its median is `0.155` s. The record
+  keeps the measured correlations, with and without those rounds, apart
+  from the inferred explanation (Metal pipeline compilation against a
+  growing shader cache).
+- Unchanged: the v0.1 release record, the September 10 summaries, and the
+  earlier rounds' records keep their bytes (`tests/acceptance_records.rs`
+  pins the release record's digest), the support claims, and the documented
+  historical slowdown. Not run: the long-prefill series, a supervised memory
+  run, the FLAN-T5-small benchmarks, and CUDA/ROCm.
+- Source validation at `0d3bba6` (no library source, Cargo manifest, or
+  lockfile changed in this round) passes: formatting; warning-denied Clippy
+  of all targets on nightly and on 1.99.1 with all features and with
+  `std,flex,cpu,cuda,rocm,tokenizers,chat-templates,autodiff,train`, and on
+  1.99.1 for `qwen35_benchmarks` and `acceptance_records` with the Metal
+  profile's features (the only build that compiles the edited Metal module);
+  `cargo test --locked` with default features (3,734 passed, 83 ignored) and
+  with `std,flex,tokenizers,chat-templates,autodiff,train` (4,037 passed, 113
+  ignored); the Rust 1.92.0 check of all targets with the latter features;
+  warning-denied private rustdoc; the documentation audit (0 gaps in 23,657
+  authored items); and the 632 Python tests (14 opt-in native fixtures
+  skipped). Not run: `check_release.py --gate source`, coverage, and the
+  Metal checkpoint gates, which no change here reaches.
+
+### Re-baseline review amendment (October 19)
+
+The PR #1 review of the re-baseline found five faults, each verified against
+the committed campaign before any change. The record was rebuilt from the
+unchanged evidence, and its `review_amendment` block says what changed.
+No benchmark ran again and no support claim changed.
+
+- Steady state: the original rule (the earliest window of at least six
+  final rounds whose half-medians agree within 2.5%) was ill-conditioned.
+  Only the window from round 3 passed; those from rounds 1, 2, and 4 to 7
+  each failed on a single strict load, and that window was not whole
+  Latin-square blocks (per-position counts 2/3/3/2 or 3/2/2/3). The
+  [corrected rule](BENCHMARKS.md#metrics-steady-state-and-statistics) scans
+  whole blocks back from the end and requires a drift to exceed both 2.5% and
+  three standard errors of the later rounds' robust noise. The campaign is
+  steady from round 5, and the 8-round campaign is still not steady. The
+  head's reference medians move by at most 0.65%. Synthetic tests cover a
+  later block that drifts after an earlier window passed, noise against
+  shift, outliers and trends among the later rounds, and seeded random
+  campaigns.
+- Reference binary: the reference and control blocks now record their
+  executable's SHA-256, source commit, tree status, rustc, rustup toolchain,
+  features, and profile, and `tests/acceptance_records.rs` requires them.
+  A controlled rerun must run that executable or a clean build of that
+  commit with the same compiler, features, and profile that reproduces the
+  reference tokens; any other label is refused, with tests for each
+  mismatch.
+- Compiler: rustc and the rustup toolchain are part of the series identity,
+  so a campaign that mixes compilers is refused and a candidate built with
+  another compiler is not comparable.
+- Cold first token: contaminated attempts warmed the shader cache before
+  their reruns. Each cell now names those reruns and their attempts' growth
+  and repeats its statistics and correlations without them.
+- Evidence: every measurement file of the record's first version keeps its
+  bytes (the record test pins their combined digest). `analysis/analysis.log`
+  is kept as the original rule's analysis, and `analysis/analysis-20261019.log`
+  is the corrected one.
+- Process: the earlier commit `4fd7942` was staged with `git commit -a`,
+  which AGENTS.md forbids. It contains only this file's validation note, so
+  nothing unrelated was swept in. The commit is kept as it is, because
+  rewriting it would change no content, and this round stages explicit
+  paths.
+- Source validation of the tree committed as `33c33ff` passes. This round
+  changed the protocol script, its Python tests, the record and its
+  harness, `tests/acceptance_records.rs`, and documentation; no library
+  source, Cargo manifest, or lockfile changed. The checks were:
+  formatting; warning-denied Clippy of all targets on the default nightly
+  (1.94.0-nightly 2025-12-22) and on 1.99.1, with all features and with
+  `std,flex,cpu,cuda,rocm,tokenizers,chat-templates,autodiff,train`;
+  `cargo test --locked` with default features (3,734 passed, 83 ignored) and
+  with `std,flex,tokenizers,chat-templates,autodiff,train` (4,037 passed, 113
+  ignored); the Rust 1.92.0 check of all targets with the latter features;
+  warning-denied private rustdoc; the documentation audit (0 gaps in 23,659
+  authored items); and the 645 Python tests (14 opt-in native fixtures
+  skipped). Not run: `check_release.py --gate source`; coverage; the
+  Metal-feature Clippy of `qwen35_benchmarks`, which this round does not
+  touch; and every benchmark and Metal checkpoint gate, since no
+  measurement was repeated.
+
+### Nemotron-H envelope round (October 18)
+
+The [Nemotron-H envelope record](acceptance/measurements/nemotron-h-envelope-20261018.json)
+proposed to replace the Nemotron-H official-precision gate's floor, the worst
+cosine of two official F16 graphs with no slack, by the envelope rule of the
+Llama-family and Gemma gates, applied to the gate's row statistic. The
+maintainer did not adopt the rule (the decision below); the record's
+measurements stand as diagnostic evidence.
+
+- Method: registered and committed (`8ad5fb9`) before any new official graph
+  or Burn row. The statistic is a row's normalized deviation
+  `sqrt(2 (1 - cosine))` from its F32 truth row; each path's envelope is the
+  largest worst-row deviation of four official F16 graphs (CPU and MPS, eager
+  and SDPA attention), and its slack the largest leave-one-out ratio rounded
+  up to two significant digits.
+- Graphs: `scripts/generate_nemotron_h_f16_graph_reference.py` produced the
+  CPU and MPS SDPA graphs under the heavy-model lock, each differing from its
+  device's existing graph only in the attention implementation, with the
+  precision tool's 16 GiB resident budget (CPU 497 s, MPS 602 s). A first,
+  resident MPS load grew swap by 12.5 GiB in 80 s and was stopped by the
+  watchdog; its kill left both generators orphaned for about a minute, and the
+  driver now kills the process group. A control repeating the oracle's MPS
+  eager graph is not bitwise equal to the oracle (cosine `0.999686` at worst).
+- Derivation (committed `0a6a124`, before any Burn row): the largest
+  leave-one-out ratios are `1.0002`, `1.0042`, and `1.0046`, so every slack is
+  `1.1`, set by the rounding; the cosine floors are `0.999025` (prompt),
+  `0.993248` (teacher), and `0.998333` (cached), from `0.999194`, `0.994466`,
+  and `0.998635`.
+- Gate at `2cf83d7` (the library code of `fa8426e`), in its own process under
+  the lock: passed under the proposed rule. Cached decision 22 reproduces
+  `0.998558`, `1.0231` of the envelope and `0.930` of the bound; teacher rows
+  at least `0.996039` (decision 30); prompt `0.999200`; 32/32 top-1 on both
+  paths. The cached row sits further outside the four-graph envelope than any
+  official graph does (`1.0046`), so the pass rested on the rounded slack.
+- Source validation at `2cf83d7`: `cargo fmt --check`, warning-denied Clippy
+  of the Nemotron target with and without Metal, its tests on nightly (debug,
+  and release with Metal) and on MSRV 1.92.0, and the bundle-only
+  `official_f16_graphs_admit_each_other_leave_one_out`; the Python tests at
+  the record commit. Not run: the crate-wide test and Clippy matrix, the
+  documentation audit, `check_release.py`, the other checkpoints' gates (no
+  library code changed), CUDA, and coverage.
+  `scripts/tests/test_nemotron_h_envelope_record.py` recomputes the record's
+  statuses, figures, quotes, and identities.
+
+### Nemotron-H envelope decision (October 18)
+
+The [envelope decision record](acceptance/measurements/nemotron-h-envelope-decision-20261018.json)
+extends the envelope record, which stays byte-identical, with the
+maintainer's decision of October 18: the official-precision gate stays an
+open finding, and the four-graph envelope rule is not adopted, because its
+slack is `1.1` only by rounding leave-one-out ratios of at most `1.0046` and
+Burn's cached decision 22 lies at `1.023` of the envelope.
+
+- Rule: the gate again requires exact top-1 and, on each path, a cosine to
+  the F32 truth at least the worst cosine of the MPS/F16 oracle and the
+  CPU/F16 rows (prompt `0.999194145`, teacher `0.994466421`, cached
+  `0.998635047`), with no slack. Every row is measured before any is judged.
+  The compiled slacks and the leave-one-out assertion are removed; the F16
+  graph bundles are optional, and when they are supplied the gate prints the
+  four-graph envelope, each graph's leave-one-out ratio, the slack the
+  registered method would round to (marked not adopted), and Burn's worst row
+  of each path as a multiple of the envelope, all judging nothing.
+- Verdict (inferred, not measured at the new source): applied to the rows
+  measured at `2cf83d7`, whose library code the new source compiles, the gate
+  fails at cached decision 22 (`0.998557984` against `0.998635047`) and at no
+  other row. The 30B gate was not rerun; the bundle-only
+  `reports_official_f16_floors_and_four_graph_envelope` recomputes the floors
+  and the envelope from the authenticated bundles at the new source.
+- Corrections to the envelope record: at teacher decision 30 the official F16
+  graphs reach `0.999958`, `0.999346`, `0.999968`, and `0.999954` (CPU eager,
+  CPU SDPA, MPS eager, MPS SDPA), not all near `0.99996`; the teacher
+  decision-18 spike is absent only from CPU eager, so it does not follow the
+  attention path alone; the hidden traces' minimum against the F16 oracle is
+  `0.99999496`, not at least `0.999995`; and the MPS SDPA graph ran with the
+  16 GiB block budget that the reproduction command omitted.
+- Revision before integration (the first version, committed at `665762c`, is
+  pinned by digest and otherwise unchanged): next to the verdict, the record
+  lists the official F16 rows outside the floor pair that fall below a
+  restored floor, measured by the envelope round's derivation (CPU SDPA at
+  teacher decision 18, MPS SDPA and the MPS eager control at cached decision
+  22; diagnostic context, the rule unchanged), and corrects two statements:
+  the floor descriptions that called it the worst official F16 row, and its
+  own correction of the derivation tool's docstring, which did not say that
+  the edit at `530a82a` changed the tool's SHA-256 from the `2c4b5fc1...`
+  that `derivation/envelope.txt` records to `b8a487bd...`, comments and
+  docstrings only.
+- The record lists the source checks run at its documentation commit, the
+  checks not run, and their results;
+  `scripts/tests/test_nemotron_h_envelope_decision_record.py` recomputes its
+  figures, quotes, and identities and keeps the earlier records byte-identical.
 
 Record each replay as a new measurement with its exact source identity; do not
 overwrite the historical records below.
@@ -711,7 +1272,11 @@ Metal/F32 profiles. On September 10 the user explicitly approved the controlled
 Qwen measurements as the v0.1 baseline, while retaining the unexplained
 historical slowdown. This changes the baseline policy, not the measured results
 or the future 5% alert / confirmed 10% failure thresholds. No new benchmark is
-claimed by that approval. Larger families, quantized quality and real-weight
+claimed by that approval. On October 18 the maintainer re-baselined
+Qwen3.5-0.8B on the current host and made cold first token a diagnostic; the
+[re-baseline record](acceptance/measurements/qwen3.5-0.8b-metal-rebaseline-20261018.json)
+is now the reference for future Qwen comparisons, and the release record is
+unchanged. Larger families, quantized quality and real-weight
 MTP remain experimental.
 
 The [`b4d6410` source-gate record](acceptance/measurements/v0_1-source-gates-20260910.json)

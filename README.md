@@ -26,9 +26,12 @@ real-checkpoint gates.
   Verus harnesses that prove the cache, planning, decoding, and checkpoint
   arithmetic overflow-free and in bounds.
 
-This is a Rust 2024 crate (MSRV 1.92) pinned to Burn 0.21. The package version
-is 0.1.0; [support](#model-families-and-status) is deliberately narrower than
-what is implemented.
+This is a Rust 2024 crate (MSRV 1.92) pinned to Burn 0.21. Its Cargo package
+is `burn-transformers`, after [this repository](https://github.com/NoahIsCool/burn-transformers),
+and its library is imported as `transformers` ([adding the
+dependency](#adding-the-dependency)). The package version is 0.1.0;
+[support](#model-families-and-status) is deliberately narrower than what is
+implemented.
 
 ## Quickstart
 
@@ -260,12 +263,12 @@ acceptance record for an exact checkpoint, backend, and dtype
 | Qwen3.5 / Qwen3.8 hybrid | `qwen3_5_text` | **Supported (v0.1.0 source):** Qwen3.5-0.8B, Metal/F16, base text; its parity gate passed again at `f4c56c4` ([replay record](acceptance/measurements/real-checkpoint-replay-20261016.json)). Qwen3.8-27B matches official logits on Metal/F16 (experimental). The public example and the Qwen3.8 gates passed again at `8a4404a` ([large-checkpoint replay](acceptance/measurements/large-checkpoint-replay-20261016.json)), and the Qwen3.8 official gate again at `c15f24e` after a loader fix that lowers its Metal peak footprint ([reference-precision follow-ups](acceptance/measurements/reference-precision-followups-20261016.json)). |
 | T5 / FLAN / UL2 | `t5` | **Supported (v0.1.0 source):** FLAN-T5-small, Flex/F32 and Metal/F32; both gates passed again at `f4c56c4` ([replay record](acceptance/measurements/real-checkpoint-replay-20261016.json)) and at `c2936fe` ([Mac validation record](acceptance/measurements/mac-validation-20261017.json)). FLAN-T5-XXL matches official references on Metal (experimental; passed again at `8a4404a`, [large-checkpoint replay](acceptance/measurements/large-checkpoint-replay-20261016.json)); UL2 pending. |
 | Muse Glimmer | `muse_glimmer_text` | Experimental: official-reference parity on Metal/F16 (passed again at `4f9502a`, [large-checkpoint replay](acceptance/measurements/large-checkpoint-replay-20261016.json), and at `c15f24e`, [reference-precision follow-ups](acceptance/measurements/reference-precision-followups-20261016.json)); Q8/Q4 conversions byte-identical and packed Metal smokes at `c2936fe` ([Mac validation record](acceptance/measurements/mac-validation-20261017.json)). |
-| Llama family | `llama`, `mistral`, `qwen2`, `qwen3`, `smollm3`, `olmo2` | Experimental: tiny Transformers goldens for all six; real-weight Flex and Metal F32 parity for SmolLM-135M, Qwen3-4B, SmolLM3-3B, Llama-3.1-8B, and Qwen2-7B (against an F64 reference; on Metal under the documented `2.5e-3` tolerance), repeated at `53f167b`. First half-precision runs there: every Metal/F16 gate passes, Flex/BF16 passes 10 of 15 ([Mac validation record](acceptance/measurements/mac-validation-20261017.json)). |
-| Gemma 2 / Gemma 3 text | `gemma2`, `gemma3_text` (and `gemma3`'s text tower) | Experimental: tiny goldens; gemma-3-4b-it Flex and Metal F32 parity across its sliding window (repeated at `c2936fe`). Half precision at `c2936fe`: Flex/BF16 passes 4 of 5 gates; Metal/F16 fails because the model overflows F16 ([Mac validation record](acceptance/measurements/mac-validation-20261017.json)). |
+| Llama family | `llama`, `mistral`, `qwen2`, `qwen3`, `smollm3`, `olmo2` | Experimental: tiny Transformers goldens for all six; real-weight Flex and Metal F32 parity for SmolLM-135M, Qwen3-4B, SmolLM3-3B, Llama-3.1-8B, and Qwen2-7B (against an F64 reference; on Metal under the documented `2.5e-3` tolerance), repeated at `53f167b` ([Mac validation record](acceptance/measurements/mac-validation-20261017.json)) and `f9f78b5`. Half precision at `f9f78b5`, judged against the envelope of Transformers' own four half-precision graphs: all 15 Flex/BF16 and 12 Metal/F16 gates pass; Qwen2-7B in F16 is uncalibrated, because Transformers' own eager F16 graphs are non-finite ([half-precision envelope record](acceptance/measurements/half-precision-envelope-20261018.json)). Every one of these gates reproduced its output exactly at the integrated head `8181605` ([half-precision follow-ups record](acceptance/measurements/half-precision-followups-20261017.json)). |
+| Gemma 2 / Gemma 3 text | `gemma2`, `gemma3_text` (and `gemma3`'s text tower) | Experimental: tiny goldens; gemma-3-4b-it Flex and Metal F32 parity across its sliding window (repeated at `c2936fe`). Half precision at `f9f78b5`: Flex/BF16 passes all 5 gates against the official-graph envelope; F16 is uncalibrated: gemma-3-4b-it overflows F16 in Transformers too, so all of its official F16 graphs are non-finite and an F16 gate run fails before loading ([half-precision envelope record](acceptance/measurements/half-precision-envelope-20261018.json)). Its F32 and Flex/BF16 gates reproduced their output exactly at the integrated head `8181605`, where the Metal `f16` runs were refused before loading ([half-precision follow-ups record](acceptance/measurements/half-precision-followups-20261017.json)); that gate-level refusal anticipated the maintainer's unconfirmed decision (d) and was withdrawn. At the review round's code head `1e38eec` the F32 and Flex/BF16 gates reproduced that output again and the Metal `f16` runs fail as uncalibrated ([half-precision review record](acceptance/measurements/half-precision-review-20261018.json)). F16 is now refused: by the maintainer's decision (d) the crate refuses F16 loads of `gemma3` and `gemma3_text` checkpoints (block 5's post-MLP residual reaches `73,509.6`) with `CheckpointError::RangeHazard` unless `LoadOptions::range_hazards` is `RangeHazardPolicy::Accept`, the opt-in that evaluates the faithful, overflowing graph; an `f16` gate run now checks that refusal, and no acceptance record covers the refusal or the opt-in runs yet. |
 | gpt-oss | `gpt_oss` | Experimental: tiny golden; truncated gpt-oss-20b Flex and Metal F32 parity with exact MXFP4 decoding (repeated at `c2936fe`, [Mac validation record](acceptance/measurements/mac-validation-20261017.json)); full-model Flex/BF16 and Metal/F16 parity against a full F32 reference ([reference-precision follow-ups](acceptance/measurements/reference-precision-followups-20261016.json)). |
 | Qwen3-MoE | `qwen3_moe` | Experimental: strict real-weight loading and Metal smokes (passed again at `8a4404a`, [large-checkpoint replay](acceptance/measurements/large-checkpoint-replay-20261016.json), and with Q8/Q4 conversions byte-identical at `c2936fe`, [Mac validation record](acceptance/measurements/mac-validation-20261017.json)). |
 | DeepSeek-V2 | `deepseek_v2` | Experimental: strict real-weight loading and an internal Metal smoke; tiny goldens for V2 and V3-style routing. |
-| Nemotron-H | `nemotron_h` | Experimental: strict real-weight loading, an internal Metal smoke, and official base-model parity against the official F32 rows ([reference-precision follow-ups](acceptance/measurements/reference-precision-followups-20261016.json), [analysis](NEMOTRON_H_ACCEPTANCE.md#first-official-comparison)). |
+| Nemotron-H | `nemotron_h` | Experimental: strict real-weight loading and an internal Metal smoke. The official-precision gate against the official F32 rows passed at `9a9c730` ([reference-precision follow-ups](acceptance/measurements/reference-precision-followups-20261016.json), [analysis](NEMOTRON_H_ACCEPTANCE.md#first-official-comparison)) and fails its two-graph floor at cached decision 22 (`0.998558` against `0.998635`, from the once-rounded Mamba-2 convolution SiLU), measured at `f9f78b5` ([half-precision envelope record](acceptance/measurements/half-precision-envelope-20261018.json)) and at the current source inferred from the rows measured at `2cf83d7`, not rerun: an open finding. A four-graph official F16 envelope under which it passed at `2cf83d7`, only through the slack's rounding ([Nemotron-H envelope record](acceptance/measurements/nemotron-h-envelope-20261018.json)), was not adopted; the four-graph data is a printed diagnostic ([envelope decision record](acceptance/measurements/nemotron-h-envelope-decision-20261018.json)). |
 | GPT-2, GPT-NeoX / Pythia | concrete types only | Experimental stateless modules for interpretability studies. |
 | Custom modular models | `DecoderSpec`, `Seq2SeqSpec` | For experiments, not checkpoint compatibility. |
 
@@ -278,7 +281,19 @@ and the larger experimental checkpoints were replayed afterwards in the
 and [the required replays](RELEASE_GATES.md#replays-required-after-the-polish-cycle).
 FLAN-T5-small's gates passed again at `c2936fe` in the
 [Mac validation round](RELEASE_GATES.md#mac-validation-round-october-17),
-which did not rerun Qwen3.5-0.8B.
+which did not rerun Qwen3.5-0.8B. After the once-rounded half-precision SiLU
+change, Qwen3.5-0.8B's parity and memory gates passed again at `f9f78b5` in the
+[official-envelope round](RELEASE_GATES.md#official-envelope-round-october-18),
+and its benchmarks kept their tokens and every warm median. Their single-sample
+cold first token breaches the approved September 10 baseline, and so does the
+pre-change binary's: not attributable to this branch
+([review record](acceptance/measurements/half-precision-review-20261018.json)).
+On October 18 the maintainer re-baselined the Qwen3.5-0.8B benchmarks on the
+current host and made cold first token a diagnostic rather than a gate: the
+[re-baseline record](acceptance/measurements/qwen3.5-0.8b-metal-rebaseline-20261018.json),
+measured at `fa8426e` under the
+[campaign protocol](BENCHMARKS.md#qwen35-08b-benchmark-campaign-protocol), is
+the timing reference for later sources.
 
 ### Shared mechanisms
 
@@ -354,14 +369,24 @@ masks, cache transactions, SafeTensors headers, chat templates, and generation.
 | `kernel-tracing` | Test-only. Implies `metal` and Burn tracing so opt-in tests can observe CubeCL kernel launches. |
 | `attention-kernel-tracing` | Test-only. Implies `kernel-tracing` and enables CubeCL autotuning (`burn/autotune`) for the fused-attention parity gate; it is not a certified packed-Metal build. |
 
-A consumer in a sibling directory selecting only Metal and local tokenization
-can use (adjust the path for your checkout):
+### Adding the dependency
+
+The Cargo package is `burn-transformers`, because the crates.io name
+`transformers` belongs to another publisher; the library keeps the name
+`transformers`, so code imports `use transformers::…` as every example here
+does. The package is not on crates.io, so a consumer depends on the
+repository. One selecting only Metal and local tokenization can use:
 
 ```toml
 [dependencies]
 burn = { version = "=0.21.0", default-features = false, features = ["metal"] }
-transformers = { path = "../transformers", default-features = false, features = ["std", "metal", "tokenizers"] }
+burn-transformers = { git = "https://github.com/NoahIsCool/burn-transformers", default-features = false, features = ["std", "metal", "tokenizers"] }
 ```
+
+Add `rev = "<commit>"` to pin a revision, or replace `git = …` with
+`path = "../burn-transformers"` (adjusted to your checkout) to build a local
+clone. A manifest that should keep the dependency key `transformers` writes
+`transformers = { package = "burn-transformers", … }` instead.
 
 ## Local artifacts
 

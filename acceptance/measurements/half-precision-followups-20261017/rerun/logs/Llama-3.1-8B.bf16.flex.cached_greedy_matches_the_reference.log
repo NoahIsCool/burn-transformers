@@ -1,0 +1,62 @@
+== source 818160545802c1374f7607d26ce20cc86d2d758d dirty=0
+== checkout /Users/nover/repos/transformers-worktrees/tfm-half-followups2 (branch claude/tfm-half-followups2)
+== binary /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/llama_family_artifacts-693e11c29d0eb894 sha256 72a204e1c37262448b47e772e980a72cba33fc8ae1618af1385ad521009db738
+== flex/BF16 flex_cached_greedy_matches_the_reference
+== env TRANSFORMERS_LLAMA_FAMILY_DECODE_TRUTH_DIR=/Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b-f32-cpu-eager
+== env TRANSFORMERS_LLAMA_FAMILY_DIR=/Volumes/T9/models/meta-llama/Llama-3.1-8B
+== env TRANSFORMERS_LLAMA_FAMILY_DTYPE=bf16
+== env TRANSFORMERS_LLAMA_FAMILY_OFFICIAL_DIRS=/Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b-bf16-cpu-eager-7a50e44:/Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b-bf16-cpu-sdpa-7a50e44:/Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b-bf16-mps-eager-7a50e44:/Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b-bf16-mps-sdpa-7a50e44
+== env TRANSFORMERS_LLAMA_FAMILY_REFERENCE_DIR=/Volumes/T9/transformers-references/Llama-3.1-8B-d04e592b
+== cwd /Users/nover/repos/transformers-worktrees/tfm-half-followups2
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/llama_family_artifacts-693e11c29d0eb894 --ignored --exact --nocapture --test-threads 1 flex_cached_greedy_matches_the_reference
+== start 2026-10-18T05:13:11+00:00 load 4.40 3.75 3.16 free 90%
+
+running 1 test
+test flex_cached_greedy_matches_the_reference ... BF16 bounds of prompt 0: max 2.1603655815124512e-1, mean 2.5301299734788268e-2 (1.5 and 1.3 times the official envelope 1.4402437210083008e-1, 1.9462538257529437e-2)
+BF16 bounds of prompt 1: max 3.1826046109199524e-1, mean 2.8753225198114015e-2 (1.5 and 1.3 times the official envelope 2.1217364072799683e-1, 2.211786553701078e-2)
+BF16 bounds of prompt 2: max 2.764549255371094e-1, mean 3.0192502750317814e-2 (1.5 and 1.3 times the official envelope 1.8430328369140625e-1, 2.3225002115629088e-2)
+BF16 bounds of decode rows: max 3.4666943550109863e-1, mean 2.370211167493396e-2 (1.5 and 1.3 times the official envelope 2.3111295700073242e-1, 1.8232393596103045e-2)
+BF16 bounds of prompt 1 decoded rows: max 3.1826046109199524e-1, mean 2.8753225198114015e-2 (1.5 and 1.3 times the official envelope 2.1217364072799683e-1, 2.211786553701078e-2)
+F32 matrix products use F32 inputs; the BF16 run is judged by the official envelope, greedy steps at 3.4666944e-1
+cached prefill: max |Δ| = 9.23929214477539e-2 to the reference (bound 2.1603655815124512e-1)
+cached prefill: max |Δ| = 0e0 to the stateless pass (provisional tolerance 5e-1)
+greedy: greedy step 0: margin 2.3562431e-1 is a tie at tolerance 3.4666944e-1; skipped
+greedy: greedy step 2: margin 4.1600418e-1 is a tie at tolerance 3.4666944e-1; skipped
+greedy: greedy step 3: margin 2.7713203e-1 is a tie at tolerance 3.4666944e-1; skipped
+greedy: greedy step 7: margin 6.734047e-1 is a tie at tolerance 3.4666944e-1; skipped
+greedy: greedy step 12: margin 2.9278755e-1 is a tie at tolerance 3.4666944e-1; skipped
+greedy: greedy step 13: margin 9.292603e-3 is a tie at tolerance 3.4666944e-1; skipped
+greedy: greedy step 15: margin 5.621815e-1 is a tie at tolerance 3.4666944e-1; skipped
+greedy: greedy step 17: margin 3.5655594e-1 is a tie at tolerance 3.4666944e-1; skipped
+greedy: greedy step 20: margin 4.4306564e-1 is a tie at tolerance 3.4666944e-1; skipped
+greedy: greedy step 24: margin 2.736721e-1 is a tie at tolerance 3.4666944e-1; skipped
+greedy: greedy step 28: margin 6.208954e-1 is a tie at tolerance 3.4666944e-1; skipped
+greedy: 21 of 32 greedy tokens decisive and matching (smallest decisive margin 7.588291e-1), 11 ties skipped
+cached decode (cached rows): 32 rows from position 6, max |Δ| = 2.0168522000312805e-1 at step 30 (bound 3.4666943550109863e-1), mean |Δ| = 1.715259660217793e-2 (bound 2.370211167493396e-2) to the decode truth
+cached decode (stateless rows): 32 rows from position 6, max |Δ| = 1.927475929260254e-1 at step 30 (bound 3.4666943550109863e-1), mean |Δ| = 1.7298184608465206e-2 (bound 2.370211167493396e-2) to the decode truth
+cached decode: cached-versus-stateless gap max |Δ| = 1.5625e-1 at step 4 (diagnostic only; at most 6.933388710021973e-1 through the decode truth)
+prompt 1 decoded after a 3-token prefill: 14 tokens, max |Δ| = 2.3402047157287598e-1 at position 13 (bound 3.1826046109199524e-1), mean |Δ| = 2.126591548677117e-2 (bound 2.8753225198114015e-2)
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 33 filtered out; finished in 55.47s
+
+       55.49 real       129.54 user         7.81 sys
+         20968062976  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             1415697  page reclaims
+                   0  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   0  voluntary context switches
+              276044  involuntary context switches
+       1022692459400  instructions retired
+        476799822633  cycles elapsed
+         20968176856  peak memory footprint
+== exit=0 wall=56.0s min_free_pct=90 max_swap_growth_mib=0 swapin_mib=5 pressured_swapin_mib=0
+== source after run 818160545802c1374f7607d26ce20cc86d2d758d dirty=0

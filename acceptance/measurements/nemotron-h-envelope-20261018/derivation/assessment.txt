@@ -1,0 +1,82 @@
+Nemotron-H official F16 envelope: assessment of the derivation, before any Burn row
+==================================================================================
+
+Written 2026-10-18T09:30:46Z, after derivation/envelope.txt (derived 2026-10-18T09:29:39Z
+at b4e2bdb by the method registered at 8ad5fb9) and before any Burn row of
+this round was computed. Every figure below is from official graphs only.
+
+Feasibility (step 1)
+--------------------
+- All four registered graphs were produced; leave-one-out runs over four.
+- CPU/SDPA: 16 GiB resident budget with disk offload, as the precision tool
+  ran CPU/eager; 497 s wall, 22.1 GB peak footprint, no swap growth.
+- MPS/SDPA: a resident MPS load (attempt 1) grew macOS swap by 12.5 GiB in
+  80 s and was stopped by the watchdog; the 22.6 GiB system volume could not
+  absorb the swap the oracle's own generator guards against with a 40 GiB
+  preflight. Attempt 1 also showed that killing /usr/bin/time orphaned the
+  generators (stopped by hand within about a minute) and left the system
+  volume at 9.9 GiB until the swap files shrank. The graphs then ran with
+  the same 16 GiB budget on MPS: blocks offloaded to disk are loaded onto MPS
+  for their forward (offload_execution_devices ['mps']); the tiny official
+  model proves offload bitwise neutral on MPS as on the CPU. 602 s wall,
+  35.7 GB peak, no swap growth. A read-only loop kept the offload files in
+  the page cache during this run (bytes unchanged; speed only).
+- A control repeated the oracle's MPS/eager graph with this tool and the
+  same budget (2659 s; most of it before the page-cache loop started). It is
+  NOT bitwise equal to the oracle: cosine to the oracle at least 0.999999588
+  (prompt), 0.999686218 (teacher, decision 28), 0.999869702 (cached,
+  decision 8). The oracle ran on macOS 15.7.9 (its manifest) and resident;
+  this round runs on macOS 27.0.1 with offload. Which of the two (or MPS
+  run-to-run variation) causes the difference is not separated: the tiny
+  model shows offload bitwise neutral on MPS, which points at the OS, but
+  that is inferred, not measured on the real model.
+
+Derivation (step 2), official graphs only
+-----------------------------------------
+                 worst-row delta (cosine, decision)        LOO ratio
+  prompt   cpu-eager 4.014610e-02 (0.999194145)            1.0002
+           cpu-sdpa  4.000650e-02 (0.999199740)            0.9965
+           mps-eager 4.013720e-02 (0.999194502)            0.9998
+           mps-sdpa  3.996200e-02 (0.999201519)            0.9954
+  teacher  cpu-eager 5.230607e-02 (0.998632038, 27)        0.4951
+           cpu-sdpa  1.056400e-01 (0.994420097, 18)        1.0042
+           mps-eager 1.052006e-01 (0.994466421, 18)        0.9958
+           mps-sdpa  1.048258e-01 (0.994505771, 18)        0.9923
+  cached   cpu-eager 4.249860e-02 (0.999096934, 26)        0.8097
+           cpu-sdpa  4.000650e-02 (0.999199740, 0)         0.7622
+           mps-eager 5.224850e-02 (0.998635047, 22)        0.9954
+           mps-sdpa  5.248829e-02 (0.998622490, 22)        1.0046
+
+  slack (round_up of the largest ratio): prompt 1.1, teacher 1.1, cached 1.1
+  bound s*E / cosine floor:
+    prompt  4.416071e-02 / 0.999024916   (previous floor 0.999194145)
+    teacher 1.162040e-01 / 0.993248318   (previous floor 0.994466421)
+    cached  5.773712e-02 / 0.998333213   (previous floor 0.998635047)
+
+Assessment
+----------
+Sound under the registered method: four authenticated official graphs, no
+Burn data, no free parameter. Its limits, which the record must state:
+
+1. Every largest ratio is between 1.0002 and 1.0046, so every slack is the
+   rounding's 1.1, not a measured spread. The worst rows coincide across
+   graphs (teacher decision 18 in three graphs, cached decision 22 in both
+   MPS graphs), so the four graphs are not four independent draws of the
+   worst row: leave-one-out over coincident spikes says the graphs agree,
+   and the 10% comes from rounding up to two significant digits.
+2. The CPU/SDPA graph shows the teacher-decision-18 spike that CPU/eager
+   lacks (0.994420 against 0.998632): the spike is attention-path, not
+   device, specific. CPU/SDPA's mean teacher deviation is 1.59 times the
+   largest of the other three graphs' (reported, not gated).
+3. The control's cached worst row (0.998595604, delta 5.299803e-02) lies
+   outside the four-graph envelope by 1.0097 of E and inside the bound;
+   with it replacing or added to the MPS/eager graph, the cached floor
+   would be 0.998300681. A repeat of an official graph moves the cached
+   envelope by about 1%, as much as the spread between graphs.
+4. Per path the slack rests on four ratios; pooled over the three paths,
+   twelve. The envelope round's slacks rest on 80 to 128 ratios.
+
+Decision: implement the registered rule with the derived constants
+(slacks 1.1, 1.1, 1.1; envelope computed in the test from the four
+graphs), as the derivation is sound by the method's own criteria; report
+limits 1-4 with the result, whatever it is. The control is not adopted.

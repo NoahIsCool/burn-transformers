@@ -1,0 +1,939 @@
+{
+ "protocol": "BENCHMARKS.md: Qwen3.5-0.8B benchmark campaign protocol",
+ "script_sha256": "ea78894d0112a73b5d59cd3230e4e8fb33ab7c2332a08180439c4a85b88101b1",
+ "rounds": 8,
+ "host_identity": {
+  "hw_model": "Mac15,11",
+  "cpu": "Apple M3 Max",
+  "performance_cores": 10,
+  "efficiency_cores": 4,
+  "memory_bytes": 103079215104,
+  "os": "macOS 27.0.1",
+  "os_build": "26A434",
+  "kernel": "Darwin Kernel Version 27.0.0: Tue Aug 11 21:05:42 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T6031"
+ },
+ "accelerator": "Apple M3 Max GPU (30 cores, Metal 4)",
+ "binaries": [
+  {
+   "label": "head",
+   "source": "fa8426e5dc8cbcb269c29e211b119ea0acd61054 (worktree /Users/nover/repos/transformers-worktrees/tfm-rebaseline, src tree ea9deb1a, cargo +1.92.0)",
+   "binary": "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-head/release/deps/qwen35_benchmarks-ffcc519af7a3b786",
+   "sha256": "cb7bf1b53d045b53a8fadb8cc032c732fc8d40f57ddc347cc8500f1eb0723f99"
+  },
+  {
+   "label": "september",
+   "source": "c70057e82510e085bc057910a99886c1ce551567 (temporary detached worktree /Users/nover/repos/transformers-worktrees/tfm-rebaseline-september-c70057e, src tree 097e0f01 as in the September 10 series, cargo +1.92.0)",
+   "binary": "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-september/release/deps/qwen35_benchmarks-22bed2ca193cb209",
+   "sha256": "e3f94714fa16f572d9c2fefdbb92aa4a34395300c368a9c891d55b9b63ad2eee"
+  }
+ ],
+ "constants": {
+  "cooldown_seconds": 120,
+  "load_threshold_1m": 4.0,
+  "load_poll_seconds": 15,
+  "maximum_load_wait_seconds": 3600,
+  "sample_timeout_seconds": 1500,
+  "steady_window_rounds": 6,
+  "steady_drift": 0.025,
+  "alert": 0.05,
+  "fail": 0.1
+ },
+ "samples": [
+  {
+   "index": 0,
+   "round": 1,
+   "position": 1,
+   "label": "head",
+   "benchmark": "baseline",
+   "test": "qwen::qwen35_metal_baseline_benchmark",
+   "source": "fa8426e5dc8cbcb269c29e211b119ea0acd61054 (worktree /Users/nover/repos/transformers-worktrees/tfm-rebaseline, src tree ea9deb1a, cargo +1.92.0)",
+   "binary": "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-head/release/deps/qwen35_benchmarks-ffcc519af7a3b786",
+   "sha256": "cb7bf1b53d045b53a8fadb8cc032c732fc8d40f57ddc347cc8500f1eb0723f99",
+   "argv": [
+    "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-head/release/deps/qwen35_benchmarks-ffcc519af7a3b786",
+    "--ignored",
+    "--exact",
+    "--nocapture",
+    "--test-threads",
+    "1",
+    "qwen::qwen35_metal_baseline_benchmark"
+   ],
+   "artifacts": {
+    "TRANSFORMERS_QWEN35_DIR": "/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17",
+    "TRANSFORMERS_QWEN35_REFERENCE_DIR": "/Volumes/bag of holding/models/transformers-acceptance"
+   },
+   "report": "bench/r01.p1.head.baseline.json",
+   "environment": "env/r01.p1.head.baseline.environment.json",
+   "log": "logs/r01.p1.head.baseline.log",
+   "host": "host/r01.p1.head.baseline.host.json"
+  },
+  {
+   "index": 1,
+   "round": 1,
+   "position": 2,
+   "label": "september",
+   "benchmark": "baseline",
+   "test": "qwen::qwen35_metal_baseline_benchmark",
+   "source": "c70057e82510e085bc057910a99886c1ce551567 (temporary detached worktree /Users/nover/repos/transformers-worktrees/tfm-rebaseline-september-c70057e, src tree 097e0f01 as in the September 10 series, cargo +1.92.0)",
+   "binary": "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-september/release/deps/qwen35_benchmarks-22bed2ca193cb209",
+   "sha256": "e3f94714fa16f572d9c2fefdbb92aa4a34395300c368a9c891d55b9b63ad2eee",
+   "argv": [
+    "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-september/release/deps/qwen35_benchmarks-22bed2ca193cb209",
+    "--ignored",
+    "--exact",
+    "--nocapture",
+    "--test-threads",
+    "1",
+    "qwen::qwen35_metal_baseline_benchmark"
+   ],
+   "artifacts": {
+    "TRANSFORMERS_QWEN35_DIR": "/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17",
+    "TRANSFORMERS_QWEN35_REFERENCE_DIR": "/Volumes/bag of holding/models/transformers-acceptance"
+   },
+   "report": "bench/r01.p2.september.baseline.json",
+   "environment": "env/r01.p2.september.baseline.environment.json",
+   "log": "logs/r01.p2.september.baseline.log",
+   "host": "host/r01.p2.september.baseline.host.json"
+  },
+  {
+   "index": 2,
+   "round": 1,
+   "position": 3,
+   "label": "head",
+   "benchmark": "public",
+   "test": "qwen::qwen35_metal_public_causal_greedy_benchmark",
+   "source": "fa8426e5dc8cbcb269c29e211b119ea0acd61054 (worktree /Users/nover/repos/transformers-worktrees/tfm-rebaseline, src tree ea9deb1a, cargo +1.92.0)",
+   "binary": "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-head/release/deps/qwen35_benchmarks-ffcc519af7a3b786",
+   "sha256": "cb7bf1b53d045b53a8fadb8cc032c732fc8d40f57ddc347cc8500f1eb0723f99",
+   "argv": [
+    "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-head/release/deps/qwen35_benchmarks-ffcc519af7a3b786",
+    "--ignored",
+    "--exact",
+    "--nocapture",
+    "--test-threads",
+    "1",
+    "qwen::qwen35_metal_public_causal_greedy_benchmark"
+   ],
+   "artifacts": {
+    "TRANSFORMERS_QWEN35_DIR": "/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17",
+    "TRANSFORMERS_QWEN35_REFERENCE_DIR": "/Volumes/bag of holding/models/transformers-acceptance"
+   },
+   "report": "bench/r01.p3.head.public.json",
+   "environment": "env/r01.p3.head.public.environment.json",
+   "log": "logs/r01.p3.head.public.log",
+   "host": "host/r01.p3.head.public.host.json"
+  },
+  {
+   "index": 3,
+   "round": 1,
+   "position": 4,
+   "label": "september",
+   "benchmark": "public",
+   "test": "qwen::qwen35_metal_public_causal_greedy_benchmark",
+   "source": "c70057e82510e085bc057910a99886c1ce551567 (temporary detached worktree /Users/nover/repos/transformers-worktrees/tfm-rebaseline-september-c70057e, src tree 097e0f01 as in the September 10 series, cargo +1.92.0)",
+   "binary": "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-september/release/deps/qwen35_benchmarks-22bed2ca193cb209",
+   "sha256": "e3f94714fa16f572d9c2fefdbb92aa4a34395300c368a9c891d55b9b63ad2eee",
+   "argv": [
+    "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-september/release/deps/qwen35_benchmarks-22bed2ca193cb209",
+    "--ignored",
+    "--exact",
+    "--nocapture",
+    "--test-threads",
+    "1",
+    "qwen::qwen35_metal_public_causal_greedy_benchmark"
+   ],
+   "artifacts": {
+    "TRANSFORMERS_QWEN35_DIR": "/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17",
+    "TRANSFORMERS_QWEN35_REFERENCE_DIR": "/Volumes/bag of holding/models/transformers-acceptance"
+   },
+   "report": "bench/r01.p4.september.public.json",
+   "environment": "env/r01.p4.september.public.environment.json",
+   "log": "logs/r01.p4.september.public.log",
+   "host": "host/r01.p4.september.public.host.json"
+  },
+  {
+   "index": 4,
+   "round": 2,
+   "position": 1,
+   "label": "september",
+   "benchmark": "public",
+   "test": "qwen::qwen35_metal_public_causal_greedy_benchmark",
+   "source": "c70057e82510e085bc057910a99886c1ce551567 (temporary detached worktree /Users/nover/repos/transformers-worktrees/tfm-rebaseline-september-c70057e, src tree 097e0f01 as in the September 10 series, cargo +1.92.0)",
+   "binary": "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-september/release/deps/qwen35_benchmarks-22bed2ca193cb209",
+   "sha256": "e3f94714fa16f572d9c2fefdbb92aa4a34395300c368a9c891d55b9b63ad2eee",
+   "argv": [
+    "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-september/release/deps/qwen35_benchmarks-22bed2ca193cb209",
+    "--ignored",
+    "--exact",
+    "--nocapture",
+    "--test-threads",
+    "1",
+    "qwen::qwen35_metal_public_causal_greedy_benchmark"
+   ],
+   "artifacts": {
+    "TRANSFORMERS_QWEN35_DIR": "/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17",
+    "TRANSFORMERS_QWEN35_REFERENCE_DIR": "/Volumes/bag of holding/models/transformers-acceptance"
+   },
+   "report": "bench/r02.p1.september.public.json",
+   "environment": "env/r02.p1.september.public.environment.json",
+   "log": "logs/r02.p1.september.public.log",
+   "host": "host/r02.p1.september.public.host.json"
+  },
+  {
+   "index": 5,
+   "round": 2,
+   "position": 2,
+   "label": "head",
+   "benchmark": "public",
+   "test": "qwen::qwen35_metal_public_causal_greedy_benchmark",
+   "source": "fa8426e5dc8cbcb269c29e211b119ea0acd61054 (worktree /Users/nover/repos/transformers-worktrees/tfm-rebaseline, src tree ea9deb1a, cargo +1.92.0)",
+   "binary": "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-head/release/deps/qwen35_benchmarks-ffcc519af7a3b786",
+   "sha256": "cb7bf1b53d045b53a8fadb8cc032c732fc8d40f57ddc347cc8500f1eb0723f99",
+   "argv": [
+    "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-head/release/deps/qwen35_benchmarks-ffcc519af7a3b786",
+    "--ignored",
+    "--exact",
+    "--nocapture",
+    "--test-threads",
+    "1",
+    "qwen::qwen35_metal_public_causal_greedy_benchmark"
+   ],
+   "artifacts": {
+    "TRANSFORMERS_QWEN35_DIR": "/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17",
+    "TRANSFORMERS_QWEN35_REFERENCE_DIR": "/Volumes/bag of holding/models/transformers-acceptance"
+   },
+   "report": "bench/r02.p2.head.public.json",
+   "environment": "env/r02.p2.head.public.environment.json",
+   "log": "logs/r02.p2.head.public.log",
+   "host": "host/r02.p2.head.public.host.json"
+  },
+  {
+   "index": 6,
+   "round": 2,
+   "position": 3,
+   "label": "september",
+   "benchmark": "baseline",
+   "test": "qwen::qwen35_metal_baseline_benchmark",
+   "source": "c70057e82510e085bc057910a99886c1ce551567 (temporary detached worktree /Users/nover/repos/transformers-worktrees/tfm-rebaseline-september-c70057e, src tree 097e0f01 as in the September 10 series, cargo +1.92.0)",
+   "binary": "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-september/release/deps/qwen35_benchmarks-22bed2ca193cb209",
+   "sha256": "e3f94714fa16f572d9c2fefdbb92aa4a34395300c368a9c891d55b9b63ad2eee",
+   "argv": [
+    "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-september/release/deps/qwen35_benchmarks-22bed2ca193cb209",
+    "--ignored",
+    "--exact",
+    "--nocapture",
+    "--test-threads",
+    "1",
+    "qwen::qwen35_metal_baseline_benchmark"
+   ],
+   "artifacts": {
+    "TRANSFORMERS_QWEN35_DIR": "/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17",
+    "TRANSFORMERS_QWEN35_REFERENCE_DIR": "/Volumes/bag of holding/models/transformers-acceptance"
+   },
+   "report": "bench/r02.p3.september.baseline.json",
+   "environment": "env/r02.p3.september.baseline.environment.json",
+   "log": "logs/r02.p3.september.baseline.log",
+   "host": "host/r02.p3.september.baseline.host.json"
+  },
+  {
+   "index": 7,
+   "round": 2,
+   "position": 4,
+   "label": "head",
+   "benchmark": "baseline",
+   "test": "qwen::qwen35_metal_baseline_benchmark",
+   "source": "fa8426e5dc8cbcb269c29e211b119ea0acd61054 (worktree /Users/nover/repos/transformers-worktrees/tfm-rebaseline, src tree ea9deb1a, cargo +1.92.0)",
+   "binary": "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-head/release/deps/qwen35_benchmarks-ffcc519af7a3b786",
+   "sha256": "cb7bf1b53d045b53a8fadb8cc032c732fc8d40f57ddc347cc8500f1eb0723f99",
+   "argv": [
+    "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-head/release/deps/qwen35_benchmarks-ffcc519af7a3b786",
+    "--ignored",
+    "--exact",
+    "--nocapture",
+    "--test-threads",
+    "1",
+    "qwen::qwen35_metal_baseline_benchmark"
+   ],
+   "artifacts": {
+    "TRANSFORMERS_QWEN35_DIR": "/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17",
+    "TRANSFORMERS_QWEN35_REFERENCE_DIR": "/Volumes/bag of holding/models/transformers-acceptance"
+   },
+   "report": "bench/r02.p4.head.baseline.json",
+   "environment": "env/r02.p4.head.baseline.environment.json",
+   "log": "logs/r02.p4.head.baseline.log",
+   "host": "host/r02.p4.head.baseline.host.json"
+  },
+  {
+   "index": 8,
+   "round": 3,
+   "position": 1,
+   "label": "head",
+   "benchmark": "public",
+   "test": "qwen::qwen35_metal_public_causal_greedy_benchmark",
+   "source": "fa8426e5dc8cbcb269c29e211b119ea0acd61054 (worktree /Users/nover/repos/transformers-worktrees/tfm-rebaseline, src tree ea9deb1a, cargo +1.92.0)",
+   "binary": "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-head/release/deps/qwen35_benchmarks-ffcc519af7a3b786",
+   "sha256": "cb7bf1b53d045b53a8fadb8cc032c732fc8d40f57ddc347cc8500f1eb0723f99",
+   "argv": [
+    "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-head/release/deps/qwen35_benchmarks-ffcc519af7a3b786",
+    "--ignored",
+    "--exact",
+    "--nocapture",
+    "--test-threads",
+    "1",
+    "qwen::qwen35_metal_public_causal_greedy_benchmark"
+   ],
+   "artifacts": {
+    "TRANSFORMERS_QWEN35_DIR": "/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17",
+    "TRANSFORMERS_QWEN35_REFERENCE_DIR": "/Volumes/bag of holding/models/transformers-acceptance"
+   },
+   "report": "bench/r03.p1.head.public.json",
+   "environment": "env/r03.p1.head.public.environment.json",
+   "log": "logs/r03.p1.head.public.log",
+   "host": "host/r03.p1.head.public.host.json"
+  },
+  {
+   "index": 9,
+   "round": 3,
+   "position": 2,
+   "label": "september",
+   "benchmark": "public",
+   "test": "qwen::qwen35_metal_public_causal_greedy_benchmark",
+   "source": "c70057e82510e085bc057910a99886c1ce551567 (temporary detached worktree /Users/nover/repos/transformers-worktrees/tfm-rebaseline-september-c70057e, src tree 097e0f01 as in the September 10 series, cargo +1.92.0)",
+   "binary": "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-september/release/deps/qwen35_benchmarks-22bed2ca193cb209",
+   "sha256": "e3f94714fa16f572d9c2fefdbb92aa4a34395300c368a9c891d55b9b63ad2eee",
+   "argv": [
+    "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-september/release/deps/qwen35_benchmarks-22bed2ca193cb209",
+    "--ignored",
+    "--exact",
+    "--nocapture",
+    "--test-threads",
+    "1",
+    "qwen::qwen35_metal_public_causal_greedy_benchmark"
+   ],
+   "artifacts": {
+    "TRANSFORMERS_QWEN35_DIR": "/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17",
+    "TRANSFORMERS_QWEN35_REFERENCE_DIR": "/Volumes/bag of holding/models/transformers-acceptance"
+   },
+   "report": "bench/r03.p2.september.public.json",
+   "environment": "env/r03.p2.september.public.environment.json",
+   "log": "logs/r03.p2.september.public.log",
+   "host": "host/r03.p2.september.public.host.json"
+  },
+  {
+   "index": 10,
+   "round": 3,
+   "position": 3,
+   "label": "head",
+   "benchmark": "baseline",
+   "test": "qwen::qwen35_metal_baseline_benchmark",
+   "source": "fa8426e5dc8cbcb269c29e211b119ea0acd61054 (worktree /Users/nover/repos/transformers-worktrees/tfm-rebaseline, src tree ea9deb1a, cargo +1.92.0)",
+   "binary": "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-head/release/deps/qwen35_benchmarks-ffcc519af7a3b786",
+   "sha256": "cb7bf1b53d045b53a8fadb8cc032c732fc8d40f57ddc347cc8500f1eb0723f99",
+   "argv": [
+    "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-head/release/deps/qwen35_benchmarks-ffcc519af7a3b786",
+    "--ignored",
+    "--exact",
+    "--nocapture",
+    "--test-threads",
+    "1",
+    "qwen::qwen35_metal_baseline_benchmark"
+   ],
+   "artifacts": {
+    "TRANSFORMERS_QWEN35_DIR": "/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17",
+    "TRANSFORMERS_QWEN35_REFERENCE_DIR": "/Volumes/bag of holding/models/transformers-acceptance"
+   },
+   "report": "bench/r03.p3.head.baseline.json",
+   "environment": "env/r03.p3.head.baseline.environment.json",
+   "log": "logs/r03.p3.head.baseline.log",
+   "host": "host/r03.p3.head.baseline.host.json"
+  },
+  {
+   "index": 11,
+   "round": 3,
+   "position": 4,
+   "label": "september",
+   "benchmark": "baseline",
+   "test": "qwen::qwen35_metal_baseline_benchmark",
+   "source": "c70057e82510e085bc057910a99886c1ce551567 (temporary detached worktree /Users/nover/repos/transformers-worktrees/tfm-rebaseline-september-c70057e, src tree 097e0f01 as in the September 10 series, cargo +1.92.0)",
+   "binary": "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-september/release/deps/qwen35_benchmarks-22bed2ca193cb209",
+   "sha256": "e3f94714fa16f572d9c2fefdbb92aa4a34395300c368a9c891d55b9b63ad2eee",
+   "argv": [
+    "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-september/release/deps/qwen35_benchmarks-22bed2ca193cb209",
+    "--ignored",
+    "--exact",
+    "--nocapture",
+    "--test-threads",
+    "1",
+    "qwen::qwen35_metal_baseline_benchmark"
+   ],
+   "artifacts": {
+    "TRANSFORMERS_QWEN35_DIR": "/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17",
+    "TRANSFORMERS_QWEN35_REFERENCE_DIR": "/Volumes/bag of holding/models/transformers-acceptance"
+   },
+   "report": "bench/r03.p4.september.baseline.json",
+   "environment": "env/r03.p4.september.baseline.environment.json",
+   "log": "logs/r03.p4.september.baseline.log",
+   "host": "host/r03.p4.september.baseline.host.json"
+  },
+  {
+   "index": 12,
+   "round": 4,
+   "position": 1,
+   "label": "september",
+   "benchmark": "baseline",
+   "test": "qwen::qwen35_metal_baseline_benchmark",
+   "source": "c70057e82510e085bc057910a99886c1ce551567 (temporary detached worktree /Users/nover/repos/transformers-worktrees/tfm-rebaseline-september-c70057e, src tree 097e0f01 as in the September 10 series, cargo +1.92.0)",
+   "binary": "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-september/release/deps/qwen35_benchmarks-22bed2ca193cb209",
+   "sha256": "e3f94714fa16f572d9c2fefdbb92aa4a34395300c368a9c891d55b9b63ad2eee",
+   "argv": [
+    "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-september/release/deps/qwen35_benchmarks-22bed2ca193cb209",
+    "--ignored",
+    "--exact",
+    "--nocapture",
+    "--test-threads",
+    "1",
+    "qwen::qwen35_metal_baseline_benchmark"
+   ],
+   "artifacts": {
+    "TRANSFORMERS_QWEN35_DIR": "/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17",
+    "TRANSFORMERS_QWEN35_REFERENCE_DIR": "/Volumes/bag of holding/models/transformers-acceptance"
+   },
+   "report": "bench/r04.p1.september.baseline.json",
+   "environment": "env/r04.p1.september.baseline.environment.json",
+   "log": "logs/r04.p1.september.baseline.log",
+   "host": "host/r04.p1.september.baseline.host.json"
+  },
+  {
+   "index": 13,
+   "round": 4,
+   "position": 2,
+   "label": "head",
+   "benchmark": "baseline",
+   "test": "qwen::qwen35_metal_baseline_benchmark",
+   "source": "fa8426e5dc8cbcb269c29e211b119ea0acd61054 (worktree /Users/nover/repos/transformers-worktrees/tfm-rebaseline, src tree ea9deb1a, cargo +1.92.0)",
+   "binary": "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-head/release/deps/qwen35_benchmarks-ffcc519af7a3b786",
+   "sha256": "cb7bf1b53d045b53a8fadb8cc032c732fc8d40f57ddc347cc8500f1eb0723f99",
+   "argv": [
+    "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-head/release/deps/qwen35_benchmarks-ffcc519af7a3b786",
+    "--ignored",
+    "--exact",
+    "--nocapture",
+    "--test-threads",
+    "1",
+    "qwen::qwen35_metal_baseline_benchmark"
+   ],
+   "artifacts": {
+    "TRANSFORMERS_QWEN35_DIR": "/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17",
+    "TRANSFORMERS_QWEN35_REFERENCE_DIR": "/Volumes/bag of holding/models/transformers-acceptance"
+   },
+   "report": "bench/r04.p2.head.baseline.json",
+   "environment": "env/r04.p2.head.baseline.environment.json",
+   "log": "logs/r04.p2.head.baseline.log",
+   "host": "host/r04.p2.head.baseline.host.json"
+  },
+  {
+   "index": 14,
+   "round": 4,
+   "position": 3,
+   "label": "september",
+   "benchmark": "public",
+   "test": "qwen::qwen35_metal_public_causal_greedy_benchmark",
+   "source": "c70057e82510e085bc057910a99886c1ce551567 (temporary detached worktree /Users/nover/repos/transformers-worktrees/tfm-rebaseline-september-c70057e, src tree 097e0f01 as in the September 10 series, cargo +1.92.0)",
+   "binary": "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-september/release/deps/qwen35_benchmarks-22bed2ca193cb209",
+   "sha256": "e3f94714fa16f572d9c2fefdbb92aa4a34395300c368a9c891d55b9b63ad2eee",
+   "argv": [
+    "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-september/release/deps/qwen35_benchmarks-22bed2ca193cb209",
+    "--ignored",
+    "--exact",
+    "--nocapture",
+    "--test-threads",
+    "1",
+    "qwen::qwen35_metal_public_causal_greedy_benchmark"
+   ],
+   "artifacts": {
+    "TRANSFORMERS_QWEN35_DIR": "/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17",
+    "TRANSFORMERS_QWEN35_REFERENCE_DIR": "/Volumes/bag of holding/models/transformers-acceptance"
+   },
+   "report": "bench/r04.p3.september.public.json",
+   "environment": "env/r04.p3.september.public.environment.json",
+   "log": "logs/r04.p3.september.public.log",
+   "host": "host/r04.p3.september.public.host.json"
+  },
+  {
+   "index": 15,
+   "round": 4,
+   "position": 4,
+   "label": "head",
+   "benchmark": "public",
+   "test": "qwen::qwen35_metal_public_causal_greedy_benchmark",
+   "source": "fa8426e5dc8cbcb269c29e211b119ea0acd61054 (worktree /Users/nover/repos/transformers-worktrees/tfm-rebaseline, src tree ea9deb1a, cargo +1.92.0)",
+   "binary": "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-head/release/deps/qwen35_benchmarks-ffcc519af7a3b786",
+   "sha256": "cb7bf1b53d045b53a8fadb8cc032c732fc8d40f57ddc347cc8500f1eb0723f99",
+   "argv": [
+    "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-head/release/deps/qwen35_benchmarks-ffcc519af7a3b786",
+    "--ignored",
+    "--exact",
+    "--nocapture",
+    "--test-threads",
+    "1",
+    "qwen::qwen35_metal_public_causal_greedy_benchmark"
+   ],
+   "artifacts": {
+    "TRANSFORMERS_QWEN35_DIR": "/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17",
+    "TRANSFORMERS_QWEN35_REFERENCE_DIR": "/Volumes/bag of holding/models/transformers-acceptance"
+   },
+   "report": "bench/r04.p4.head.public.json",
+   "environment": "env/r04.p4.head.public.environment.json",
+   "log": "logs/r04.p4.head.public.log",
+   "host": "host/r04.p4.head.public.host.json"
+  },
+  {
+   "index": 16,
+   "round": 5,
+   "position": 1,
+   "label": "head",
+   "benchmark": "baseline",
+   "test": "qwen::qwen35_metal_baseline_benchmark",
+   "source": "fa8426e5dc8cbcb269c29e211b119ea0acd61054 (worktree /Users/nover/repos/transformers-worktrees/tfm-rebaseline, src tree ea9deb1a, cargo +1.92.0)",
+   "binary": "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-head/release/deps/qwen35_benchmarks-ffcc519af7a3b786",
+   "sha256": "cb7bf1b53d045b53a8fadb8cc032c732fc8d40f57ddc347cc8500f1eb0723f99",
+   "argv": [
+    "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-head/release/deps/qwen35_benchmarks-ffcc519af7a3b786",
+    "--ignored",
+    "--exact",
+    "--nocapture",
+    "--test-threads",
+    "1",
+    "qwen::qwen35_metal_baseline_benchmark"
+   ],
+   "artifacts": {
+    "TRANSFORMERS_QWEN35_DIR": "/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17",
+    "TRANSFORMERS_QWEN35_REFERENCE_DIR": "/Volumes/bag of holding/models/transformers-acceptance"
+   },
+   "report": "bench/r05.p1.head.baseline.json",
+   "environment": "env/r05.p1.head.baseline.environment.json",
+   "log": "logs/r05.p1.head.baseline.log",
+   "host": "host/r05.p1.head.baseline.host.json"
+  },
+  {
+   "index": 17,
+   "round": 5,
+   "position": 2,
+   "label": "september",
+   "benchmark": "public",
+   "test": "qwen::qwen35_metal_public_causal_greedy_benchmark",
+   "source": "c70057e82510e085bc057910a99886c1ce551567 (temporary detached worktree /Users/nover/repos/transformers-worktrees/tfm-rebaseline-september-c70057e, src tree 097e0f01 as in the September 10 series, cargo +1.92.0)",
+   "binary": "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-september/release/deps/qwen35_benchmarks-22bed2ca193cb209",
+   "sha256": "e3f94714fa16f572d9c2fefdbb92aa4a34395300c368a9c891d55b9b63ad2eee",
+   "argv": [
+    "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-september/release/deps/qwen35_benchmarks-22bed2ca193cb209",
+    "--ignored",
+    "--exact",
+    "--nocapture",
+    "--test-threads",
+    "1",
+    "qwen::qwen35_metal_public_causal_greedy_benchmark"
+   ],
+   "artifacts": {
+    "TRANSFORMERS_QWEN35_DIR": "/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17",
+    "TRANSFORMERS_QWEN35_REFERENCE_DIR": "/Volumes/bag of holding/models/transformers-acceptance"
+   },
+   "report": "bench/r05.p2.september.public.json",
+   "environment": "env/r05.p2.september.public.environment.json",
+   "log": "logs/r05.p2.september.public.log",
+   "host": "host/r05.p2.september.public.host.json"
+  },
+  {
+   "index": 18,
+   "round": 5,
+   "position": 3,
+   "label": "head",
+   "benchmark": "public",
+   "test": "qwen::qwen35_metal_public_causal_greedy_benchmark",
+   "source": "fa8426e5dc8cbcb269c29e211b119ea0acd61054 (worktree /Users/nover/repos/transformers-worktrees/tfm-rebaseline, src tree ea9deb1a, cargo +1.92.0)",
+   "binary": "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-head/release/deps/qwen35_benchmarks-ffcc519af7a3b786",
+   "sha256": "cb7bf1b53d045b53a8fadb8cc032c732fc8d40f57ddc347cc8500f1eb0723f99",
+   "argv": [
+    "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-head/release/deps/qwen35_benchmarks-ffcc519af7a3b786",
+    "--ignored",
+    "--exact",
+    "--nocapture",
+    "--test-threads",
+    "1",
+    "qwen::qwen35_metal_public_causal_greedy_benchmark"
+   ],
+   "artifacts": {
+    "TRANSFORMERS_QWEN35_DIR": "/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17",
+    "TRANSFORMERS_QWEN35_REFERENCE_DIR": "/Volumes/bag of holding/models/transformers-acceptance"
+   },
+   "report": "bench/r05.p3.head.public.json",
+   "environment": "env/r05.p3.head.public.environment.json",
+   "log": "logs/r05.p3.head.public.log",
+   "host": "host/r05.p3.head.public.host.json"
+  },
+  {
+   "index": 19,
+   "round": 5,
+   "position": 4,
+   "label": "september",
+   "benchmark": "baseline",
+   "test": "qwen::qwen35_metal_baseline_benchmark",
+   "source": "c70057e82510e085bc057910a99886c1ce551567 (temporary detached worktree /Users/nover/repos/transformers-worktrees/tfm-rebaseline-september-c70057e, src tree 097e0f01 as in the September 10 series, cargo +1.92.0)",
+   "binary": "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-september/release/deps/qwen35_benchmarks-22bed2ca193cb209",
+   "sha256": "e3f94714fa16f572d9c2fefdbb92aa4a34395300c368a9c891d55b9b63ad2eee",
+   "argv": [
+    "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-september/release/deps/qwen35_benchmarks-22bed2ca193cb209",
+    "--ignored",
+    "--exact",
+    "--nocapture",
+    "--test-threads",
+    "1",
+    "qwen::qwen35_metal_baseline_benchmark"
+   ],
+   "artifacts": {
+    "TRANSFORMERS_QWEN35_DIR": "/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17",
+    "TRANSFORMERS_QWEN35_REFERENCE_DIR": "/Volumes/bag of holding/models/transformers-acceptance"
+   },
+   "report": "bench/r05.p4.september.baseline.json",
+   "environment": "env/r05.p4.september.baseline.environment.json",
+   "log": "logs/r05.p4.september.baseline.log",
+   "host": "host/r05.p4.september.baseline.host.json"
+  },
+  {
+   "index": 20,
+   "round": 6,
+   "position": 1,
+   "label": "september",
+   "benchmark": "public",
+   "test": "qwen::qwen35_metal_public_causal_greedy_benchmark",
+   "source": "c70057e82510e085bc057910a99886c1ce551567 (temporary detached worktree /Users/nover/repos/transformers-worktrees/tfm-rebaseline-september-c70057e, src tree 097e0f01 as in the September 10 series, cargo +1.92.0)",
+   "binary": "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-september/release/deps/qwen35_benchmarks-22bed2ca193cb209",
+   "sha256": "e3f94714fa16f572d9c2fefdbb92aa4a34395300c368a9c891d55b9b63ad2eee",
+   "argv": [
+    "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-september/release/deps/qwen35_benchmarks-22bed2ca193cb209",
+    "--ignored",
+    "--exact",
+    "--nocapture",
+    "--test-threads",
+    "1",
+    "qwen::qwen35_metal_public_causal_greedy_benchmark"
+   ],
+   "artifacts": {
+    "TRANSFORMERS_QWEN35_DIR": "/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17",
+    "TRANSFORMERS_QWEN35_REFERENCE_DIR": "/Volumes/bag of holding/models/transformers-acceptance"
+   },
+   "report": "bench/r06.p1.september.public.json",
+   "environment": "env/r06.p1.september.public.environment.json",
+   "log": "logs/r06.p1.september.public.log",
+   "host": "host/r06.p1.september.public.host.json"
+  },
+  {
+   "index": 21,
+   "round": 6,
+   "position": 2,
+   "label": "head",
+   "benchmark": "baseline",
+   "test": "qwen::qwen35_metal_baseline_benchmark",
+   "source": "fa8426e5dc8cbcb269c29e211b119ea0acd61054 (worktree /Users/nover/repos/transformers-worktrees/tfm-rebaseline, src tree ea9deb1a, cargo +1.92.0)",
+   "binary": "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-head/release/deps/qwen35_benchmarks-ffcc519af7a3b786",
+   "sha256": "cb7bf1b53d045b53a8fadb8cc032c732fc8d40f57ddc347cc8500f1eb0723f99",
+   "argv": [
+    "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-head/release/deps/qwen35_benchmarks-ffcc519af7a3b786",
+    "--ignored",
+    "--exact",
+    "--nocapture",
+    "--test-threads",
+    "1",
+    "qwen::qwen35_metal_baseline_benchmark"
+   ],
+   "artifacts": {
+    "TRANSFORMERS_QWEN35_DIR": "/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17",
+    "TRANSFORMERS_QWEN35_REFERENCE_DIR": "/Volumes/bag of holding/models/transformers-acceptance"
+   },
+   "report": "bench/r06.p2.head.baseline.json",
+   "environment": "env/r06.p2.head.baseline.environment.json",
+   "log": "logs/r06.p2.head.baseline.log",
+   "host": "host/r06.p2.head.baseline.host.json"
+  },
+  {
+   "index": 22,
+   "round": 6,
+   "position": 3,
+   "label": "september",
+   "benchmark": "baseline",
+   "test": "qwen::qwen35_metal_baseline_benchmark",
+   "source": "c70057e82510e085bc057910a99886c1ce551567 (temporary detached worktree /Users/nover/repos/transformers-worktrees/tfm-rebaseline-september-c70057e, src tree 097e0f01 as in the September 10 series, cargo +1.92.0)",
+   "binary": "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-september/release/deps/qwen35_benchmarks-22bed2ca193cb209",
+   "sha256": "e3f94714fa16f572d9c2fefdbb92aa4a34395300c368a9c891d55b9b63ad2eee",
+   "argv": [
+    "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-september/release/deps/qwen35_benchmarks-22bed2ca193cb209",
+    "--ignored",
+    "--exact",
+    "--nocapture",
+    "--test-threads",
+    "1",
+    "qwen::qwen35_metal_baseline_benchmark"
+   ],
+   "artifacts": {
+    "TRANSFORMERS_QWEN35_DIR": "/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17",
+    "TRANSFORMERS_QWEN35_REFERENCE_DIR": "/Volumes/bag of holding/models/transformers-acceptance"
+   },
+   "report": "bench/r06.p3.september.baseline.json",
+   "environment": "env/r06.p3.september.baseline.environment.json",
+   "log": "logs/r06.p3.september.baseline.log",
+   "host": "host/r06.p3.september.baseline.host.json"
+  },
+  {
+   "index": 23,
+   "round": 6,
+   "position": 4,
+   "label": "head",
+   "benchmark": "public",
+   "test": "qwen::qwen35_metal_public_causal_greedy_benchmark",
+   "source": "fa8426e5dc8cbcb269c29e211b119ea0acd61054 (worktree /Users/nover/repos/transformers-worktrees/tfm-rebaseline, src tree ea9deb1a, cargo +1.92.0)",
+   "binary": "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-head/release/deps/qwen35_benchmarks-ffcc519af7a3b786",
+   "sha256": "cb7bf1b53d045b53a8fadb8cc032c732fc8d40f57ddc347cc8500f1eb0723f99",
+   "argv": [
+    "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-head/release/deps/qwen35_benchmarks-ffcc519af7a3b786",
+    "--ignored",
+    "--exact",
+    "--nocapture",
+    "--test-threads",
+    "1",
+    "qwen::qwen35_metal_public_causal_greedy_benchmark"
+   ],
+   "artifacts": {
+    "TRANSFORMERS_QWEN35_DIR": "/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17",
+    "TRANSFORMERS_QWEN35_REFERENCE_DIR": "/Volumes/bag of holding/models/transformers-acceptance"
+   },
+   "report": "bench/r06.p4.head.public.json",
+   "environment": "env/r06.p4.head.public.environment.json",
+   "log": "logs/r06.p4.head.public.log",
+   "host": "host/r06.p4.head.public.host.json"
+  },
+  {
+   "index": 24,
+   "round": 7,
+   "position": 1,
+   "label": "head",
+   "benchmark": "public",
+   "test": "qwen::qwen35_metal_public_causal_greedy_benchmark",
+   "source": "fa8426e5dc8cbcb269c29e211b119ea0acd61054 (worktree /Users/nover/repos/transformers-worktrees/tfm-rebaseline, src tree ea9deb1a, cargo +1.92.0)",
+   "binary": "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-head/release/deps/qwen35_benchmarks-ffcc519af7a3b786",
+   "sha256": "cb7bf1b53d045b53a8fadb8cc032c732fc8d40f57ddc347cc8500f1eb0723f99",
+   "argv": [
+    "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-head/release/deps/qwen35_benchmarks-ffcc519af7a3b786",
+    "--ignored",
+    "--exact",
+    "--nocapture",
+    "--test-threads",
+    "1",
+    "qwen::qwen35_metal_public_causal_greedy_benchmark"
+   ],
+   "artifacts": {
+    "TRANSFORMERS_QWEN35_DIR": "/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17",
+    "TRANSFORMERS_QWEN35_REFERENCE_DIR": "/Volumes/bag of holding/models/transformers-acceptance"
+   },
+   "report": "bench/r07.p1.head.public.json",
+   "environment": "env/r07.p1.head.public.environment.json",
+   "log": "logs/r07.p1.head.public.log",
+   "host": "host/r07.p1.head.public.host.json"
+  },
+  {
+   "index": 25,
+   "round": 7,
+   "position": 2,
+   "label": "september",
+   "benchmark": "baseline",
+   "test": "qwen::qwen35_metal_baseline_benchmark",
+   "source": "c70057e82510e085bc057910a99886c1ce551567 (temporary detached worktree /Users/nover/repos/transformers-worktrees/tfm-rebaseline-september-c70057e, src tree 097e0f01 as in the September 10 series, cargo +1.92.0)",
+   "binary": "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-september/release/deps/qwen35_benchmarks-22bed2ca193cb209",
+   "sha256": "e3f94714fa16f572d9c2fefdbb92aa4a34395300c368a9c891d55b9b63ad2eee",
+   "argv": [
+    "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-september/release/deps/qwen35_benchmarks-22bed2ca193cb209",
+    "--ignored",
+    "--exact",
+    "--nocapture",
+    "--test-threads",
+    "1",
+    "qwen::qwen35_metal_baseline_benchmark"
+   ],
+   "artifacts": {
+    "TRANSFORMERS_QWEN35_DIR": "/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17",
+    "TRANSFORMERS_QWEN35_REFERENCE_DIR": "/Volumes/bag of holding/models/transformers-acceptance"
+   },
+   "report": "bench/r07.p2.september.baseline.json",
+   "environment": "env/r07.p2.september.baseline.environment.json",
+   "log": "logs/r07.p2.september.baseline.log",
+   "host": "host/r07.p2.september.baseline.host.json"
+  },
+  {
+   "index": 26,
+   "round": 7,
+   "position": 3,
+   "label": "head",
+   "benchmark": "baseline",
+   "test": "qwen::qwen35_metal_baseline_benchmark",
+   "source": "fa8426e5dc8cbcb269c29e211b119ea0acd61054 (worktree /Users/nover/repos/transformers-worktrees/tfm-rebaseline, src tree ea9deb1a, cargo +1.92.0)",
+   "binary": "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-head/release/deps/qwen35_benchmarks-ffcc519af7a3b786",
+   "sha256": "cb7bf1b53d045b53a8fadb8cc032c732fc8d40f57ddc347cc8500f1eb0723f99",
+   "argv": [
+    "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-head/release/deps/qwen35_benchmarks-ffcc519af7a3b786",
+    "--ignored",
+    "--exact",
+    "--nocapture",
+    "--test-threads",
+    "1",
+    "qwen::qwen35_metal_baseline_benchmark"
+   ],
+   "artifacts": {
+    "TRANSFORMERS_QWEN35_DIR": "/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17",
+    "TRANSFORMERS_QWEN35_REFERENCE_DIR": "/Volumes/bag of holding/models/transformers-acceptance"
+   },
+   "report": "bench/r07.p3.head.baseline.json",
+   "environment": "env/r07.p3.head.baseline.environment.json",
+   "log": "logs/r07.p3.head.baseline.log",
+   "host": "host/r07.p3.head.baseline.host.json"
+  },
+  {
+   "index": 27,
+   "round": 7,
+   "position": 4,
+   "label": "september",
+   "benchmark": "public",
+   "test": "qwen::qwen35_metal_public_causal_greedy_benchmark",
+   "source": "c70057e82510e085bc057910a99886c1ce551567 (temporary detached worktree /Users/nover/repos/transformers-worktrees/tfm-rebaseline-september-c70057e, src tree 097e0f01 as in the September 10 series, cargo +1.92.0)",
+   "binary": "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-september/release/deps/qwen35_benchmarks-22bed2ca193cb209",
+   "sha256": "e3f94714fa16f572d9c2fefdbb92aa4a34395300c368a9c891d55b9b63ad2eee",
+   "argv": [
+    "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-september/release/deps/qwen35_benchmarks-22bed2ca193cb209",
+    "--ignored",
+    "--exact",
+    "--nocapture",
+    "--test-threads",
+    "1",
+    "qwen::qwen35_metal_public_causal_greedy_benchmark"
+   ],
+   "artifacts": {
+    "TRANSFORMERS_QWEN35_DIR": "/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17",
+    "TRANSFORMERS_QWEN35_REFERENCE_DIR": "/Volumes/bag of holding/models/transformers-acceptance"
+   },
+   "report": "bench/r07.p4.september.public.json",
+   "environment": "env/r07.p4.september.public.environment.json",
+   "log": "logs/r07.p4.september.public.log",
+   "host": "host/r07.p4.september.public.host.json"
+  },
+  {
+   "index": 28,
+   "round": 8,
+   "position": 1,
+   "label": "september",
+   "benchmark": "baseline",
+   "test": "qwen::qwen35_metal_baseline_benchmark",
+   "source": "c70057e82510e085bc057910a99886c1ce551567 (temporary detached worktree /Users/nover/repos/transformers-worktrees/tfm-rebaseline-september-c70057e, src tree 097e0f01 as in the September 10 series, cargo +1.92.0)",
+   "binary": "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-september/release/deps/qwen35_benchmarks-22bed2ca193cb209",
+   "sha256": "e3f94714fa16f572d9c2fefdbb92aa4a34395300c368a9c891d55b9b63ad2eee",
+   "argv": [
+    "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-september/release/deps/qwen35_benchmarks-22bed2ca193cb209",
+    "--ignored",
+    "--exact",
+    "--nocapture",
+    "--test-threads",
+    "1",
+    "qwen::qwen35_metal_baseline_benchmark"
+   ],
+   "artifacts": {
+    "TRANSFORMERS_QWEN35_DIR": "/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17",
+    "TRANSFORMERS_QWEN35_REFERENCE_DIR": "/Volumes/bag of holding/models/transformers-acceptance"
+   },
+   "report": "bench/r08.p1.september.baseline.json",
+   "environment": "env/r08.p1.september.baseline.environment.json",
+   "log": "logs/r08.p1.september.baseline.log",
+   "host": "host/r08.p1.september.baseline.host.json"
+  },
+  {
+   "index": 29,
+   "round": 8,
+   "position": 2,
+   "label": "head",
+   "benchmark": "public",
+   "test": "qwen::qwen35_metal_public_causal_greedy_benchmark",
+   "source": "fa8426e5dc8cbcb269c29e211b119ea0acd61054 (worktree /Users/nover/repos/transformers-worktrees/tfm-rebaseline, src tree ea9deb1a, cargo +1.92.0)",
+   "binary": "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-head/release/deps/qwen35_benchmarks-ffcc519af7a3b786",
+   "sha256": "cb7bf1b53d045b53a8fadb8cc032c732fc8d40f57ddc347cc8500f1eb0723f99",
+   "argv": [
+    "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-head/release/deps/qwen35_benchmarks-ffcc519af7a3b786",
+    "--ignored",
+    "--exact",
+    "--nocapture",
+    "--test-threads",
+    "1",
+    "qwen::qwen35_metal_public_causal_greedy_benchmark"
+   ],
+   "artifacts": {
+    "TRANSFORMERS_QWEN35_DIR": "/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17",
+    "TRANSFORMERS_QWEN35_REFERENCE_DIR": "/Volumes/bag of holding/models/transformers-acceptance"
+   },
+   "report": "bench/r08.p2.head.public.json",
+   "environment": "env/r08.p2.head.public.environment.json",
+   "log": "logs/r08.p2.head.public.log",
+   "host": "host/r08.p2.head.public.host.json"
+  },
+  {
+   "index": 30,
+   "round": 8,
+   "position": 3,
+   "label": "september",
+   "benchmark": "public",
+   "test": "qwen::qwen35_metal_public_causal_greedy_benchmark",
+   "source": "c70057e82510e085bc057910a99886c1ce551567 (temporary detached worktree /Users/nover/repos/transformers-worktrees/tfm-rebaseline-september-c70057e, src tree 097e0f01 as in the September 10 series, cargo +1.92.0)",
+   "binary": "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-september/release/deps/qwen35_benchmarks-22bed2ca193cb209",
+   "sha256": "e3f94714fa16f572d9c2fefdbb92aa4a34395300c368a9c891d55b9b63ad2eee",
+   "argv": [
+    "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-september/release/deps/qwen35_benchmarks-22bed2ca193cb209",
+    "--ignored",
+    "--exact",
+    "--nocapture",
+    "--test-threads",
+    "1",
+    "qwen::qwen35_metal_public_causal_greedy_benchmark"
+   ],
+   "artifacts": {
+    "TRANSFORMERS_QWEN35_DIR": "/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17",
+    "TRANSFORMERS_QWEN35_REFERENCE_DIR": "/Volumes/bag of holding/models/transformers-acceptance"
+   },
+   "report": "bench/r08.p3.september.public.json",
+   "environment": "env/r08.p3.september.public.environment.json",
+   "log": "logs/r08.p3.september.public.log",
+   "host": "host/r08.p3.september.public.host.json"
+  },
+  {
+   "index": 31,
+   "round": 8,
+   "position": 4,
+   "label": "head",
+   "benchmark": "baseline",
+   "test": "qwen::qwen35_metal_baseline_benchmark",
+   "source": "fa8426e5dc8cbcb269c29e211b119ea0acd61054 (worktree /Users/nover/repos/transformers-worktrees/tfm-rebaseline, src tree ea9deb1a, cargo +1.92.0)",
+   "binary": "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-head/release/deps/qwen35_benchmarks-ffcc519af7a3b786",
+   "sha256": "cb7bf1b53d045b53a8fadb8cc032c732fc8d40f57ddc347cc8500f1eb0723f99",
+   "argv": [
+    "/Volumes/bag of holding/cargo-targets/tfm-rebaseline/bench-head/release/deps/qwen35_benchmarks-ffcc519af7a3b786",
+    "--ignored",
+    "--exact",
+    "--nocapture",
+    "--test-threads",
+    "1",
+    "qwen::qwen35_metal_baseline_benchmark"
+   ],
+   "artifacts": {
+    "TRANSFORMERS_QWEN35_DIR": "/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17",
+    "TRANSFORMERS_QWEN35_REFERENCE_DIR": "/Volumes/bag of holding/models/transformers-acceptance"
+   },
+   "report": "bench/r08.p4.head.baseline.json",
+   "environment": "env/r08.p4.head.baseline.environment.json",
+   "log": "logs/r08.p4.head.baseline.log",
+   "host": "host/r08.p4.head.baseline.host.json"
+  }
+ ]
+}

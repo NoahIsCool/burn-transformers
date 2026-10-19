@@ -1,0 +1,13 @@
+diff -ru /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src/src/mamba2.rs /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/nemotron/isolate/src/src/mamba2.rs
+--- /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src/src/mamba2.rs	2026-10-17 20:45:49
++++ /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/nemotron/isolate/src/src/mamba2.rs	2026-10-17 22:48:25
+@@ -857,8 +857,7 @@
+             self.conv1d.groups,
+         );
+         let convolved = zero_invalid(
+-            // SiLU rounded once in F16/BF16, as the reference's `F.silu` is.
+-            crate::feed_forward::silu(convolved).swap_dims(1, 2),
++            activation::silu(convolved).swap_dims(1, 2),
+             invalid.as_ref(),
+         );
+         // Verified tiling of `[x | B | C]`: `0..I`, then two `G * N` slices.

@@ -70,14 +70,21 @@ class HalfPrecisionCalibrationRecordTests(unittest.TestCase):
         self.assertTrue(record["not_run"], "the Burn half-precision gates have not run")
 
     def test_f16_runs_are_bounded_only_as_an_upper_limit(self):
-        """The record says the BF16 bounds do not calibrate F16 runs, for which no official bundle exists."""
+        """The record says its BF16 bounds do not calibrate F16 runs, for which its generator wrote no bundle.
+
+        That generator is historical: the current one writes ``float16``
+        graphs, from which F16 runs are now calibrated on their own (see
+        ``tests/support/half_precision_calibration.rs``), so this record's
+        upper-limit note describes its own campaign only.
+        """
         notes = [note for note in self.record["notes"] if "F16" in note and "upper limit" in note]
         self.assertEqual(len(notes), 1)
         self.assertIn("do not reflect F16 rounding", notes[0])
+        self.assertIn("The generator writes no float16 bundle", notes[0])
         generator = (ROOT / "scripts/generate_causal_lm_reference.py").read_text()
         dtypes = re.search(r"^DTYPES = \(([^)]*)\)", generator, re.MULTILINE)
         self.assertIsNotNone(dtypes)
-        self.assertNotIn('"float16"', dtypes.group(1), "the generator now writes F16 twins; calibrate F16 runs from them")
+        self.assertIn('"float16"', dtypes.group(1), "the current generator writes the F16 graphs that calibrate F16 runs")
 
     def test_logs_and_runner_scripts_match_their_digests(self):
         """Every committed evidence file is authenticated by its recorded SHA-256."""
@@ -96,14 +103,27 @@ class HalfPrecisionCalibrationRecordTests(unittest.TestCase):
         self.assertTrue(self.generation.rstrip().endswith("== driver exit=0"))
         self.assertEqual(self.calibration.count("test result: ok. 1 passed; 0 failed"), 6)
 
-    def test_rule_matches_the_rust_module(self):
-        """The slack and the self-consistency table are the ones the Rust gate applies."""
+    def test_rule_is_the_one_its_source_applied(self):
+        """The recorded rule is self-consistent and names the module that applied it at its source commit.
+
+        The rule is historical: ``tests/support/half_precision_calibration.rs``
+        now applies the official-graph envelope (its slacks are tied to the
+        module by ``test_half_precision_envelope_record.py``), so this record's
+        single slack is checked against its own derivation, not against the
+        current module. The provisional self-consistency tolerances it
+        recorded are still the module's.
+        """
+        rule = self.record["rule"]
+        self.assertEqual(rule["module"], RULE.relative_to(ROOT).as_posix())
+        self.assertEqual(rule["slack"], 1.2)
+        self.assertIn("1.1725", rule["slack_basis"])
+        self.assertIn("rounded up to two significant digits", rule["slack_basis"])
         source = RULE.read_text()
-        slack = re.search(r"pub\(crate\) const SLACK: f64 = ([0-9.]+);", source)
-        self.assertIsNotNone(slack)
-        self.assertEqual(float(slack.group(1)), self.record["rule"]["slack"])
-        table = dict(re.findall(r"\(TensorDType::(\w+), ([0-9.]+)\)", source))
-        self.assertEqual({dtype: float(value) for dtype, value in table.items()}, self.record["rule"]["self_consistency"])
+        self.assertNotIn("pub(crate) const SLACK:", source, "the single-slack rule is retired")
+        table = re.search(r"SELF_CONSISTENCY_TOLERANCE: \[\(TensorDType, f64\); 2\] =\s*\[([^\]]*)\]", source)
+        self.assertIsNotNone(table)
+        entries = dict(re.findall(r"\(TensorDType::(\w+), ([0-9.]+)\)", table.group(1)))
+        self.assertEqual({dtype: float(value) for dtype, value in entries.items()}, rule["self_consistency"])
 
     def test_bundles_were_generated_from_their_twins(self):
         """Each bundle's identity, size, and resources appear in the generation log."""

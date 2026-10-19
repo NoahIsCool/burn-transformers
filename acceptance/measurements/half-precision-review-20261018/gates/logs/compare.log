@@ -1,0 +1,18 @@
+calibration.gemma.bf16.official_graphs_admit_each_other_leave_one_out.log: 32 output lines, exit 0 -> IDENTICAL to 8181605
+calibration.gemma.bf16.official_graphs_calibrate_the_half_precision_envelope.log: 63 output lines, exit 0 -> IDENTICAL to 8181605
+gemma.bf16.flex.batched_prefill_matches_the_reference.log: 17 output lines, exit 0 -> IDENTICAL to 8181605
+gemma.bf16.flex.cached_greedy_matches_the_reference.log: 38 output lines, exit 0 -> IDENTICAL to 8181605
+gemma.bf16.flex.long_context_cached_decode_wraps_the_rings.log: 25 output lines, exit 0 -> IDENTICAL to 8181605
+gemma.bf16.flex.long_context_logits_cross_the_sliding_window.log: 21 output lines, exit 0 -> IDENTICAL to 8181605
+gemma.bf16.flex.prompt_logits_match_the_reference.log: 14 output lines, exit 0 -> IDENTICAL to 8181605
+gemma.f32.flex.batched_prefill_matches_the_reference.log: 9 output lines, exit 0 -> IDENTICAL to 8181605
+gemma.f32.flex.cached_greedy_matches_the_reference.log: 9 output lines, exit 0 -> IDENTICAL to 8181605
+gemma.f32.flex.long_context_cached_decode_wraps_the_rings.log: 11 output lines, exit 0 -> IDENTICAL to 8181605
+gemma.f32.flex.long_context_logits_cross_the_sliding_window.log: 17 output lines, exit 0 -> IDENTICAL to 8181605
+gemma.f32.flex.prompt_logits_match_the_reference.log: 9 output lines, exit 0 -> IDENTICAL to 8181605
+gemma.f32.metal.batched_prefill_matches_the_reference.log: 9 output lines, exit 0 -> IDENTICAL to 8181605
+gemma.f32.metal.cached_greedy_matches_the_reference.log: 9 output lines, exit 0 -> IDENTICAL to 8181605
+gemma.f32.metal.long_context_cached_decode_wraps_the_rings.log: 11 output lines, exit 0 -> IDENTICAL to 8181605
+gemma.f32.metal.long_context_logits_cross_the_sliding_window.log: 17 output lines, exit 0 -> IDENTICAL to 8181605
+gemma.f32.metal.prompt_logits_match_the_reference.log: 9 output lines, exit 0 -> IDENTICAL to 8181605
+== tally {"identical": 17, "different": 0}

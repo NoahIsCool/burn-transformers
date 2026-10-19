@@ -1,0 +1,57 @@
+== source base: export /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/silu/base of 7bd057ecc56d60df2776639befd30058720d3c09 (now commit=7bd057ecc56d60df2776639befd30058720d3c09 files=2733 dirty=0)
+== binary /Volumes/bag of holding/cargo-targets/followups-silu/base/release/deps/llama_family_artifacts-693e11c29d0eb894 sha256 48b39504ecde9466d766834ee38675950aea7498d71fb418191ee92c2086fa89
+== flex/bf16 flex_cached_greedy_matches_the_reference
+== env TRANSFORMERS_LLAMA_FAMILY_BF16_REFERENCE_DIR=/Volumes/T9/transformers-references/Qwen3-4B-531c80e2-bf16
+== env TRANSFORMERS_LLAMA_FAMILY_DIR=/Volumes/T9/models/Qwen/Qwen3-4B
+== env TRANSFORMERS_LLAMA_FAMILY_DTYPE=bf16
+== env TRANSFORMERS_LLAMA_FAMILY_REFERENCE_DIR=/Volumes/T9/transformers-references/Qwen3-4B-531c80e2
+== cwd /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/silu/base
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/followups-silu/base/release/deps/llama_family_artifacts-693e11c29d0eb894 --ignored --exact --nocapture --test-threads 1 flex_cached_greedy_matches_the_reference
+== start 2026-10-17T22:23:26+00:00 load 2.87 4.01 6.77
+
+running 1 test
+test flex_cached_greedy_matches_the_reference ... BF16 bounds of prompt 0: max 8.400341033935547e-1, mean 9.356504341905933e-2 (1.2 × official BF16 7.000284194946289e-1, 7.797086951588278e-2; /Volumes/T9/transformers-references/Qwen3-4B-531c80e2-bf16)
+BF16 bounds of prompt 1: max 8.413138389587402e-1, mean 5.2039653755092376e-2 (1.2 × official BF16 7.010948657989502e-1, 4.336637812924365e-2; /Volumes/T9/transformers-references/Qwen3-4B-531c80e2-bf16)
+BF16 bounds of prompt 2: max 1.0554290771484374e0, mean 6.461845336599158e-2 (1.2 × official BF16 8.795242309570313e-1, 5.3848711138326316e-2; /Volumes/T9/transformers-references/Qwen3-4B-531c80e2-bf16)
+F32 matrix products use F32 inputs; the BF16 run is judged by the official calibration, greedy steps at 8.4003407e-1
+cached prefill: max |Δ| = 2.7427005767822266e-1 to the reference (bound 8.400341033935547e-1)
+cached prefill: max |Δ| = 0e0 to the stateless pass (tolerance 5e-1)
+greedy: greedy step 0: margin 8.411083e-1 is a tie at tolerance 8.4003407e-1; skipped
+greedy: greedy step 1: margin 1.67276e0 is a tie at tolerance 8.4003407e-1; skipped
+greedy: greedy step 3: margin 1.443016e0 is a tie at tolerance 8.4003407e-1; skipped
+greedy: greedy step 5: margin 1.1731529e-1 is a tie at tolerance 8.4003407e-1; skipped
+greedy: greedy step 12: margin 7.9367065e-1 is a tie at tolerance 8.4003407e-1; skipped
+greedy: greedy step 26: margin 1.270256e0 is a tie at tolerance 8.4003407e-1; skipped
+greedy: 26 of 32 greedy tokens decisive and matching (smallest decisive margin 2.7254753e0), 6 ties skipped
+
+thread 'flex_cached_greedy_matches_the_reference' (39952743) panicked at tests/support/half_precision_calibration.rs:1116:13:
+cached decode step 1 at position 6: max |Δ| = 5.625e-1 to the stateless pass exceeds the BF16 self-consistency tolerance 5e-1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    flex_cached_greedy_matches_the_reference
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 22 filtered out; finished in 32.46s
+
+       32.48 real        44.60 user         5.83 sys
+         10729226240  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              662118  page reclaims
+                   5  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   2  voluntary context switches
+              284059  involuntary context switches
+        550158198822  instructions retired
+        177567571717  cycles elapsed
+         10724155648  peak memory footprint
+== exit=101 wall=32.5s end=2026-10-17T22:23:59+00:00 load_end 5.38 min_free_pct=88 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0

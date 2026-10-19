@@ -1,0 +1,24 @@
+== source 7a50e44 (git archive export) tool /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/bundles/tool/scripts/generate_causal_lm_reference.py sha256 a4ed0db48e9b4e6c816bf23c25f56cf39498d06165af49a0655c841d1b56a602
+== start 2026-10-18T00:27:32+00:00 free 307.4 GiB free-memory 90%
+== cmd ["/usr/bin/time", "-l", "/Library/Frameworks/Python.framework/Versions/3.11/bin/python3", "-I", "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/bundles/tool/scripts/generate_causal_lm_reference.py", "--model-dir", "/Volumes/T9/models/Qwen/Qwen2-7B", "--output", "/Volumes/T9/transformers-references/Qwen2-7B-453ed157-f64-bf16-mps-eager-7a50e44", "--repository", "Qwen/Qwen2-7B", "--revision", "453ed1575b739b5b03ce3758b23befdb0967f40e", "--dtype", "bfloat16", "--device", "mps", "--attn-implementation", "eager", "--greedy-tokens", "32", "--decode-tokens-from", "/Volumes/T9/transformers-references/Qwen2-7B-453ed157-f64", "--prompt-decode", "--prompt", "The capital of France is", "--prompt", "def fibonacci(n):\n    \"\"\"Return the n-th Fibonacci number.\"\"\"\n", "--prompt", "Rotary position embeddings encode relative distance because"]
+{"bundle": "/Volumes/T9/transformers-references/Qwen2-7B-453ed157-f64-bf16-mps-eager-7a50e44", "prompts": 3}
+       24.90 real        14.11 user         5.62 sys
+          1444823040  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              144295  page reclaims
+                  73  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                  54  voluntary context switches
+               25630  involuntary context switches
+        155401550497  instructions retired
+         71697028759  cycles elapsed
+         17611737776  peak memory footprint
+== exit=0 wall=25s lowest-free-memory=74%
+== reference.json sha256 d337ca8e7de2286b84554f171858ed44da2e5b1f757ac4b625e3e05db63015aa

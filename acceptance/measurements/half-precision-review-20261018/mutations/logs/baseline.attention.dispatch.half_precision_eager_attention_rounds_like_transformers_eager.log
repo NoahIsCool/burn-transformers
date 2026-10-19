@@ -1,0 +1,7 @@
+== source 1e38eecf989a1ae568b67b2e9fcdd9b2ebdbadb8 dirty=0
+== mutation none (baseline) 2026-10-18T06:58:05+00:00
+== cmd cargo test --locked --lib attention::dispatch::tests::half_precision_eager_attention_rounds_like_transformers_eager -- --exact
+running 1 test
+test attention::dispatch::tests::half_precision_eager_attention_rounds_like_transformers_eager ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 3530 filtered out; finished in 0.01s
+== exit=0 expected=0

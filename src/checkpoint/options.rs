@@ -4,11 +4,14 @@
 //! constrain untrusted metadata before weight allocation; missing/unexpected key
 //! exceptions and index aliases must be named rather than inferred. Dtype policy
 //! selects float conversion while concrete architecture dtype requirements remain
-//! authoritative for numerically sensitive parameters.
+//! authoritative for numerically sensitive parameters. The range-hazard policy
+//! decides whether a dtype that a family declares its checkpoints overflow
+//! refuses the load (the default) or runs the faithful graph (see
+//! [`super::RangeHazard`]).
 
 use serde::{Deserialize, Serialize};
 
-use super::TensorDType;
+use super::{RangeHazardPolicy, TensorDType};
 
 /// One checkpoint tensor name required to be equivalent to a storage owner.
 ///
@@ -169,4 +172,19 @@ pub struct LoadOptions {
     /// Convention used to reconcile index-only aliases with `total_size`.
     #[serde(default)]
     pub index_alias_size_accounting: IndexAliasSizeAccounting,
+    /// Whether a load may execute a dtype the family's checkpoints are measured to overflow.
+    ///
+    /// Families declare such measurements as [`super::RangeHazard`]s on their
+    /// [`super::MappingPlan`] (Gemma 3 declares F16), and the shared planner
+    /// [`super::build_load_plan`] applies this policy to them, so every
+    /// caller planning with the family's mapping plan is covered. The
+    /// default, [`RangeHazardPolicy::Refuse`], fails strict planning with
+    /// [`super::CheckpointError::RangeHazard`] when a planned parameter takes
+    /// a declared dtype, before any payload is read.
+    /// [`RangeHazardPolicy::Accept`] is the explicit opt-in that loads and
+    /// evaluates the faithful graph, whose logits are then expected to be
+    /// non-finite; see its documentation. Absent from serialized options, it
+    /// takes the default.
+    #[serde(default)]
+    pub range_hazards: RangeHazardPolicy,
 }

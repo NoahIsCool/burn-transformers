@@ -1,0 +1,114 @@
+{
+ "head": "818160545802c1374f7607d26ce20cc86d2d758d",
+ "commits": [
+  "c2c7165a79f33bcbcc8503e174bb83f57855d8b2 feat(transformers): select the official graph and record decode rows in references",
+  "7a50e44fb6f952c80d546c6eb8ab3a87e1830825 feat(transformers): generate float16 references and quarter-prefill decode rows",
+  "78978b68a50186bfee3137cb4e828aa0fcc4500d test(transformers): judge half-precision runs against the official graph envelope",
+  "c10974ef9b0df07c8fa669e74e3a46349dd0381d fix(transformers): round half-precision SiLU once like PyTorch's silu",
+  "1b1dd748a55e4a50f8a92a5832ccd919c4b4eeea docs(transformers): note the once-rounded SiLU convention",
+  "edf4cf0f0e3295092bbd6c59c4b6c15f6df229a0 fix(transformers): scale eager half-precision attention scores by the unrounded scale",
+  "3cf845fc970e6b2af362da64c5671e44b003c659 test(transformers): pin half-precision rounding points to the references",
+  "f9f78b5fc7cca9d1a8afaf29f8f9df04fe7c3008 docs(transformers): attribute the sigmoid output gate to Muse Glimmer",
+  "1816d734e9f575b36c36fe47073f420230b0764a docs(transformers): document the parameter-bits test visitor's field",
+  "490d949fae8d9855ee0834da8063bcd4ac6479db docs(transformers): document the official-envelope half-precision gates",
+  "818160545802c1374f7607d26ce20cc86d2d758d test(transformers): record the official half-precision envelope"
+ ],
+ "results": [
+  {
+   "name": "preconditions",
+   "status": "pass",
+   "detail": "/Volumes/bag of holding and /Volumes/T9 stayed mounted throughout. Every commit is authored and committed as Claude (tfm-half2) <claude+tfm-half2@localhost>. Nothing was pushed or stashed, and no checkpoint was downloaded. Heavy runs took /Users/nover/repos/transformers-worktrees/.heavy-model.lock, one process per test; the lock is released. Local free space was about 20 GiB, so every build used a CARGO_TARGET_DIR under /Volumes/bag of holding/cargo-targets/ (the documented fallback)."
+  },
+  {
+   "name": "S1 generator (C1 c2c7165, C2 7a50e44)",
+   "status": "pass",
+   "detail": "C1's generator SHA-256 is 58ab9f55… as required. C2 (a4ed0db4…) adds float16, prompt_decode, and non-finite results as data. Its default float32/bfloat16 outputs are byte-identical to C1's on every fixture graph (compare log: ALL IDENTICAL). The new derive_half_precision_envelope.py has 12 tests."
+  },
+  {
+   "name": "S2 bundle campaign",
+   "status": "pass",
+   "detail": "57 new bundles were written under /Volumes/T9/transformers-references: 4 BF16 and 4 F16 graphs for each of the 7 truths, plus the Qwen2-7B F64 decode truth. All exited 0. Verification: 455 checks, 0 failures. Every new BF16 bundle is byte-identical to its round-2 graph, and the F64 decode truth's prompt logits are byte-identical to the truth. F16 non-finite: all 8 gemma graphs, and Qwen2-7B CPU/MPS eager. File digests are recorded in bundles/bundle-digests.json."
+  },
+  {
+   "name": "S3 derivation",
+   "status": "pass",
+   "detail": "BF16 over 128 ratios: max 1.4206, mean 1.2988 (decode 1.2694/1.1141, prompt-decode 1.3045/1.1318), giving slacks 1.5/1.3, which reproduces round 2. F16 over 80 ratios: 1.6660/1.6981, both from Qwen3-4B prompt 0's MPS-eager graph, giving 1.7/1.7. Uncalibrated in F16: Qwen2-7B and both gemma truths."
+  },
+  {
+   "name": "S4-S6 library and harness commits",
+   "status": "pass",
+   "detail": "C3 adds the envelope harness: 26 tests in tests/support, including 3 proptests. C4 adds once-rounded SiLU at every F.silu site, with exhaustive BF16/F16 tests and F32/F64 bit-exactness; reverting the helper fails 4 tests. C5 multiplies eager half-precision scores by the unrounded F32 scale. C6 adds exact rounding-point tests and pins 3 Burn Flex deviations. f9f78b5 fixes the docs: the pinned Muse reference uses sigmoid. 1816d73 closes the one pre-existing documentation-audit gap."
+  },
+  {
+   "name": "source validation at 1816d73 (clean Git clone)",
+   "status": "pass",
+   "detail": "All 13 checks exited 0: fmt; clippy -D warnings on nightly 1.94 and 1.99.1 (all features); 1.99.1 with std,flex,cpu,cuda,rocm,tokenizers,chat-templates,autodiff,train; cargo test --locked (3729 passed, 0 failed, 83 ignored); the no-default feature set; --features autodiff --lib; MSRV 1.92.0; rustdoc private and public with -D warnings; documentation audit (0 gaps); Python tests (549 OK); check_release.py --gate source --offline. 1816d73 differs from the gate head f9f78b5 only by one /// comment on a cfg(test) field."
+  },
+  {
+   "name": "final head checks at 8181605",
+   "status": "pass",
+   "detail": "Python tests: 560 OK (14 skipped), including the 11 new record tests, which also fail on a tampered quote or status. Documentation audit: 0 gaps. cargo fmt --check: clean. 8181605 changes no Rust code relative to 1816d73."
+  },
+  {
+   "name": "S9 Llama family (f9f78b5)",
+   "status": "pass",
+   "detail": "All 30 F32 gates (Flex and Metal) pass. All 15 Flex/BF16 gates pass, including the five that failed on October 17. The 12 Metal/F16 gates of SmolLM-135M, Qwen3-4B, SmolLM3-3B and Llama-3.1-8B pass. Qwen2-7B's three Metal/F16 gates fail as uncalibrated before loading, as decided. The closest statistic to its bound is SmolLM-135M Metal/F16 prompt-0 mean, 0.0359 against 0.0385."
+  },
+  {
+   "name": "S9 Gemma (f9f78b5)",
+   "status": "pass",
+   "detail": "All 10 F32 and all 5 Flex/BF16 gates pass, including cached greedy, which failed on October 17. The nearest margin is the cached decode row at step 13: 2.153 against 2.279 (94.5% of the bound). The F16 refusal test passes; it was rerun without --ignored, because run_gates' --ignored filtered it out, which is recorded as a superseded run. The bundle-only test confirms all 8 official F16 graphs are non-finite."
+  },
+  {
+   "name": "S9 Qwen3.5-0.8B requalification (advertised)",
+   "status": "pass",
+   "detail": "Parity: prompt 0.999998486, cached minimum 0.999995622 (0.999997671 at f4c56c4), teacher minimum 0.999997690, against the 0.999 gate. Benchmarks against the Sept 10 baseline: all warm and natural medians are 16-74% faster, with tokens unchanged. The single-sample cold first token flagged above 10% (0.432 vs 0.168 s; 0.411 vs 0.366 s), but a controlled rerun alternating 7bd057e and f9f78b5 three times did not confirm it: head median 0.299 vs 0.368 s, and every warm median is within +3.2% of base. Memory: 93 phases pass, 0 errors, kernel lifetime maximum 3.67 GB."
+  },
+  {
+   "name": "S9 larger checkpoints",
+   "status": "fail",
+   "detail": "Pass: Qwen3.8-27B official (cosine 0.999999873, 32/32) and MTP smoke; Muse official (minimum hidden 0.999931849, 32/32, run from a clean Git clone because the gate needs Git provenance; the export run is recorded as a superseded harness error), streaming audit, Q8/Q4 smokes; DeepSeek-V2-Lite metadata and smoke; Qwen3-30B-A3B F16/Q8/Q4 smokes and audits; Nemotron smoke. Fresh Qwen3.8 Q8/Q4 conversions are byte-identical to the 8a4404a Burnpacks (426d9632…, 32af18ef…). FAIL: the Nemotron-H official-precision gate. Cached row 22 is 0.998558 against its 0.998635 floor; a rerun reproduces it exactly. The base 7bd057e and f9f78b5 with only the Mamba-2 convolution SiLU reverted both pass with the 9a9c730 values, so the cause is the once-rounded Mamba-2 SiLU."
+  },
+  {
+   "name": "S9 diagnostics",
+   "status": "pass",
+   "detail": "Qwen2-7B F16: the official eager graphs overflow because block 27's eager q k^T reaches 155,078 before scaling (heads 10 and 13); the SDPA graphs stay finite. Burn's eager F16 graph overflows the same scores to -inf and treats fully overflowed rows as excluded, so its logits stay finite; its default graph has the same block-27 statistics, which deviate up to 77.5 from Burn's F32 run. Metal F16 overflow semantics are IEEE. The eager-graph excess remains: Qwen3-4B Flex/BF16 eager cached decode is 1.106/0.157 against 1.054/0.100; the fused dump reproduces the gate exactly. SiLU end-to-end cost on SmolLM-135M Flex/BF16: prefill -3.7%/+0.7%, decode -0.2%/+4.7%."
+  },
+  {
+   "name": "S10 record",
+   "status": "pass",
+   "detail": "acceptance/measurements/half-precision-envelope-20261018.json (299 KB, advertised_supported false, passed false). Tallies: 113 pass, 5 expected_fail, 1 fail. It has a 593-file, 7.4 MiB repository-only campaign directory and is checked by scripts/tests/test_half_precision_envelope_record.py (11 tests). The two historical records are byte-identical. The estimated compressed package is 6.84 MiB, and the campaign directory is excluded from the package listing."
+  },
+  {
+   "name": "not run",
+   "status": "skipped",
+   "detail": "CUDA and ROCm builds and gates: no such host. Coverage qualification (95%/90%). check_release --gate package: it builds into worktree/target on a local disk with about 20 GiB free; only the package listing and a size estimate were checked. Not measured: Gemma 3 1B/270m and Gemma 2 F16 (no checkpoints), official batched and chunked rows, and the position-split envelope. The library-level Gemma F16 policy was not implemented (user_review)."
+  }
+ ],
+ "open_issues": [
+  "Nemotron-H official-precision gate fails at f9f78b5: cached row 22 is 0.998558 against its 0.998635 floor. It is attributed to the once-rounded Mamba-2 convolution SiLU, which decision (a) mandates and which matches F.silu at the op level. The floor rule (each path's worst official F16 row) needs a reviewed decision; nothing was tuned.",
+  "Awaiting the maintainer, decision (d): a library-level Gemma 3 F16 policy (default refusal plus opt-in, as a family-declared range hazard checked by a LoadOptions policy). For now only the gates refuse f16, and the library evaluates the overflowing graph.",
+  "Awaiting the maintainer, decision (d, Metal BF16): a Burn >= 0.22 upgrade (MSRV 1.95, backend-erased Tensor API). Burn 0.21 keeps the contextual refusal.",
+  "Awaiting the maintainer: a non-finite guard in generation, and a post-attention-add hook (v0.2).",
+  "Qwen2-7B in F16 stays uncalibrated. Burn's finite F16 logits rest on treating fully overflowed score rows as excluded. An envelope would need a rule change, for example SDPA-only graphs.",
+  "The opt-in eager attention graph (EagerFp32Softmax) exceeds the envelope in Qwen3-4B Flex/BF16 cached decode (1.106/0.157 against 1.054/0.100).",
+  "Gemma's Flex/BF16 cached decode step 13 sits at 94.5% of its bound and needs a targeted look.",
+  "The 0.5 self-consistency tolerance is still provisional for cached prefill, batched rows, and Gemma's long chunk ends; it needs official batched and chunked rows. The position-0-split envelope has not been derived. With the envelope tolerance, SmolLM-135M, SmolLM3-3B, Qwen2-7B, and Gemma long have no decisive greedy steps.",
+  "Burn Flex deviations to report upstream, now pinned by tests: the BF16 cast ignores the 3 low F32 bits; F16 matmul keeps F16 partial sums; tanh-GELU overflows for BF16 inputs >= 2^127. The other sites where Burn rounds scalars to the tensor dtype still need an audit.",
+  "Muse Q8 smoke peak variance is unexplained (31.89 GB this round; 31.87-45.68 GB earlier).",
+  "Not run: CUDA/ROCm, coverage qualification, the package gate, Gemma 3 1B/270m and Gemma 2 F16."
+ ],
+ "summary": "Decisions (a)–(c) are fully implemented in /Users/nover/repos/transformers-worktrees/tfm-half-followups2 (branch claude/tfm-half-followups2, head 8181605, 11 commits on 7bd057e). Decision (d) got only its least invasive variant: a gate-level Gemma F16 refusal, docs, and the Metal BF16 probe recorded; the library-level policy and the Burn upgrade are left for the maintainer.\n\nThe envelope rule's slacks come from the official graphs alone: BF16 1.5/1.3 (round 2 reproduced) and F16 1.7/1.7. Every Llama-family and Gemma F32 and Flex/BF16 gate passes, including all six October 17 failures, as do the F16-calibrated Metal/F16 gates. Qwen2-7B F16 is uncalibrated as decided. The advertised Qwen3.5-0.8B profile requalified: parity, benchmarks with a controlled rerun showing no regression, and memory. The larger checkpoints pass, and the Qwen3.8 Q8/Q4 conversions are byte-identical.\n\nThe one failing gate is Nemotron-H official-precision, traced by two controls to the once-rounded Mamba-2 SiLU. It is recorded as a finding and nothing was tuned. Source checks pass at 1816d73, and the final head passes the Python tests (560), the doc audit, and fmt. The evidence is in acceptance/measurements/half-precision-envelope-20261018.json and its campaign directory.",
+ "logs": [
+  "/Users/nover/repos/transformers-worktrees/tfm-half-followups2/acceptance/measurements/half-precision-envelope-20261018.json",
+  "/Users/nover/repos/transformers-worktrees/tfm-half-followups2/acceptance/measurements/half-precision-envelope-20261018/",
+  "/Users/nover/repos/transformers-worktrees/tfm-half-followups2/scripts/tests/test_half_precision_envelope_record.py",
+  "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/logs/",
+  "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/validate/summary.log",
+  "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/final/summary.log",
+  "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/nemotron/logs/",
+  "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/diag/compare_blocks.log",
+  "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/diag/compare_dumps.log",
+  "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/control/compare_control.log"
+ ]
+}

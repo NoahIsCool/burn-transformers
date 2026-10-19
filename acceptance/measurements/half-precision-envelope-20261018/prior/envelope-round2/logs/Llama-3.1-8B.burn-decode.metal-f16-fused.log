@@ -1,0 +1,24 @@
+== source 53f167b9f18c201e4392c708133b988198f12116 (burn-dump binary of the previous round)
+== binary /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/burn-dump sha256 27f3218694e6182f9304f5fc14c861592789bb1c3bd0347e06c21c6c630b3595
+== start 2026-10-17T22:37:24Z
+== cmd /Volumes/bag of holding/cargo-targets/tfm-polish-half-gates/release/burn-dump metal f16 /Volumes/T9/models/meta-llama/Llama-3.1-8B <prompt0+greedy> /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/envelope/round2/data/Llama-3.1-8B-burn-decode/metal-f16-fused fused 6
+wrote 34 points for 38 tokens (eager=false, prefill=6) to /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/envelope/round2/data/Llama-3.1-8B-burn-decode/metal-f16-fused
+       43.27 real         8.30 user        34.62 sys
+          7767851008  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             1211085  page reclaims
+                  38  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                 307  voluntary context switches
+              200624  involuntary context switches
+        654578217184  instructions retired
+        155841602838  cycles elapsed
+         22433322216  peak memory footprint
+== exit=0 end 2026-10-17T22:38:08Z

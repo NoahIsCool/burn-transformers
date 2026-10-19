@@ -1,0 +1,12 @@
+{
+ "machine_model": "Mac15,11 (MacBook Pro)",
+ "cpu": "Apple M3 Max (14 cores)",
+ "accelerator": "Apple M3 Max GPU",
+ "physical_memory_bytes": 103079215104,
+ "operating_system": "macOS 27.0.1 (26A434)",
+ "driver_runtime": "Metal 4 (macOS 27.0.1)",
+ "power_mode": "AC power, battery charged",
+ "accelerator_exclusive": true,
+ "other_workloads": "shared host: other sessions' processes (builds, tests) may run; this campaign's heavy-model lock was held and no other test binary of this campaign ran; the log header records the load average at start",
+ "command": "/usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/qwen35_benchmarks-50b4f73ad3ef5d56 --ignored --exact --nocapture --test-threads 1 qwen::qwen35_metal_public_causal_greedy_benchmark (environment: TRANSFORMERS_QWEN35_DIR, TRANSFORMERS_QWEN35_REFERENCE_DIR, TRANSFORMERS_BENCH_METADATA_JSON, TRANSFORMERS_BENCH_OUTPUT_JSON=/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/bench/qwen35-public-causal-greedy-benchmark.json)"
+}

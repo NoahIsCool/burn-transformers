@@ -1,0 +1,10 @@
+== source 1816d734e9f575b36c36fe47073f420230b0764a dirty=0
+== cmd python3 scripts/check_documentation.py --standards --classifier /Volumes/bag of holding/cargo-targets/tfm-polish-layout/debug/transformers-coverage-layout --output /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups-docs.json
+checkpoint: 0/2583 authored sites missing required line docs; 811 test sites included; 0 inline test bodies; 0 opaque authored functions; 0 opaque authored declarations
+examples: 0/795 authored sites missing required line docs; 58 test sites included; 0 inline test bodies; 0 opaque authored functions; 0 opaque authored declarations
+fuzz: 0/515 authored sites missing required line docs; 126 test sites included; 0 inline test bodies; 0 opaque authored functions; 0 opaque authored declarations
+integration_tests: 0/3297 authored sites missing required line docs; 527 test sites included; 0 inline test bodies; 0 opaque authored functions; 0 opaque authored declarations
+models: 0/8499 authored sites missing required line docs; 3199 test sites included; 0 inline test bodies; 0 opaque authored functions; 0 opaque authored declarations
+shared: 0/7568 authored sites missing required line docs; 2569 test sites included; 0 inline test bodies; 0 opaque authored functions; 0 opaque authored declarations
+tooling: 0/351 authored sites missing required line docs; 62 test sites included; 0 inline test bodies; 0 opaque authored functions; 0 opaque authored declarations
+== exit=0

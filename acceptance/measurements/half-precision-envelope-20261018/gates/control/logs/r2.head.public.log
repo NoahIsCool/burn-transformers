@@ -1,0 +1,36 @@
+== source f9f78b5fc7cca9d1a8afaf29f8f9df04fe7c3008 (head: git archive export /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src)
+== binary /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/qwen35_benchmarks-50b4f73ad3ef5d56 sha256 96003b365af8b4ea63def8a2b29b1984da355420962f3f2f098a30f4b9dd03df
+== round 2 head public
+== half2 S9 controlled rerun of the Qwen3.5-0.8B benchmarks, alternating base 7bd057e and head f9f78b5 binaries, for the cold first-token alert
+== env TRANSFORMERS_BENCH_METADATA_JSON=/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/bench/environment-public.json
+== env TRANSFORMERS_BENCH_OUTPUT_JSON=/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/control/bench/r2.head.public.json
+== env TRANSFORMERS_QWEN35_DIR=/Volumes/bag of holding/models/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17
+== env TRANSFORMERS_QWEN35_REFERENCE_DIR=/Volumes/bag of holding/models/transformers-acceptance
+== cwd /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/half2/gates/src
+== cmd /usr/bin/time -l /Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates/release/deps/qwen35_benchmarks-50b4f73ad3ef5d56 --ignored --exact --nocapture --test-threads 1 qwen::qwen35_metal_public_causal_greedy_benchmark
+== start 2026-10-18T03:05:07+00:00 load 3.66 5.29 5.63
+
+running 1 test
+test qwen::qwen35_metal_public_causal_greedy_benchmark ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 26 filtered out; finished in 28.77s
+
+       28.78 real        27.45 user         6.47 sys
+          2503163904  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              219309  page reclaims
+                  42  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                  16  voluntary context switches
+              270530  involuntary context switches
+        297430333813  instructions retired
+        120008499780  cycles elapsed
+          3668019384  peak memory footprint
+== exit=0 wall=29.4s end=2026-10-18T03:05:36+00:00 load_end 2.74 min_free_pct=87 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0

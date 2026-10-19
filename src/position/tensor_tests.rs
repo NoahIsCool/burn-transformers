@@ -869,3 +869,63 @@ fn rotary_prefill_timing() {
         );
     }
 }
+
+/// Rounds an F32 value to a 16-bit float `dtype`, to nearest with ties to even.
+fn round_half(dtype: DType, value: f32) -> f32 {
+    match dtype {
+        DType::BF16 => burn::tensor::bf16::from_f32(value).to_f32(),
+        DType::F16 => burn::tensor::f16::from_f32(value).to_f32(),
+        other => unreachable!("no 16-bit float {other:?}"),
+    }
+}
+
+/// Reads a tensor of any float dtype as F32 values.
+fn host_f32(tensor: Tensor<TestBackend, 4>) -> Vec<f32> {
+    tensor.cast(DType::F32).into_data().to_vec::<f32>().unwrap()
+}
+
+/// In F16 and BF16 the rotation rounds each product and the sum, after the F32 tables are rounded once, as Transformers does.
+///
+/// Transformers' rotary module returns `cos.to(x.dtype)` and
+/// `sin.to(x.dtype)` from F32 tables, and `apply_rotary_pos_emb` computes
+/// `(q * cos) + (rotate_half(q) * sin)` in the activation dtype: three
+/// roundings per channel. With the dtype tables read back from Burn, every
+/// rotated channel must equal that emulation bit for bit, on both the fused
+/// Flex kernel (a contiguous operand) and the broadcast graph (a
+/// heads-swapped view), for positions beyond either format's exact integers.
+#[test]
+fn half_precision_rotation_rounds_tables_then_each_product_and_the_sum() {
+    let device = Default::default();
+    let config = RopeConfig::new(8, 8, 10_000.0, RopeScaling::None).expect("rope");
+    let positions = Tensor::<TestBackend, 2, Int>::from_ints([[3, 257, 2049, 4093]], &device);
+    let angles = rotary_angles(config, positions, 4094).expect("angles");
+    for dtype in [DType::BF16, DType::F16] {
+        let tables = angles.clone().to_dtype(dtype);
+        let (cosine, sine) = (
+            host_f32(tables.cosine.clone()),
+            host_f32(tables.sine.clone()),
+        );
+        let contiguous = activations([1, 2, 4, 8]).cast(dtype);
+        let swapped = activations([1, 4, 2, 8]).swap_dims(1, 2).cast(dtype);
+        for (layout, query) in [("contiguous", contiguous), ("heads-swapped", swapped)] {
+            let x = host_f32(query.clone());
+            let actual = host_f32(apply_rotary_to(query, &tables).expect("rotation"));
+            let expected: Vec<f32> = (0..x.len())
+                .map(|flat| {
+                    let (row, channel) = (flat / 8, flat % 8);
+                    let token = row % 4;
+                    let table = token * 8 + channel;
+                    let partner = if channel < 4 {
+                        -x[row * 8 + channel + 4]
+                    } else {
+                        x[row * 8 + channel - 4]
+                    };
+                    let real = round_half(dtype, x[flat] * cosine[table]);
+                    let imaginary = round_half(dtype, partner * sine[table]);
+                    round_half(dtype, real + imaginary)
+                })
+                .collect();
+            assert_eq!(actual, expected, "{dtype:?} {layout}");
+        }
+    }
+}

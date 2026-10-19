@@ -1,0 +1,27 @@
+== source 1e38eecf989a1ae568b67b2e9fcdd9b2ebdbadb8 with one mutation: official_variable gives an F16 run the official BF16 graphs
+== start 2026-10-18T06:59:32+00:00
+== cmd cargo test --locked --test gemma_artifacts official_graphs_follow_the_run_dtype -- --exact
+== diff
+diff --git a/tests/gemma_artifacts.rs b/tests/gemma_artifacts.rs
+index 40937e0..0dfa16e 100644
+--- a/tests/gemma_artifacts.rs
++++ b/tests/gemma_artifacts.rs
+@@ -409,7 +409,7 @@ const RETIRED: [(&str, &str); 2] = [
+ /// is refused as uncalibrated ([F16](self#f16)); every other run reads the
+ /// official BF16 graphs.
+ fn official_variable(variables: &BundleVariables, dtype: TensorDType) -> &'static str {
+-    if dtype == TensorDType::F16 {
++    if false {
+         variables.official_f16
+     } else {
+         variables.official
+== output
+running 1 test
+test official_graphs_follow_the_run_dtype ... FAILED
+thread 'official_graphs_follow_the_run_dtype' (41959089) panicked at tests/gemma_artifacts.rs:1160:9:
+assertion `left == right` failed
+  left: "TRANSFORMERS_GEMMA_OFFICIAL_DIRS"
+ right: "TRANSFORMERS_GEMMA_F16_OFFICIAL_DIRS"
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 34 filtered out; finished in 0.00s
+== exit=101 expected=failure
+== restored, git status: clean

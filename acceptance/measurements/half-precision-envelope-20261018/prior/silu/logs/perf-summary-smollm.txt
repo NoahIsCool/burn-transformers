@@ -1,0 +1,8 @@
+flex BF16 source32 prefill_median_s                          base [0.199] median 0.199 | patched [0.189] median 0.189 | ratio 0.948
+flex BF16 source32 decode_median_s                           base [15.585] median 15.585 | patched [14.92] median 14.920 | ratio 0.957
+flex BF16 source32 prefill_tok_per_s                         base [160.66] median 160.660 | patched [169.56] median 169.560 | ratio 1.055
+flex BF16 source32 decode_tok_per_s                          base [8.213] median 8.213 | patched [8.579] median 8.579 | ratio 1.045
+flex BF16 source128 prefill_median_s                         base [0.344] median 0.344 | patched [0.33] median 0.330 | ratio 0.959
+flex BF16 source128 decode_median_s                          base [15.667] median 15.667 | patched [14.928] median 14.928 | ratio 0.953
+flex BF16 source128 prefill_tok_per_s                        base [371.89] median 371.890 | patched [387.92] median 387.920 | ratio 1.043
+flex BF16 source128 decode_tok_per_s                         base [8.17] median 8.170 | patched [8.574] median 8.574 | ratio 1.049

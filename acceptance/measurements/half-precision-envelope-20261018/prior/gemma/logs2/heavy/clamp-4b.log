@@ -1,0 +1,41 @@
+== step clamp-4b
+== start 2026-10-17T22:59:28Z load (6.78076171875, 90.974609375, 115.671875)
+== env {'HF_HUB_OFFLINE': '1', 'TRANSFORMERS_OFFLINE': '1', 'HF_HUB_DISABLE_PROGRESS_BARS': '1'}
+== cmd ['/Library/Frameworks/Python.framework/Versions/3.11/bin/python3', '-I', '/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/gemma/scripts2/gemma3_clamped_variants.py', '/Volumes/T9/models/google/gemma-3-4b-it', '/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38', '/Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-bf16', '/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/gemma/logs2/heavy/clamp-4b.json', 'float16', 'float16-clamp', 'float32-clamp', 'bfloat16']
+float16 prompt 0: 6 tokens, finite=False; max |d| = nan at position None token None (official BF16 0.383584, bound 0.460301); mean |d| = nan (official BF16 0.0377086, bound 0.0452503); OUTSIDE the rule; argmax agrees with F32 at 0/6 positions
+float16 prompt 1: 19 tokens, finite=False; max |d| = nan at position None token None (official BF16 0.592167, bound 0.7106); mean |d| = nan (official BF16 0.0521943, bound 0.0626332); OUTSIDE the rule; argmax agrees with F32 at 0/19 positions
+float16 prompt 2: 9 tokens, finite=False; max |d| = nan at position None token None (official BF16 0.747809, bound 0.897371); mean |d| = nan (official BF16 0.0633858, bound 0.076063); OUTSIDE the rule; argmax agrees with F32 at 0/9 positions
+float16: clamp fired on 0 tensors, 0 entries (all prompts); 1.7 s
+float16-clamp prompt 0: 6 tokens, finite=True; max |d| = 33.3362 at position 0 token 23415 (official BF16 0.383584, bound 0.460301); mean |d| = 1.89659 (official BF16 0.0377086, bound 0.0452503); OUTSIDE the rule; argmax agrees with F32 at 4/6 positions
+float16-clamp prompt 1: 19 tokens, finite=True; max |d| = 33.4619 at position 0 token 154896 (official BF16 0.592167, bound 0.7106); mean |d| = 1.76964 (official BF16 0.0521943, bound 0.0626332); OUTSIDE the rule; argmax agrees with F32 at 17/19 positions
+float16-clamp prompt 2: 9 tokens, finite=True; max |d| = 33.4456 at position 0 token 23415 (official BF16 0.747809, bound 0.897371); mean |d| = 1.92125 (official BF16 0.0633858, bound 0.076063); OUTSIDE the rule; argmax agrees with F32 at 8/9 positions
+float16-clamp: clamp fired on 112 tensors, 195 entries (all prompts); 1.4 s
+float32-clamp prompt 0: 6 tokens, finite=True; max |d| = 33.3225 at position 0 token 154896 (official BF16 0.383584, bound 0.460301); mean |d| = 1.9026 (official BF16 0.0377086, bound 0.0452503); OUTSIDE the rule; argmax agrees with F32 at 4/6 positions
+float32-clamp prompt 1: 19 tokens, finite=True; max |d| = 33.5812 at position 0 token 154896 (official BF16 0.592167, bound 0.7106); mean |d| = 1.8585 (official BF16 0.0521943, bound 0.0626332); OUTSIDE the rule; argmax agrees with F32 at 17/19 positions
+float32-clamp prompt 2: 9 tokens, finite=True; max |d| = 33.5766 at position 0 token 154896 (official BF16 0.747809, bound 0.897371); mean |d| = 1.92369 (official BF16 0.0633858, bound 0.076063); OUTSIDE the rule; argmax agrees with F32 at 8/9 positions
+float32-clamp: clamp fired on 111 tensors, 184 entries (all prompts); 2.3 s
+bfloat16 prompt 0: 6 tokens, finite=True; max |d| = 0.383584 at position 5 token 1 (official BF16 0.383584, bound 0.460301); mean |d| = 0.0377086 (official BF16 0.0377086, bound 0.0452503); within the rule; argmax agrees with F32 at 6/6 positions
+bfloat16 prompt 1: 19 tokens, finite=True; max |d| = 0.592167 at position 1 token 23130 (official BF16 0.592167, bound 0.7106); mean |d| = 0.0521943 (official BF16 0.0521943, bound 0.0626332); within the rule; argmax agrees with F32 at 19/19 positions
+bfloat16 prompt 2: 9 tokens, finite=True; max |d| = 0.747809 at position 3 token 33178 (official BF16 0.747809, bound 0.897371); mean |d| = 0.0633858 (official BF16 0.0633858, bound 0.076063); within the rule; argmax agrees with F32 at 7/9 positions
+bfloat16: clamp fired on 0 tensors, 0 entries (all prompts); 2.1 s
+torch 2.10.0 transformers 5.2.0; truth /Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38; official /Volumes/T9/transformers-references/gemma-3-4b-it-093f9f38-bf16
+        8.96 real        26.03 user        16.13 sys
+         35005743104  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             4128251  page reclaims
+                  49  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                  12  voluntary context switches
+              248812  involuntary context switches
+        412387389676  instructions retired
+        143948932550  cycles elapsed
+         24723039936  peak memory footprint
+
+== exit=0 wall=9.0s end 2026-10-17T22:59:37Z

@@ -1,0 +1,83 @@
+{
+ "head": "818160545802c1374f7607d26ce20cc86d2d758d",
+ "commits": [],
+ "results": [
+  {
+   "name": "preconditions",
+   "status": "pass",
+   "detail": "/Volumes/bag of holding (48 GiB free) and /Volumes/T9 (293 GiB free) were mounted at the start, and the runner checked both before every group. Local free space was 23 GiB, which clears the 20 GiB preflight. The worktree /Users/nover/repos/transformers-worktrees/tfm-half-followups2 was at 818160545802c1374f7607d26ce20cc86d2d758d with dirty=0 before and after every run; the runner checks this per process and stops on any change. No code was changed, nothing was committed, pushed or stashed, nothing was downloaded, and /Users/nover/repos/transformers was not touched. The lock /Users/nover/repos/transformers-worktrees/.heavy-model.lock was taken for each real-checkpoint group (mkdir, retried every 60 s) and released each time, and it is absent now. The memory watchdog never fired."
+  },
+  {
+   "name": "build at HEAD (release, CARGO_TARGET_DIR=/Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates)",
+   "status": "pass",
+   "detail": "Command: cargo test --locked --release --features metal,tokenizers --test llama_family_artifacts --test gemma_artifacts --no-run, run in the worktree. The first build was a no-op: cargo judged the f9f78b5 export's binaries fresh (logs/build-0-noop.log). To get binaries built from the worktree itself, I updated only the modification time of src/lib.rs (content and git blob unchanged; git status stayed clean) and rebuilt. Cargo recompiled the crate in 1 min. The new binaries are byte-identical to the f9f78b5 gate binaries named in the envelope record: llama_family_artifacts-693e11c29d0eb894 sha256 72a204e1c37262448b47e772e980a72cba33fc8ae1618af1385ad521009db738, and gemma_artifacts-7e9fb558e3797b0a sha256 533d5d9c242bcc783dea609917c57471e30f92fd01b010316e1dde57993b2e17. Copies of the earlier binaries are kept in prior-binaries/."
+  },
+  {
+   "name": "Llama family Flex/BF16 (SmolLM-135M, Qwen3-4B, SmolLM3-3B, Qwen2-7B vs F64, Llama-3.1-8B)",
+   "status": "pass",
+   "detail": "15 of 15 gates pass (prompt logits, cached greedy, batched prefill), each in its own process. Every test output is identical to the f9f78b5 round once thread ids and timings are masked. Nearest margins: SmolLM3-3B prompt 2 mean 0.21004 against 0.26652 (78.8%); SmolLM-135M prompt 2 max 2.0306 against 2.5771 (78.8%); Llama-3.1-8B prompt-1 quarter-prefill decode mean 0.021266 against 0.028753 (74.0%); Qwen3-4B cached decode mean 0.073401 against 0.100463 (73.1%). Decisive greedy steps: Qwen3-4B 26/32, Llama-3.1-8B 21/32, and 0/32 for SmolLM-135M, SmolLM3-3B and Qwen2-7B (MIN_GREEDY=0, so those cached tests rest on the decode rows)."
+  },
+  {
+   "name": "Llama family Metal/F16",
+   "status": "pass",
+   "detail": "12 of 12 gates pass for the four F16-calibrated checkpoints (SmolLM-135M, Qwen3-4B, SmolLM3-3B, Llama-3.1-8B), with output identical to f9f78b5. Nearest margin: SmolLM-135M prompt 0 mean 0.035925 against 0.038484 (93.4%), max 0.38721 against 0.47231 (82.0%). Decisive greedy steps: Qwen3-4B 31/32, Llama-3.1-8B 26/32, SmolLM-135M 13/32, SmolLM3-3B 13/32. Qwen2-7B's three Metal/F16 gates fail before loading, as the round decided (expected_fail): `uncalibrated: official cpu-eager float16 non-finite at prompt 0 position 1`, exit 101, identical to f9f78b5. Metal BF16 was not adopted: a probe on SmolLM-135M fails with the contextual `backend cannot store checkpoint dtype BF16` at model.embed_tokens.weight (expected_fail)."
+  },
+  {
+   "name": "gemma-3-4b-it Flex/BF16 short and long",
+   "status": "pass",
+   "detail": "5 of 5 gates pass (prompt logits, cached greedy, batched prefill, long-context logits across the sliding window, long cached decode wrapping the rings), with output identical to f9f78b5. Nearest margin: cached decode row at step 13, 2.1528187 against 2.2789564 (94.47% of the bound; mean 0.058640 against 0.077997), unchanged. Decisive greedy steps: short 12/32, long 0/8 (MIN_GREEDY=0). Long negative control: the run without the window fails the rule as required (max 36.845 against 15.276, mean 0.25371 against 0.086016)."
+  },
+  {
+   "name": "gemma-3-4b-it Metal half-precision profiles (not kept)",
+   "status": "expected_fail",
+   "detail": "No Metal half-precision profile was kept for Gemma. All five Metal gates with TRANSFORMERS_GEMMA_DTYPE=f16 refuse before loading (tests/gemma_artifacts.rs:405, citing the 73,509.6 > 65,504 overflow at block 5's post-MLP residual add), exit 101. Metal BF16 fails with `backend cannot store checkpoint dtype BF16`. The non-ignored unit test f16_runs_are_refused_with_the_measured_overflow passes, and the bundle-only test official_f16_graphs_overflow_so_gemma_has_no_f16_envelope passes."
+  },
+  {
+   "name": "F32 controls after the SiLU change (all 30 Llama-family and all 10 Gemma F32 gates, Flex and Metal)",
+   "status": "pass",
+   "detail": "I ran every F32 gate, a superset of the one Flex and one Metal gate per family that was asked for. All 40 pass with output identical to f9f78b5. Against the last pre-SiLU round (Mac validation: Llama family at 53f167b, Gemma at c2936fe), every printed |Δ| statistic line of the earlier logs appears verbatim at HEAD (prompt, batched-row and chunk statistics), and every greedy count is equal (32/32, long 8/8). At printed precision, F32 is unchanged. The decode-truth rows added in 78978b6 have no pre-SiLU counterpart."
+  },
+  {
+   "name": "bundle-only calibration tests",
+   "status": "pass",
+   "detail": "21 of 23 pass: the leave-one-out and calibration tests for the BF16 graphs of all seven truths and the F16 graphs of four Llama-family truths, plus the Gemma F16 overflow test. The two Qwen2-7B F16 calibration tests fail as uncalibrated, as before (expected_fail). All 23 are identical to f9f78b5. They evaluate no Burn model, so they are not gate passes."
+  },
+  {
+   "name": "rerun totals and logs",
+   "status": "pass",
+   "detail": "106 runs: 94 pass and 12 expected fails (2 Qwen2-7B F16 calibrations, 3 Qwen2-7B Metal/F16 gates, 5 Gemma Metal/F16 refusals, 2 Metal BF16 refusals). There is no unexpected failure. 99 of the runs also ran at f9f78b5, and all 99 have identical output and exit status. Every run log starts with `== source 818160545802c1374f7607d26ce20cc86d2d758d dirty=0` and ends with a clean `== source after run` line. The largest peak footprint was 44.0 GB (Llama-3.1-8B F32 Metal), within -3.7% to +0.6% of the f9f78b5 peaks. Total wall time was 1116 s. Logs are in followups/rerun/8181605/logs/ (runs.jsonl, driver.log, compare.log, margins.log, build logs), and SHA256SUMS covers all logs, the harness and the preserved binaries. The older Oct 17 files directly under followups/rerun/ (fd90c6c, drives missing) were left untouched."
+  },
+  {
+   "name": "not run (out of this stage's scope)",
+   "status": "skipped",
+   "detail": "Larger checkpoints were not rerun: Nemotron-H, Qwen3.5-0.8B, Qwen3.8-27B, Muse, DeepSeek-V2-Lite, Qwen3-30B-A3B. Also not run: gpt-oss, FLAN-T5, CUDA/ROCm, coverage, the package gate, and the source checks (no Rust code changed after 1816d73)."
+  }
+ ],
+ "open_issues": [
+  "Nemotron-H official-precision gate failure from the implementation stage (cached row 22: 0.998558 against the 0.998635 floor, attributed to the once-rounded Mamba-2 SiLU) was outside this rerun's scope and remains open. It needs a reviewed decision on the floor rule.",
+  "gemma-3-4b-it Flex/BF16 cached decode step 13 reproduces exactly at 2.1528187 against 2.2789564 (94.47% of the bound). This is the nearest margin of all half-precision gates and still deserves a targeted look.",
+  "SmolLM-135M Metal/F16 prompt 0 mean is 0.035925 against 0.038484 (93.4%), the nearest Llama-family margin, unchanged.",
+  "Qwen2-7B F16 stays uncalibrated: its three Metal/F16 gates and two F16 calibration tests fail by design before loading. There is no F16 claim until an envelope rule exists, for example from the SDPA graphs alone.",
+  "Gemma has no Metal half-precision profile: only the gates refuse F16, and the library still evaluates the overflowing graph. A library-level policy is maintainer decision (d).",
+  "Metal BF16 is refused on Burn 0.21 with the contextual `backend cannot store checkpoint dtype BF16` (measured on SmolLM-135M and gemma-3-4b-it). Adopting it needs the Burn 0.22 upgrade, a maintainer decision.",
+  "With the envelope tolerance, no greedy step is decisive for SmolLM-135M, SmolLM3-3B or Qwen2-7B in Flex/BF16 (0/32), or for Gemma's long prompt (0/8). Those cached tests rest on the decode rows alone, and the 0.5 self-consistency tolerance for cached prefill, batched rows and chunk ends is still provisional.",
+  "The pre-SiLU F32 comparison is at the logs' printed precision, not a bitwise logit comparison. The earlier F32 cached-greedy logs printed only token counts, so the new F32 decode-truth rows have no pre-SiLU counterpart.",
+  "The first no-op build showed that cargo reuses binaries built from another copy of the same tree in a shared CARGO_TARGET_DIR. Here the forced rebuild from the worktree produced byte-identical binaries, but future stages should force or verify a rebuild when switching source trees."
+ ],
+ "summary": "I reran every half-precision real-checkpoint gate for the Llama family and gemma-3-4b-it at 818160545802c1374f7607d26ce20cc86d2d758d, in the worktree itself (dirty=0 before and after each run). Each test ran in its own process under the heavy-model lock, with CARGO_TARGET_DIR=\"/Volumes/bag of holding/cargo-targets/tfm-half-followups2-gates\" and --release. Both external drives were mounted throughout. No code was changed and nothing was committed.\n\nThe first build did nothing, because cargo judged the f9f78b5 export's binaries fresh. I updated src/lib.rs's modification time only and rebuilt from the worktree. The rebuilt binaries are byte-identical to the f9f78b5 gate binaries in the envelope record (llama 72a204e1…, gemma 533d5d9c…).\n\nResults, 106 runs: 94 pass, 12 expected fails, no unexpected failure.\n- **Flex/BF16:** 15/15 Llama-family gates and 5/5 Gemma short and long gates pass.\n- **Metal/F16:** 12/12 gates pass for the four F16-calibrated Llama checkpoints. Qwen2-7B's three fail as uncalibrated before loading, as decided.\n- **Profiles not kept:** Gemma Metal/F16 is refused by the gate in all five tests, and Metal BF16 fails with the contextual `backend cannot store checkpoint dtype BF16` refusal.\n- **F32:** all 40 Flex and Metal gates pass. Every printed |Δ| statistic and every greedy count from the pre-SiLU round (53f167b, Gemma c2936fe) appears verbatim, so F32 is unchanged by the SiLU change.\n\nAll 99 runs that also ran at f9f78b5 have identical output and exit status. Margins are unchanged: Gemma's BF16 cached decode step 13 is 2.1528 against 2.2790 (94.5%), and SmolLM-135M Metal/F16 prompt 0 mean is 0.035925 against 0.038484 (93.4%). The Nemotron-H failure and the maintainer decisions remain open; Nemotron was outside this rerun.",
+ "logs": [
+  "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/rerun/8181605/logs/",
+  "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/rerun/8181605/logs/runs.jsonl",
+  "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/rerun/8181605/logs/driver.log",
+  "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/rerun/8181605/logs/compare.log",
+  "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/rerun/8181605/logs/margins.log",
+  "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/rerun/8181605/logs/build.log",
+  "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/rerun/8181605/logs/build-0-noop.log",
+  "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/rerun/8181605/logs/preflight.log",
+  "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/rerun/8181605/harness/run_rerun.py",
+  "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/rerun/8181605/harness/compare_runs.py",
+  "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/rerun/8181605/harness/margins.py",
+  "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/rerun/8181605/SHA256SUMS",
+  "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/followups/rerun/8181605/prior-binaries/"
+ ]
+}

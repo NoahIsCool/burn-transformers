@@ -1,0 +1,135 @@
+ok   bf16-cpu-eager: provenance graph bfloat16/cpu/eager
+ok   bf16-cpu-eager: script sha256 58ab9f552137
+ok   bf16-cpu-eager: provenance.config_sha256 equals the truth's
+ok   bf16-cpu-eager: provenance.weights_sha256 equals the truth's
+ok   bf16-cpu-eager: provenance.transformers equals the truth's
+ok   bf16-cpu-eager: provenance.torch equals the truth's
+ok   bf16-cpu-eager: provenance.repository equals the truth's
+ok   bf16-cpu-eager: provenance.revision equals the truth's
+ok   bf16-cpu-eager: model and vocabulary
+ok   bf16-cpu-eager: prompts and token IDs
+ok   bf16-cpu-eager: greedy length
+ok   bf16-cpu-eager: logits-0.f32le digest, shape, finite
+ok   bf16-cpu-eager: logits-1.f32le digest, shape, finite
+ok   bf16-cpu-eager: logits-2.f32le digest, shape, finite
+ok   bf16-cpu-eager: decode tokens from the truth manifest
+ok   bf16-cpu-eager: decode feeds the truth's greedy tokens
+ok   bf16-cpu-eager: decode record starts after prompt 0, shape
+ok   bf16-cpu-eager: decode max equals the step maximum
+ok   bf16-cpu-eager: decode cached digest, finite
+ok   bf16-cpu-eager: decode stateless digest, finite
+ok   bf16-cpu-eager: recorded gaps recomputed (max 0.875)
+ok   bf16-cpu-eager: prompt logits byte-identical to SmolLM3-3B-1fa6fa28-bf16
+ok   bf16-cpu-eager: greedy identical to SmolLM3-3B-1fa6fa28-bf16
+ok   bf16-cpu-eager: prompt 0 identical to the previous diagnostic cpu-bfloat16-eager
+ok   bf16-cpu-eager: prompt 1 identical to the previous diagnostic cpu-bfloat16-eager
+ok   bf16-cpu-eager: prompt 2 identical to the previous diagnostic cpu-bfloat16-eager
+ok   bf16-cpu-eager: decode cached identical to the previous diagnostic
+ok   bf16-cpu-eager: decode stateless identical to the previous diagnostic
+ok   bf16-cpu-sdpa: provenance graph bfloat16/cpu/sdpa
+ok   bf16-cpu-sdpa: script sha256 58ab9f552137
+ok   bf16-cpu-sdpa: provenance.config_sha256 equals the truth's
+ok   bf16-cpu-sdpa: provenance.weights_sha256 equals the truth's
+ok   bf16-cpu-sdpa: provenance.transformers equals the truth's
+ok   bf16-cpu-sdpa: provenance.torch equals the truth's
+ok   bf16-cpu-sdpa: provenance.repository equals the truth's
+ok   bf16-cpu-sdpa: provenance.revision equals the truth's
+ok   bf16-cpu-sdpa: model and vocabulary
+ok   bf16-cpu-sdpa: prompts and token IDs
+ok   bf16-cpu-sdpa: greedy length
+ok   bf16-cpu-sdpa: logits-0.f32le digest, shape, finite
+ok   bf16-cpu-sdpa: logits-1.f32le digest, shape, finite
+ok   bf16-cpu-sdpa: logits-2.f32le digest, shape, finite
+ok   bf16-cpu-sdpa: decode tokens from the truth manifest
+ok   bf16-cpu-sdpa: decode feeds the truth's greedy tokens
+ok   bf16-cpu-sdpa: decode record starts after prompt 0, shape
+ok   bf16-cpu-sdpa: decode max equals the step maximum
+ok   bf16-cpu-sdpa: decode cached digest, finite
+ok   bf16-cpu-sdpa: decode stateless digest, finite
+ok   bf16-cpu-sdpa: recorded gaps recomputed (max 0.8125)
+ok   bf16-cpu-sdpa: prompt 0 identical to the previous diagnostic cpu-bfloat16-sdpa
+ok   bf16-cpu-sdpa: prompt 1 identical to the previous diagnostic cpu-bfloat16-sdpa
+ok   bf16-cpu-sdpa: prompt 2 identical to the previous diagnostic cpu-bfloat16-sdpa
+ok   bf16-cpu-sdpa: decode cached identical to the previous diagnostic
+ok   bf16-cpu-sdpa: decode stateless identical to the previous diagnostic
+ok   bf16-mps-eager: provenance graph bfloat16/mps/eager
+ok   bf16-mps-eager: script sha256 58ab9f552137
+ok   bf16-mps-eager: provenance.config_sha256 equals the truth's
+ok   bf16-mps-eager: provenance.weights_sha256 equals the truth's
+ok   bf16-mps-eager: provenance.transformers equals the truth's
+ok   bf16-mps-eager: provenance.torch equals the truth's
+ok   bf16-mps-eager: provenance.repository equals the truth's
+ok   bf16-mps-eager: provenance.revision equals the truth's
+ok   bf16-mps-eager: model and vocabulary
+ok   bf16-mps-eager: prompts and token IDs
+ok   bf16-mps-eager: greedy length
+ok   bf16-mps-eager: logits-0.f32le digest, shape, finite
+ok   bf16-mps-eager: logits-1.f32le digest, shape, finite
+ok   bf16-mps-eager: logits-2.f32le digest, shape, finite
+ok   bf16-mps-eager: decode tokens from the truth manifest
+ok   bf16-mps-eager: decode feeds the truth's greedy tokens
+ok   bf16-mps-eager: decode record starts after prompt 0, shape
+ok   bf16-mps-eager: decode max equals the step maximum
+ok   bf16-mps-eager: decode cached digest, finite
+ok   bf16-mps-eager: decode stateless digest, finite
+ok   bf16-mps-eager: recorded gaps recomputed (max 0.75)
+ok   bf16-mps-eager: prompt 0 identical to the previous diagnostic mps-bfloat16-eager
+ok   bf16-mps-eager: prompt 1 identical to the previous diagnostic mps-bfloat16-eager
+ok   bf16-mps-eager: prompt 2 identical to the previous diagnostic mps-bfloat16-eager
+ok   bf16-mps-eager: decode cached identical to the previous diagnostic
+ok   bf16-mps-eager: decode stateless identical to the previous diagnostic
+ok   bf16-mps-sdpa: provenance graph bfloat16/mps/sdpa
+ok   bf16-mps-sdpa: script sha256 58ab9f552137
+ok   bf16-mps-sdpa: provenance.config_sha256 equals the truth's
+ok   bf16-mps-sdpa: provenance.weights_sha256 equals the truth's
+ok   bf16-mps-sdpa: provenance.transformers equals the truth's
+ok   bf16-mps-sdpa: provenance.torch equals the truth's
+ok   bf16-mps-sdpa: provenance.repository equals the truth's
+ok   bf16-mps-sdpa: provenance.revision equals the truth's
+ok   bf16-mps-sdpa: model and vocabulary
+ok   bf16-mps-sdpa: prompts and token IDs
+ok   bf16-mps-sdpa: greedy length
+ok   bf16-mps-sdpa: logits-0.f32le digest, shape, finite
+ok   bf16-mps-sdpa: logits-1.f32le digest, shape, finite
+ok   bf16-mps-sdpa: logits-2.f32le digest, shape, finite
+ok   bf16-mps-sdpa: decode tokens from the truth manifest
+ok   bf16-mps-sdpa: decode feeds the truth's greedy tokens
+ok   bf16-mps-sdpa: decode record starts after prompt 0, shape
+ok   bf16-mps-sdpa: decode max equals the step maximum
+ok   bf16-mps-sdpa: decode cached digest, finite
+ok   bf16-mps-sdpa: decode stateless digest, finite
+ok   bf16-mps-sdpa: recorded gaps recomputed (max 0.75)
+ok   bf16-mps-sdpa: prompt 0 identical to the previous diagnostic mps-bfloat16-sdpa
+ok   bf16-mps-sdpa: prompt 1 identical to the previous diagnostic mps-bfloat16-sdpa
+ok   bf16-mps-sdpa: prompt 2 identical to the previous diagnostic mps-bfloat16-sdpa
+ok   bf16-mps-sdpa: decode cached identical to the previous diagnostic
+ok   bf16-mps-sdpa: decode stateless identical to the previous diagnostic
+ok   f32-cpu-eager: provenance graph float32/cpu/eager
+ok   f32-cpu-eager: script sha256 58ab9f552137
+ok   f32-cpu-eager: provenance.config_sha256 equals the truth's
+ok   f32-cpu-eager: provenance.weights_sha256 equals the truth's
+ok   f32-cpu-eager: provenance.transformers equals the truth's
+ok   f32-cpu-eager: provenance.torch equals the truth's
+ok   f32-cpu-eager: provenance.repository equals the truth's
+ok   f32-cpu-eager: provenance.revision equals the truth's
+ok   f32-cpu-eager: model and vocabulary
+ok   f32-cpu-eager: prompts and token IDs
+ok   f32-cpu-eager: greedy length
+ok   f32-cpu-eager: logits-0.f32le digest, shape, finite
+ok   f32-cpu-eager: logits-1.f32le digest, shape, finite
+ok   f32-cpu-eager: logits-2.f32le digest, shape, finite
+ok   f32-cpu-eager: decode tokens from the truth manifest
+ok   f32-cpu-eager: decode feeds the truth's greedy tokens
+ok   f32-cpu-eager: decode record starts after prompt 0, shape
+ok   f32-cpu-eager: decode max equals the step maximum
+ok   f32-cpu-eager: decode cached digest, finite
+ok   f32-cpu-eager: decode stateless digest, finite
+ok   f32-cpu-eager: recorded gaps recomputed (max 0.000239372)
+ok   f32-cpu-eager: prompt logits byte-identical to the truth SmolLM3-3B-1fa6fa28
+ok   f32-cpu-eager: greedy identical to the truth
+ok   f32-cpu-eager: prompt 0 identical to the previous diagnostic cpu-float32-eager
+ok   f32-cpu-eager: prompt 1 identical to the previous diagnostic cpu-float32-eager
+ok   f32-cpu-eager: prompt 2 identical to the previous diagnostic cpu-float32-eager
+ok   f32-cpu-eager: decode cached identical to the previous diagnostic
+ok   f32-cpu-eager: decode stateless identical to the previous diagnostic
+SmolLM3-3B: 0 failure(s)

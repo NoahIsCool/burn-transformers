@@ -1,0 +1,28 @@
+== source 1e38eecf989a1ae568b67b2e9fcdd9b2ebdbadb8 with one mutation: fp32_softmax normalizes in the activation dtype
+== start 2026-10-18T06:58:39+00:00
+== cmd cargo test --locked --lib attention::dispatch::tests::half_precision_eager_attention_rounds_like_transformers_eager -- --exact
+== diff
+diff --git a/src/attention/dispatch.rs b/src/attention/dispatch.rs
+index 5820633..e84a92a 100644
+--- a/src/attention/dispatch.rs
++++ b/src/attention/dispatch.rs
+@@ -437,8 +437,7 @@ pub(crate) fn fp32_softmax<B: Backend>(scores: Tensor<B, 4>) -> Tensor<B, 4> {
+         .expand(shape);
+     softmax(
+         scores
+-            .mask_fill(unsupported_row.clone(), 0.0)
+-            .cast(DType::F32),
++            .mask_fill(unsupported_row.clone(), 0.0),
+         3,
+     )
+     .mask_fill(unsupported_row, 0.0)
+== output
+running 1 test
+test attention::dispatch::tests::half_precision_eager_attention_rounds_like_transformers_eager ... FAILED
+thread 'attention::dispatch::tests::half_precision_eager_attention_rounds_like_transformers_eager' (41944604) panicked at src/attention/dispatch_tests.rs:1609:9:
+assertion `left == right` failed: BF16 probabilities
+  left: 11
+ right: 0
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3530 filtered out; finished in 0.01s
+== exit=101 expected=failure
+== restored, git status: clean

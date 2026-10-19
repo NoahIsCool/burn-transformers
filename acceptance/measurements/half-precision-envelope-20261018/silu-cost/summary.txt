@@ -1,0 +1,14 @@
+flex BF16 source32 prefill_median_s           base [0.1936, 0.1917, 0.1918] median 0.1918 | patched [0.1932, 0.197, 0.1902] median 0.1932 | ratio 1.007
+flex BF16 source32 decode_median_s            base [14.7315, 14.6681, 14.6926] median 14.6926 | patched [15.3888, 15.8386, 14.7044] median 15.3888 | ratio 1.047
+flex BF16 source32 prefill_tok_per_s          base [165.3, 166.92, 166.85] median 166.8500 | patched [165.65, 162.41, 168.27] median 165.6500 | ratio 0.993
+flex BF16 source32 decode_tok_per_s           base [8.689, 8.726, 8.712] median 8.7120 | patched [8.318, 8.082, 8.705] median 8.3180 | ratio 0.955
+flex BF16 source128 prefill_median_s          base [0.3429, 0.342, 0.3418] median 0.3420 | patched [0.3256, 0.3292, 0.332] median 0.3292 | ratio 0.963
+flex BF16 source128 decode_median_s           base [15.3884, 14.7707, 14.8003] median 14.8003 | patched [14.8255, 14.7757, 14.7585] median 14.7757 | ratio 0.998
+flex BF16 source128 prefill_tok_per_s         base [373.24, 374.32, 374.5] median 374.3200 | patched [393.15, 388.87, 385.56] median 388.8700 | ratio 1.039
+flex BF16 source128 decode_tok_per_s          base [8.318, 8.666, 8.648] median 8.6480 | patched [8.634, 8.663, 8.673] median 8.6630 | ratio 1.002
+e2e-smollm-135m-flex-bf16.r1.base.half2.log: == exit=0 wall=398.0s end=2026-10-18T03:57:56+00:00 load_end 2.94 min_free_pct=88 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+e2e-smollm-135m-flex-bf16.r1.patched.half2.log: == exit=0 wall=404.1s end=2026-10-18T04:04:40+00:00 load_end 13.23 min_free_pct=88 max_swap_growth_mib=0 swapin_mib=1 pressured_swapin_mib=0
+e2e-smollm-135m-flex-bf16.r2.base.half2.log: == exit=0 wall=390.1s end=2026-10-18T04:18:02+00:00 load_end 1.43 min_free_pct=89 max_swap_growth_mib=0 swapin_mib=1 pressured_swapin_mib=0
+e2e-smollm-135m-flex-bf16.r2.patched.half2.log: == exit=0 wall=411.0s end=2026-10-18T04:11:31+00:00 load_end 1.29 min_free_pct=88 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
+e2e-smollm-135m-flex-bf16.r3.base.half2.log: == exit=0 wall=391.2s end=2026-10-18T04:24:33+00:00 load_end 1.91 min_free_pct=89 max_swap_growth_mib=0 swapin_mib=3 pressured_swapin_mib=0
+e2e-smollm-135m-flex-bf16.r3.patched.half2.log: == exit=0 wall=391.2s end=2026-10-18T04:31:04+00:00 load_end 1.57 min_free_pct=89 max_swap_growth_mib=0 swapin_mib=0 pressured_swapin_mib=0
