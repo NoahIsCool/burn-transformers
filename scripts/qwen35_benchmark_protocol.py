@@ -37,26 +37,35 @@ takes the heavy-model lock; its caller does.
 
 Statistics. A run's value of a warm or natural-loop metric is the median of
 its ten measured repetitions; strict load and cold first token are one
-observation per process. Steady state is the earliest window of at least
-six final rounds in which, for every cell and every gated metric, the median
-of the window's last half differs from the median of its first half by at
-most 2.5% (half the alert threshold, so drift alone cannot raise an alert).
-The rule catches trends and, for noisy single observations such as strict
-load, an estimate not yet stable to within 2.5%; both call for more rounds.
-Gated statistics are medians over the steady-state rounds. Cold first token
-is reported as the median and range over the same rounds and over all
-rounds, with its rank correlations with shader-cache growth and with the
-round number; it is a diagnostic and never alerts or fails.
+observation per process. Steady state is assessed over whole blocks, working
+back from the end of the campaign: a block drifts when, for some cell and
+gated metric, the median of its four rounds differs from the median of all
+later rounds by more than 2.5% (half the alert threshold) and by more than
+three standard errors of that difference, estimated from the later rounds'
+robust round-to-round noise. The window starts at the earliest block from
+which no block drifts and spans at least two blocks, so every later block
+has passed too, and every cell runs equally often in every position of the
+window. When the second-to-last block already drifts against the last, the
+campaign has no steady state and needs more rounds. Gated statistics are
+medians over the steady-state rounds. Cold first token is reported as the
+median and range over the same rounds and over all rounds, with its rank
+correlations with shader-cache growth and with the round number, also
+without the samples that followed a discarded (contaminated or failed)
+attempt, which grew the shader cache before them; it is a diagnostic and
+never alerts or fails.
 
 Judging. Against a recorded reference, a gated metric whose candidate median
 changes by more than 5% in either direction alerts; one that is more than
 10% slower is a failure candidate. A failure is confirmed only by a
 controlled rerun: a campaign of this protocol that alternates the candidate
-with the reference binary and finds the candidate more than 10% slower than
-both the recorded reference value and the reference binary's median in that
-campaign. When the reference binary is itself more than 10% slower than its
-recorded value, the series has drifted (host change), and re-baselining is a
-maintainer decision.
+with the reference binary (the recorded executable, by SHA-256, or a clean
+build of its source commit with the same compiler, features, and profile,
+reproducing the reference tokens) and finds the candidate more than 10%
+slower than both the recorded reference value and the reference binary's
+median in that campaign. When the reference binary is itself more than 10%
+slower than its recorded value, the series has drifted (host change), and
+re-baselining is a maintainer decision. A candidate built with another
+compiler is another series and is not judged.
 
 Usage::
 
@@ -73,6 +82,7 @@ import argparse
 import datetime
 import hashlib
 import json
+import math
 import os
 import statistics
 import subprocess
@@ -117,9 +127,16 @@ MAXIMUM_ATTEMPTS = 4
 MAXIMUM_LOAD_WAIT_SECONDS = 3600
 #: A process that runs longer is killed and the campaign stops.
 SAMPLE_TIMEOUT_SECONDS = 1500
-#: Steady state: the shortest window and the largest half-to-half drift of a gated median.
-STEADY_WINDOW_ROUNDS = 6
+#: Steady state: the shortest window (two whole blocks), the practical drift tolerance of a
+#: block's gated median against the later rounds' median, and the number of standard errors
+#: (the conventional three-sigma control limit) by which a drift must also exceed the noise.
+STEADY_WINDOW_ROUNDS = 2 * BLOCK_ROUNDS
 STEADY_DRIFT = 0.025
+STEADY_Z = 3.0
+#: The upper quartile of the standard normal distribution: a normal sample's median absolute
+#: deviation is this many standard deviations, and the median absolute difference of two
+#: independent draws is this many times sqrt(2) standard deviations.
+NORMAL_QUARTILE = statistics.NormalDist().inv_cdf(0.75)
 #: Judging thresholds: an alert above 5% change, a failure candidate above 10% slowdown.
 ALERT = 0.05
 FAIL = 0.10
@@ -567,72 +584,230 @@ def timing_protocol(report: dict) -> dict:
     return protocol
 
 
-def series_identity(report: dict, kind: str) -> dict:
-    """Fields that define a benchmark series: timing protocol, features, profile, checkpoint, host, and OS."""
+def compiler(report: dict) -> tuple[str, str]:
+    """The ``rustc -vV`` text and the rustup toolchain that compiled a report's executable.
+
+    The compiler is part of a benchmark series: another rustc or LLVM changes
+    the generated code and with it the timings, so a report that does not
+    record both cannot be placed in a series.
+    """
     provenance = report["provenance"]
-    return {"benchmark": kind, "protocol": timing_protocol(report),
+    rustc = (provenance.get("rustc") or {}).get("value")
+    toolchain = provenance.get("compiled_rustup_toolchain")
+    if not rustc or not toolchain:
+        raise ProtocolError("the report does not record the rustc version and rustup toolchain that built it; "
+                            "the compiler is part of the benchmark series")
+    return rustc, toolchain
+
+
+def series_identity(report: dict, kind: str) -> dict:
+    """Fields that define a benchmark series: timing protocol, compiler, features, profile, checkpoint, host, and OS."""
+    provenance = report["provenance"]
+    rustc, toolchain = compiler(report)
+    return {"benchmark": kind, "protocol": timing_protocol(report), "rustc": rustc, "rustup_toolchain": toolchain,
             "cargo_features": sorted(provenance["cargo_features"]), "profile": provenance["profile"],
             "backend_profile": provenance["backend_profile"], "repository": provenance["repository"],
             "revision": provenance["revision"], "machine_model": provenance["environment"]["machine_model"],
             "operating_system": provenance["environment"]["operating_system"]}
 
 
+def binary_identity(report: dict) -> dict:
+    """The executable that wrote a report and how it was built: digest, source, compiler, features, and profile.
+
+    A controlled rerun must run the reference binary: either this exact
+    executable (``sha256``) or a build of the same ``source_commit`` from a
+    clean tree (``worktree_status`` empty) with the same compiler, features,
+    and profile. The commit and the clean status together fix the source tree.
+    """
+    provenance = report["provenance"]
+    rustc, toolchain = compiler(report)
+    commit = (provenance.get("crate_commit") or {}).get("value")
+    status = (provenance.get("crate_worktree_status") or {}).get("value")
+    if not commit or status is None:
+        raise ProtocolError("the report does not record the source commit and tree status of its executable")
+    return {"sha256": provenance["benchmark_executable_sha256"], "source_commit": commit, "worktree_status": status,
+            "rustc": rustc, "rustup_toolchain": toolchain, "cargo_features": sorted(provenance["cargo_features"]),
+            "profile": provenance["profile"]}
+
+
 # --- Campaign summary and steady state -----------------------------------------
 
+def robust_noise(values: list[float]) -> dict:
+    """Relative round-to-round noise of a series: the smaller of two robust standard deviations.
+
+    Both estimates are consistent for the standard deviation of normal noise
+    and are divided by the series median, so they are relative:
+
+    * ``mad``: the median absolute deviation from the median over
+      ``NORMAL_QUARTILE``; one outlying round cannot inflate it;
+    * ``successive``: the median absolute difference between consecutive
+      rounds over ``NORMAL_QUARTILE * sqrt(2)``; a trend or a step among the
+      values cannot inflate it, since it changes consecutive rounds little.
+
+    ``noise`` is the smaller one, so neither an outlier nor a trend can widen
+    a drift limit; the choice errs toward finding drift, that is, toward more
+    rounds.
+    """
+    if len(values) < 2:
+        raise ProtocolError("robust noise needs at least two values")
+    centre = median(values)
+    if not centre > 0:
+        raise ProtocolError(f"robust noise of a series with nonpositive median {centre}")
+    mad = median(abs(value - centre) for value in values) / NORMAL_QUARTILE / centre
+    successive = median(abs(later - earlier) for earlier, later in zip(values, values[1:])) / (
+        NORMAL_QUARTILE * math.sqrt(2.0)) / centre
+    return {"mad": mad, "successive": successive, "noise": min(mad, successive)}
+
+
+def block_drift(block: list[float], later: list[float]) -> dict:
+    """Whether a block's median differs from the later rounds' median beyond tolerance and noise.
+
+    ``drift = median(later) / median(block) - 1``, positive when the later
+    rounds are slower. With ``s`` the relative noise of the later rounds
+    alone (:func:`robust_noise`; the backward scan of :func:`steady_state`
+    has already accepted them, starting from the last block as its
+    reference), the large-sample standard error of the
+    log ratio of the two medians is ``sqrt(pi / 2) * s * sqrt(1 / len(block)
+    + 1 / len(later))``, and ``z`` is ``|log(1 + drift)|`` in those units. The
+    block drifts when ``|drift| > STEADY_DRIFT`` and ``z > STEADY_Z``: the
+    first condition keeps changes too small to matter at a 5% alert from
+    counting, the second keeps one-observation-per-process noise (strict load)
+    from counting. With zero noise ``z`` is ``None`` and the tolerance alone
+    decides.
+    """
+    if len(block) < 1 or len(later) < 2:
+        raise ProtocolError("a block drift needs a nonempty block and at least two later rounds")
+    reference, value = median(block), median(later)
+    if not reference > 0:
+        raise ProtocolError(f"block drift of a series with nonpositive median {reference}")
+    drift = value / reference - 1.0
+    noise = robust_noise(later)["noise"]
+    error = math.sqrt(math.pi / 2.0) * noise * math.sqrt(1.0 / len(block) + 1.0 / len(later))
+    shift = abs(math.log(value / reference))
+    z = shift / error if error > 0 else None
+    drifting = abs(drift) > STEADY_DRIFT and (z is None or z > STEADY_Z)
+    return {"drift": drift, "noise": noise, "standard_error": error, "z": z, "drifting": drifting}
+
+
 def steady_state(values: dict[tuple[str, str, str], list[float]], rounds: int) -> dict:
-    """Earliest window of at least ``STEADY_WINDOW_ROUNDS`` final rounds whose gated medians do not drift.
+    """The longest suffix of whole blocks, at least ``STEADY_WINDOW_ROUNDS`` long, in which no block drifts.
 
     ``values`` maps (label, benchmark, metric) to one value per round, in
-    round order. For each series the window is split into its first and last
-    ``n // 2`` rounds (an odd window's middle round is in neither half), and
-    the series drifts when the later half's median differs from the earlier
-    half's by more than ``STEADY_DRIFT``. This catches trends, and for a
-    noisy single observation per round (strict load) it also catches a
-    median not yet stable to within ``STEADY_DRIFT``; an isolated outlying
-    round moves neither half's median. Returns the first round of the window
-    (or ``None``), every drift at the chosen window (or, without one, the
-    whole campaign), and the series that drift there.
+    round order; ``rounds`` is a whole number of ``BLOCK_ROUNDS`` blocks. Each
+    candidate window starts at a block boundary and spans at least
+    ``STEADY_WINDOW_ROUNDS`` rounds; its first block is compared with all
+    later rounds by :func:`block_drift`, series by series. The window starts at
+    the earliest candidate from which no candidate block drifts, so the rule
+    is monotone: every later window passed too, and one lucky window cannot
+    stand in for a drift that shows up later. Because windows are whole
+    Latin-square blocks, every cell runs equally often in every position
+    inside them.
+
+    Returns the first round and the rounds of the window (``None`` and ``[]``
+    without one); every candidate block's assessment; the latest drifting
+    block (``limiting_block``, which ends the window or, when it is the last
+    candidate, leaves the campaign unsteady) and its drifting series; and the
+    drifts of the chosen window's first block (or of the limiting block, when
+    there is no window) with their largest magnitude, how many of them exceed
+    the tolerance, and the largest ``z`` among those.
     """
-    if rounds < STEADY_WINDOW_ROUNDS:
-        raise ProtocolError(f"steady state needs at least {STEADY_WINDOW_ROUNDS} rounds")
-
-    def assess(first: int) -> tuple[dict[str, float], list[str]]:
-        """Drift of every series, and the drifting ones, in the window from round ``first``."""
-        drift, drifting = {}, []
-        for key, series in values.items():
-            if len(series) != rounds:
-                raise ProtocolError(f"{key} has {len(series)} rounds, not {rounds}")
-            window = series[first - 1:]
-            half = len(window) // 2
-            name = "/".join(key)
-            drift[name] = median(window[-half:]) / median(window[:half]) - 1.0
-            if abs(drift[name]) > STEADY_DRIFT:
-                drifting.append(name)
-        return drift, drifting
-
-    for first in range(1, rounds - STEADY_WINDOW_ROUNDS + 2):
-        drift, drifting = assess(first)
-        if not drifting:
+    if rounds < STEADY_WINDOW_ROUNDS or rounds % BLOCK_ROUNDS:
+        raise ProtocolError(f"steady state is assessed over whole blocks of {BLOCK_ROUNDS} rounds and at least "
+                            f"{STEADY_WINDOW_ROUNDS} rounds, not {rounds}")
+    for key, series in values.items():
+        if len(series) != rounds:
+            raise ProtocolError(f"{key} has {len(series)} rounds, not {rounds}")
+    assessments = []
+    for first in range(1, rounds - STEADY_WINDOW_ROUNDS + 2, BLOCK_ROUNDS):
+        end = first - 1 + BLOCK_ROUNDS
+        series = {"/".join(key): block_drift(per_round[first - 1:end], per_round[end:])
+                  for key, per_round in values.items()}
+        assessments.append({"first_round": first, "block": list(range(first, end + 1)),
+                            "later_rounds": list(range(end + 1, rounds + 1)), "series": series,
+                            "drifting": [name for name, item in series.items() if item["drifting"]]})
+    chosen = None
+    for assessment in reversed(assessments):
+        if assessment["drifting"]:
             break
-    else:
-        first = None
-        drift, drifting = assess(1)
+        chosen = assessment
+    limiting = next((assessment for assessment in reversed(assessments) if assessment["drifting"]), None)
+    shown = chosen or limiting
+    first = chosen["first_round"] if chosen else None
+    beyond = [item for item in shown["series"].values() if abs(item["drift"]) > STEADY_DRIFT]
     return {"first_round": first, "rounds": list(range(first, rounds + 1)) if first else [],
-            "drift": drift, "drifting": drifting,
-            "maximum_absolute_drift": max(abs(value) for value in drift.values())}
+            "assessments": assessments,
+            "limiting_block": limiting["first_round"] if limiting else None,
+            "drifting": limiting["drifting"] if limiting else [],
+            "drift": {name: item["drift"] for name, item in shown["series"].items()},
+            "maximum_absolute_drift": max(abs(item["drift"]) for item in shown["series"].values()),
+            "beyond_tolerance": len(beyond),
+            "maximum_z_beyond_tolerance": max((item["z"] for item in beyond if item["z"] is not None), default=None)}
 
 
-def statistics_of(values: list[float]) -> dict:
-    """Median, minimum, maximum, and the values themselves."""
+def statistics_of(values: list[float]) -> dict | None:
+    """Median, minimum, maximum, and the values themselves; ``None`` for no values."""
+    if not values:
+        return None
     return {"median": median(values), "minimum": min(values), "maximum": max(values), "values": values}
 
 
-def summarize(samples: list[dict]) -> dict:
-    """Steady state, gated statistics, and the cold-first-token diagnostic of one campaign.
+def cold_diagnostic(runs: list[dict], window: list[int]) -> dict:
+    """The cold-first-token diagnostic of one cell: statistics, rank correlations, and shader-cache exposure.
 
-    Each sample holds ``round``, ``label``, ``benchmark``, ``metrics`` (from
-    :func:`run_metrics`), ``tokens`` (from :func:`token_identity`) and
-    ``metal_cache_growth_bytes``.
+    Cold first token includes Metal pipeline compilation, which every process
+    of a binary shortens for the next by growing the per-user shader cache.
+    A discarded (contaminated or failed) attempt runs the same binary and
+    benchmark just before the sample it is repeated for, so that sample
+    starts with a warmer cache than the balanced design gives it. The
+    diagnostic therefore lists each round's discarded attempts' cache growth
+    and repeats the statistics and correlations without those rounds, and it
+    correlates cold time with the growth of the sample and its discarded
+    attempts together.
+    """
+    cold = [run["metrics"]["diagnostic"]["cold_first_token"] for run in runs]
+    growth = [run["metal_cache_growth_bytes"] for run in runs]
+    attempts = [sum(attempt["metal_cache_growth_bytes"] for attempt in run["discarded_attempts"]) for run in runs]
+    rounds = [float(run["round"]) for run in runs]
+    first = [index for index, run in enumerate(runs) if not run["discarded_attempts"]]
+    in_window = [index for index, run in enumerate(runs) if run["round"] in window]
+    diagnostic = {
+        "gated": False,
+        "all_rounds": statistics_of(cold),
+        "metal_cache_growth_bytes": growth,
+        "spearman_with_metal_cache_growth": spearman(cold, [float(value) for value in growth]),
+        "spearman_with_round": spearman(cold, rounds),
+        "discarded_attempts_metal_cache_growth_bytes": attempts,
+        "rounds_after_discarded_attempts": [run["round"] for run in runs if run["discarded_attempts"]],
+        "spearman_with_metal_cache_growth_including_discarded_attempts": spearman(
+            cold, [float(own + earlier) for own, earlier in zip(growth, attempts)]),
+        "without_rounds_after_discarded_attempts": {
+            "all_rounds": statistics_of([cold[index] for index in first]),
+            "spearman_with_metal_cache_growth": spearman([cold[index] for index in first],
+                                                         [float(growth[index]) for index in first]),
+            "spearman_with_round": spearman([cold[index] for index in first], [rounds[index] for index in first]),
+        },
+    }
+    if window:
+        diagnostic["steady_state"] = statistics_of([cold[index] for index in in_window])
+        diagnostic["without_rounds_after_discarded_attempts"]["steady_state"] = statistics_of(
+            [cold[index] for index in in_window if index in first])
+    return diagnostic
+
+
+def summarize(samples: list[dict]) -> dict:
+    """Steady state, gated statistics, binaries, and the cold-first-token diagnostic of one campaign.
+
+    Each gated statistic is the median, range, and per-round values over the
+    steady-state rounds, with their relative round-to-round ``noise``
+    (:func:`robust_noise`), which bounds how finely the window can resolve a
+    drift: three standard errors of a block against four later rounds are
+    about 2.66 times it.
+
+    Each sample holds ``round``, ``position``, ``label``, ``benchmark``,
+    ``metrics`` (from :func:`run_metrics`), ``tokens`` (from
+    :func:`token_identity`), ``binary`` (from :func:`binary_identity`),
+    ``metal_cache_growth_bytes``, and ``discarded_attempts`` (the contaminated
+    or failed attempts run for it first, each with its shader-cache growth).
     """
     rounds = max(sample["round"] for sample in samples)
     labels = sorted({sample["label"] for sample in samples})
@@ -645,33 +820,56 @@ def summarize(samples: list[dict]) -> dict:
         runs.sort(key=lambda run: run["round"])
         if any(run["tokens"] != runs[0]["tokens"] for run in runs):
             raise ProtocolError(f"{key} token identities differ between rounds")
+    binaries = {}
+    for sample in samples:
+        if binaries.setdefault(sample["label"], sample["binary"]) != sample["binary"]:
+            raise ProtocolError(f"the label {sample['label']!r} ran more than one executable or build")
     gated = {(label, kind, metric): [run["metrics"]["gated"][metric]["median"] for run in runs]
              for (label, kind), runs in cells.items() for metric in gated_metric_names(kind)}
     steady = steady_state(gated, rounds)
     window = steady["rounds"]
-    result = {"rounds": rounds, "labels": labels, "steady_state": steady, "cells": {}}
+    steady["position_counts"] = {
+        f"{label}/{kind}": {str(position): sum(1 for run in runs if run["round"] in window
+                                               and run["position"] == position)
+                            for position in sorted({run["position"] for run in runs})}
+        for (label, kind), runs in sorted(cells.items())}
+    result = {"rounds": rounds, "labels": labels, "binaries": binaries, "steady_state": steady, "cells": {}}
     for (label, kind), runs in sorted(cells.items()):
         chosen = [run for run in runs if run["round"] in window]
-        cold_all = [run["metrics"]["diagnostic"]["cold_first_token"] for run in runs]
-        growth = [run["metal_cache_growth_bytes"] for run in runs]
-        cell = {"gated": {}, "tokens": runs[0]["tokens"], "diagnostic": {"cold_first_token": {
-            "gated": False,
-            "all_rounds": statistics_of(cold_all),
-            "metal_cache_growth_bytes": growth,
-            "spearman_with_metal_cache_growth": spearman(cold_all, [float(value) for value in growth]),
-            "spearman_with_round": spearman(cold_all, [float(run["round"]) for run in runs]),
-        }}}
+        cell = {"gated": {}, "tokens": runs[0]["tokens"],
+                "diagnostic": {"cold_first_token": cold_diagnostic(runs, window)}}
         if chosen:
-            cell["diagnostic"]["cold_first_token"]["steady_state"] = statistics_of(
-                [run["metrics"]["diagnostic"]["cold_first_token"] for run in chosen])
             for metric in gated_metric_names(kind):
-                cell["gated"][metric] = statistics_of([run["metrics"]["gated"][metric]["median"] for run in chosen])
+                values = [run["metrics"]["gated"][metric]["median"] for run in chosen]
+                cell["gated"][metric] = {**statistics_of(values), "noise": robust_noise(values)["noise"]}
         result["cells"][f"{label}/{kind}"] = cell
     return result
 
 
+def discarded_attempts(root: Path, sample: dict) -> list[dict]:
+    """The contaminated or failed attempts the runner set aside before a sample's clean run, in time order.
+
+    The runner keeps each discarded attempt's host record beside the clean
+    one as ``STEM.contaminated-STAMP.host.json`` or ``STEM.failed-STAMP.host.json``.
+    """
+    host = root / sample["host"]
+    stem = host.name.removesuffix(".host.json")
+    attempts = []
+    for path in sorted(host.parent.glob(f"{stem}.*.host.json")):
+        kind = path.name[len(stem) + 1:].split("-", 1)[0]
+        if kind not in ("contaminated", "failed"):
+            continue
+        record = json.loads(path.read_text())
+        if record["sample"] != sample:
+            raise ProtocolError(f"{path.name} records another sample than {sample['host']}")
+        attempts.append({"host": path.relative_to(root).as_posix(), "kind": kind,
+                         "started_utc": record["host_before"]["utc"],
+                         "metal_cache_growth_bytes": record["metal_cache_growth"]["growth_bytes"]})
+    return attempts
+
+
 def load_campaign(root: Path) -> list[dict]:
-    """Every completed sample of a campaign with its metrics, tokens, and shader-cache growth."""
+    """Every completed sample of a campaign with its metrics, tokens, identities, and shader-cache growth."""
     campaign = json.loads((root / "plan.json").read_text())
     samples = []
     for sample in campaign["samples"]:
@@ -687,12 +885,15 @@ def load_campaign(root: Path) -> list[dict]:
                         "benchmark": sample["benchmark"], "metrics": run_metrics(report, sample["benchmark"]),
                         "tokens": token_identity(report, sample["benchmark"]),
                         "series": series_identity(report, sample["benchmark"]),
+                        "binary": binary_identity(report),
                         "metal_cache_growth_bytes": host["metal_cache_growth"]["growth_bytes"],
+                        "discarded_attempts": discarded_attempts(root, sample),
                         "admission": host["admission"]})
     for kind in BENCHMARKS:
         series = {json.dumps(sample["series"], sort_keys=True) for sample in samples if sample["benchmark"] == kind}
         if len(series) != 1:
-            raise ProtocolError(f"the campaign mixes {kind} benchmark series (protocol, features, host or OS)")
+            raise ProtocolError(f"the campaign mixes {kind} benchmark series "
+                                "(protocol, compiler, features, checkpoint, host or OS)")
     return samples
 
 
@@ -712,21 +913,64 @@ def classify(ratio: float) -> str:
     return "ok"
 
 
+def check_reference_binary(reference: dict, summary: dict, label: str) -> str:
+    """Require campaign label ``label`` to be the reference binary, and say how it was matched.
+
+    The reference block records the executable's identity (``binary``). The
+    rerun matches by ``sha256`` when it is that executable, or by
+    ``source_and_toolchain`` when it is a build of the same source commit from
+    a clean tree with the same rustc, rustup toolchain, features, and profile.
+    It must also reproduce the reference's tokens in both benchmarks. Anything
+    else could pair a slowed candidate with another slow binary and hide a
+    real regression, so it is refused.
+    """
+    recorded = reference.get("binary")
+    if not recorded:
+        raise ProtocolError("the reference block records no binary identity, so no rerun can be shown to run the "
+                            "reference binary; a failure cannot be confirmed against it")
+    if label not in summary["binaries"]:
+        raise ProtocolError(f"the campaign has no label {label!r} to serve as the reference binary")
+    rerun = summary["binaries"][label]
+    if rerun["sha256"] == recorded["sha256"]:
+        matched = "sha256"
+    elif (rerun["worktree_status"] == "" and recorded["worktree_status"] == ""
+          and all(rerun[key] == recorded[key]
+                  for key in ("source_commit", "rustc", "rustup_toolchain", "cargo_features", "profile"))):
+        matched = "source_and_toolchain"
+    else:
+        raise ProtocolError(
+            f"label {label!r} is not the reference binary: its executable {rerun['sha256']} is not the recorded "
+            f"{recorded['sha256']}, and it is not a clean build of {recorded['source_commit']} with "
+            f"{recorded['rustup_toolchain']} and features {recorded['cargo_features']}")
+    for kind in BENCHMARKS:
+        if summary["cells"][f"{label}/{kind}"]["tokens"] != reference["benchmarks"][kind]["tokens"]:
+            raise ProtocolError(f"the reference binary {label!r} does not reproduce the reference's {kind} tokens")
+    return matched
+
+
 def judge(reference: dict, summary: dict, candidate: str, reference_binary: str | None = None) -> dict:
     """Judge a candidate's steady-state medians against a recorded reference.
 
-    ``reference`` is a re-baseline record's ``reference`` block: its series
-    identity, token identities, and per-benchmark gated and diagnostic
-    statistics. ``summary`` is :func:`summarize`'s output with ``series`` and
-    ``tokens`` of the candidate. With ``reference_binary`` (the label of the
-    reference binary rerun in the same campaign) the campaign is a controlled
+    ``reference`` is a re-baseline record's ``reference`` block: its binary
+    and series identities, token identities, and per-benchmark gated and
+    diagnostic statistics. ``summary`` is :func:`summarize`'s output with the
+    campaign's ``series``. With ``reference_binary`` (the label of the
+    reference binary rerun in the same campaign, which
+    :func:`check_reference_binary` verifies) the campaign is a controlled
     rerun, which alone can confirm a failure.
     """
     if summary["steady_state"]["first_round"] is None:
         raise ProtocolError("the candidate campaign did not reach steady state; add rounds before judging")
     if summary["series"] != reference["series"]:
-        raise ProtocolError("the candidate is a different benchmark series (protocol, features, host or OS) "
-                            "from the reference; re-baselining is a maintainer decision")
+        raise ProtocolError("the candidate is a different benchmark series (protocol, compiler, features, checkpoint, "
+                            "host or OS) from the reference; re-baselining is a maintainer decision")
+    if candidate not in summary["binaries"]:
+        raise ProtocolError(f"the campaign has no candidate label {candidate!r}")
+    matched = None
+    if reference_binary is not None:
+        if reference_binary == candidate:
+            raise ProtocolError("the candidate cannot serve as its own reference binary")
+        matched = check_reference_binary(reference, summary, reference_binary)
     verdicts = {}
     for kind in BENCHMARKS:
         cell = summary["cells"][f"{candidate}/{kind}"]
@@ -752,10 +996,12 @@ def judge(reference: dict, summary: dict, candidate: str, reference_binary: str 
                         verdict["status"] = "not_confirmed"
             verdicts[f"{kind}/{metric}"] = verdict
         cold = cell["diagnostic"]["cold_first_token"]
+        first_runs = cold["without_rounds_after_discarded_attempts"]["steady_state"]
         verdicts[f"{kind}/cold_first_token"] = {
             "status": "diagnostic", "gated": False,
             "median": cold["steady_state"]["median"],
             "range": [cold["steady_state"]["minimum"], cold["steady_state"]["maximum"]],
+            "median_without_rounds_after_discarded_attempts": first_runs["median"] if first_runs else None,
             "reference_median": reference["benchmarks"][kind]["diagnostic"]["cold_first_token"]["median"],
         }
     statuses = {verdict["status"] for verdict in verdicts.values()}
@@ -764,8 +1010,9 @@ def judge(reference: dict, summary: dict, candidate: str, reference_binary: str 
             break
     else:
         overall = "ok"
-    return {"candidate": candidate, "controlled_rerun": reference_binary is not None, "overall": overall,
-            "metrics": verdicts}
+    return {"candidate": candidate, "controlled_rerun": reference_binary is not None,
+            "reference_binary": {"label": reference_binary, "matched_by": matched} if reference_binary else None,
+            "overall": overall, "metrics": verdicts}
 
 
 # --- Command line --------------------------------------------------------------
@@ -779,21 +1026,30 @@ def campaign_summary(root: Path) -> dict:
 
 
 def reference_block(summary: dict, label: str) -> dict:
-    """The ``reference`` block a re-baseline record stores for ``label``: what :func:`judge` reads."""
+    """The ``reference`` block a re-baseline record stores for ``label``: what :func:`judge` reads.
+
+    It holds the label's binary identity (:func:`binary_identity`), so that a
+    controlled rerun can be checked to run the reference binary, the series
+    identity, the steady-state rounds, and per benchmark the tokens, the gated
+    statistics, and the ungated cold-first-token statistics.
+    """
     if summary["steady_state"]["first_round"] is None:
         raise ProtocolError("a campaign that did not reach steady state cannot become a reference")
     benchmarks = {}
     for kind in BENCHMARKS:
         cell = summary["cells"][f"{label}/{kind}"]
-        cold = cell["diagnostic"]["cold_first_token"]["steady_state"]
+        diagnostic = cell["diagnostic"]["cold_first_token"]
+        cold = {"gated": False, **diagnostic["steady_state"],
+                "without_rounds_after_discarded_attempts":
+                    diagnostic["without_rounds_after_discarded_attempts"]["steady_state"]}
         benchmarks[kind] = {
             "tokens": cell["tokens"],
             "gated": {metric: {key: value for key, value in statistic.items()}
                       for metric, statistic in cell["gated"].items()},
-            "diagnostic": {"cold_first_token": {"gated": False, **cold}},
+            "diagnostic": {"cold_first_token": cold},
         }
-    return {"label": label, "series": summary["series"], "steady_state_rounds": summary["steady_state"]["rounds"],
-            "benchmarks": benchmarks}
+    return {"label": label, "binary": summary["binaries"][label], "series": summary["series"],
+            "steady_state_rounds": summary["steady_state"]["rounds"], "benchmarks": benchmarks}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -836,6 +1092,7 @@ def main(argv: list[str] | None = None) -> int:
                                   "maximum_load_wait_seconds": MAXIMUM_LOAD_WAIT_SECONDS,
                                   "sample_timeout_seconds": SAMPLE_TIMEOUT_SECONDS,
                                   "steady_window_rounds": STEADY_WINDOW_ROUNDS, "steady_drift": STEADY_DRIFT,
+                                  "steady_z": STEADY_Z,
                                   "alert": ALERT, "fail": FAIL},
                     "samples": make_plan(args.rounds, binaries, args.model_dir, args.reference_dir)}
         (args.campaign / "plan.json").write_text(json.dumps(document, indent=1) + "\n")

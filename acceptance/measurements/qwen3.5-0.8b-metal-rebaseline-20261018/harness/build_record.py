@@ -8,6 +8,14 @@ scripts/qwen35_benchmark_protocol.py, recomputes every statistic from the raw
 reports, and writes acceptance/measurements/qwen3.5-0.8b-metal-rebaseline-20261018.json.
 PROSE_JSON supplies the reviewed prose fields (measured, inferred, and the
 like); every number in the record comes from the evidence.
+
+The October 19 review amendment rebuilt the record with the corrected
+steady-state rule, the binary identity in the reference block, the compiler in
+the series identity, and the cold-first-token view without the samples that
+followed discarded attempts. It also evaluates the original rule with the
+campaign's own script copy (harness/qwen35_benchmark_protocol.py), start by
+start, and records the head's medians over the original window beside the
+corrected ones. No measurement file changed.
 """
 
 import hashlib
@@ -19,6 +27,8 @@ from pathlib import Path
 NAME = "qwen3.5-0.8b-metal-rebaseline-20261018"
 SEPTEMBER = "small-model-performance-20260910"
 SEPTEMBER_SUMMARIES = {"baseline": "qwen-controlled-current-summary.json", "public": "qwen-public-summary.json"}
+#: Files the October 19 review amendment added; every other non-harness file is evidence from the first version.
+AMENDMENT_FILES = ("analysis/analysis-20261019.log",)
 HISTORICAL = ("v0_1-release-20260910.json", f"{SEPTEMBER}/manifest.json",
               f"{SEPTEMBER}/qwen-controlled-current-summary.json", f"{SEPTEMBER}/qwen-public-summary.json",
               "half-precision-review-20261018.json", "half-precision-envelope-20261018.json",
@@ -38,20 +48,80 @@ def field(text, key):
     raise KeyError(key)
 
 
+def load(path, name):
+    """Import a protocol script under ``name``."""
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def original_rule(protocol, original, samples, script):
+    """The campaign script's original steady-state rule evaluated start by start, and the head's medians under it.
+
+    The original rule took the earliest window of at least
+    ``original.STEADY_WINDOW_ROUNDS`` final rounds whose half-medians agree
+    within ``original.STEADY_DRIFT``; it never checked later windows.
+    """
+    rounds = max(sample["round"] for sample in samples)
+    cells = {}
+    for sample in samples:
+        cells.setdefault((sample["label"], sample["benchmark"]), []).append(sample)
+    values = {}
+    for (label, kind), runs in sorted(cells.items()):
+        runs = sorted(runs, key=lambda run: run["round"])
+        for metric in protocol.gated_metric_names(kind):
+            values[(label, kind, metric)] = [run["metrics"]["gated"][metric]["median"] for run in runs]
+    starts = {}
+    for first in range(1, rounds - original.STEADY_WINDOW_ROUNDS + 2):
+        drifting = {}
+        for key, series in values.items():
+            window = series[first - 1:]
+            half = len(window) // 2
+            drift = protocol.median(window[-half:]) / protocol.median(window[:half]) - 1.0
+            if abs(drift) > original.STEADY_DRIFT:
+                drifting["/".join(key)] = drift
+        starts[str(first)] = drifting
+    chosen = original.summarize(samples)["steady_state"]
+    earliest = next((int(first) for first, drifting in starts.items() if not drifting), None)
+    if chosen["first_round"] != earliest:
+        raise SystemExit(f"original rule mismatch: script {chosen['first_round']}, recomputed {earliest}")
+    medians = {kind: {metric: protocol.median(values[("head", kind, metric)][chosen["first_round"] - 1:])
+                      for metric in protocol.gated_metric_names(kind)} for kind in protocol.BENCHMARKS}
+    counts = {}
+    for sample in samples:
+        if sample["round"] >= chosen["first_round"]:
+            cell = counts.setdefault(f"{sample['label']}/{sample['benchmark']}", {})
+            cell[str(sample["position"])] = cell.get(str(sample["position"]), 0) + 1
+    counts = {cell: dict(sorted(positions.items())) for cell, positions in sorted(counts.items())}
+    return {"script": "harness/qwen35_benchmark_protocol.py", "script_sha256": sha256(script),
+            "window_rounds_minimum": original.STEADY_WINDOW_ROUNDS, "drift_tolerance": original.STEADY_DRIFT,
+            "first_round": chosen["first_round"], "rounds": chosen["rounds"],
+            "maximum_absolute_drift": chosen["maximum_absolute_drift"],
+            "drifting_by_start": starts, "position_counts": counts, "head_medians": medians}
+
+
 def main():
     crate, prose = Path(sys.argv[1]), json.loads(Path(sys.argv[2]).read_text())
-    spec = importlib.util.spec_from_file_location("protocol", crate / "scripts/qwen35_benchmark_protocol.py")
-    protocol = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(protocol)
+    protocol = load(crate / "scripts/qwen35_benchmark_protocol.py", "protocol")
     measurements = crate / "acceptance/measurements"
     root = measurements / NAME
     campaign = root / "campaign"
+    original = load(root / "harness/qwen35_benchmark_protocol.py", "original")
     plan = json.loads((campaign / "plan.json").read_text())
     samples = protocol.load_campaign(campaign)
     summary = protocol.summarize(samples)
     summary["series"] = protocol.campaign_series(samples)
     reference = protocol.reference_block(summary, "head")
     control = protocol.reference_block(summary, "september")
+    before = original_rule(protocol, original, samples, root / "harness/qwen35_benchmark_protocol.py")
+    reference_change = {
+        kind: {metric: {"original_window": before["head_medians"][kind][metric],
+                        "corrected_window": reference["benchmarks"][kind]["gated"][metric]["median"],
+                        "corrected_over_original": reference["benchmarks"][kind]["gated"][metric]["median"]
+                        / before["head_medians"][kind][metric]}
+               for metric in protocol.gated_metric_names(kind)}
+        for kind in protocol.BENCHMARKS}
     rows = []
     for planned, loaded in zip(plan["samples"], samples):
         host = json.loads((campaign / planned["host"]).read_text())
@@ -73,6 +143,7 @@ def main():
             "cold_first_token_seconds": loaded["metrics"]["diagnostic"]["cold_first_token"],
             "gated": loaded["metrics"]["gated"],
             "tokens": loaded["tokens"],
+            "discarded_attempts": loaded["discarded_attempts"],
         })
     binaries = []
     for binary, directory in zip(plan["binaries"], ("head-fa8426e", "september-c70057e")):
@@ -157,14 +228,25 @@ def main():
         "power": sorted({host["host_before"]["power"].splitlines()[0] for host in host_records}),
         "in_run_reference_checks": reference_checks,
         "rounds_planned_first": 8,
+        "discarded_attempts_per_sample": {
+            f"r{sample['round']:02d}.p{sample['position']}.{sample['label']}.{sample['benchmark']}":
+                len(sample["discarded_attempts"]) for sample in samples if sample["discarded_attempts"]},
         "steady_state_after_8_rounds": protocol.summarize([sample for sample in samples if sample["round"] <= 8])[
             "steady_state"],
     }
-    files = {path.relative_to(root).as_posix(): sha256(path) for path in sorted(root.rglob("*")) if path.is_file()}
+    files = {path.relative_to(root).as_posix(): sha256(path) for path in sorted(root.rglob("*"))
+             if path.is_file() and "__pycache__" not in path.relative_to(root).parts}
+    evidence = {name: digest for name, digest in files.items()
+                if not name.startswith("harness/") and name not in AMENDMENT_FILES}
     record = {
         "schema_version": 1,
         "scope": "qwen3.5-0.8b_metal_f16_benchmark_rebaseline_not_a_support_declaration",
         "date_utc": "2026-10-18",
+        "review_amendment": {
+            **prose["review_amendment"], "added_files": list(AMENDMENT_FILES),
+            "unchanged_evidence_files": len(evidence),
+            "unchanged_evidence_sha256": hashlib.sha256(json.dumps(evidence, sort_keys=True).encode()).hexdigest(),
+        },
         "advertised_supported": False,
         "support_claims_changed": False,
         "repository": "Qwen/Qwen3.5-0.8B",
@@ -208,9 +290,20 @@ def main():
         "files": files,
         "execution": execution,
         "samples": rows,
+        "steady_state_rule": {
+            **prose["steady_state_rule"],
+            "script": "scripts/qwen35_benchmark_protocol.py",
+            "window_rounds_minimum": protocol.STEADY_WINDOW_ROUNDS, "block_rounds": protocol.BLOCK_ROUNDS,
+            "drift_tolerance": protocol.STEADY_DRIFT, "z_limit": protocol.STEADY_Z,
+            "original_rule": {**prose["original_rule"], **before},
+            "head_reference_change": reference_change,
+        },
         "steady_state": summary["steady_state"],
-        "cold_first_token": {kind: {label: summary["cells"][f"{label}/{kind}"]["diagnostic"]["cold_first_token"]
-                                    for label in ("head", "september")} for kind in protocol.BENCHMARKS},
+        "cold_first_token": {
+            **{kind: {label: summary["cells"][f"{label}/{kind}"]["diagnostic"]["cold_first_token"]
+                      for label in ("head", "september")} for kind in protocol.BENCHMARKS},
+            "discarded_attempt_exposure": prose["discarded_attempt_exposure"],
+        },
         "reference": reference,
         "september_rebuild": control,
         "september_10_approved": september,

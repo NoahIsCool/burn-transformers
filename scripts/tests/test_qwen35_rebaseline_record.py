@@ -12,13 +12,19 @@ and every comparison from the raw reports with the crate's own
 protocol and that every process was admitted under it; and require the
 superseded September 10 records and the earlier rounds' records to keep
 their bytes.
+
+The October 19 review amendment rebuilt the record under the corrected
+steady-state rule. The tests also recompute the original rule's outcome,
+start by start, with the campaign's own script copy, and require every
+measurement file of the first version to keep its bytes: their digests,
+hashed together, must equal the value the first version's ``files`` held.
 """
 
 import functools
 import hashlib
 import importlib.util
 import json
-import re
+import sys
 import unittest
 from pathlib import Path
 
@@ -39,6 +45,9 @@ REASON = ("re-baseline the Qwen3.5-0.8B benchmarks on the current host (macOS 27
 #: Source commits of the two measured binaries.
 SOURCES = {"head": "fa8426e5dc8cbcb269c29e211b119ea0acd61054",
            "september": "c70057e82510e085bc057910a99886c1ce551567"}
+#: SHA-256 of the sorted JSON map of every non-harness campaign-directory file to its digest, as the
+#: record's first version (commit 12296ff) listed them: the measurement evidence the amendment kept.
+FIRST_VERSION_EVIDENCE_SHA256 = "8ee65d07bbcfc066565f1afd970e70cc726ca874502ecb84f0016137dbdc4ee9"
 #: Records the re-baseline supersedes or follows, which must keep their bytes.
 HISTORICAL = frozenset({
     "v0_1-release-20260910.json",
@@ -54,6 +63,19 @@ HISTORICAL = frozenset({
 def sha256(data):
     """Hexadecimal SHA-256 of ``data``."""
     return hashlib.sha256(data).hexdigest()
+
+
+def load_script(path, name):
+    """Import a protocol script without writing bytecode beside it (the campaign directory is evidence)."""
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    previous, sys.dont_write_bytecode = sys.dont_write_bytecode, True
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.dont_write_bytecode = previous
+    return module
 
 
 class Qwen35RebaselineRecordTests(unittest.TestCase):
@@ -126,13 +148,30 @@ class Qwen35RebaselineRecordTests(unittest.TestCase):
             self.assertEqual(manifest[Path(supersedes[key]).name]["sha256"], supersedes[f"{key}_sha256"])
 
     def test_files_cover_the_campaign_directory(self):
-        """``files`` lists exactly the campaign directory's files, each with its digest."""
+        """``files`` lists exactly the campaign directory's files (not bytecode caches), each with its digest."""
         root = repository_evidence(self.campaign / "campaign/plan.json").parents[1]
-        present = {p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file()}
+        present = {p.relative_to(root).as_posix() for p in root.rglob("*")
+                   if p.is_file() and "__pycache__" not in p.relative_to(root).parts}
         self.assertEqual(present, set(self.record["files"]))
         for relative in sorted(present):
             with self.subTest(file=relative):
                 self.evidence(relative)
+
+    def test_review_amendment_kept_every_measurement_file(self):
+        """The amendment added only its analysis log; every other non-harness file keeps its first-version bytes."""
+        amendment = self.record["review_amendment"]
+        self.assertEqual(amendment["date_utc"], "2026-10-19")
+        self.assertIs(amendment["historical_measurements_modified"], False)
+        self.assertEqual(amendment["added_files"], ["analysis/analysis-20261019.log"])
+        for relative in self.record["files"]:
+            if not relative.startswith("harness/"):
+                self.evidence(relative)
+        evidence = {name: digest for name, digest in self.record["files"].items()
+                    if not name.startswith("harness/") and name not in amendment["added_files"]}
+        self.assertEqual(amendment["unchanged_evidence_files"], len(evidence))
+        digest = sha256(json.dumps(evidence, sort_keys=True).encode())
+        self.assertEqual(digest, amendment["unchanged_evidence_sha256"])
+        self.assertEqual(digest, FIRST_VERSION_EVIDENCE_SHA256)
 
     def test_plan_follows_the_protocol(self):
         """The plan is the protocol's alternating, counterbalanced plan, extended by whole blocks from 8 rounds."""
@@ -210,6 +249,8 @@ class Qwen35RebaselineRecordTests(unittest.TestCase):
                 self.assertEqual(row["gated"], metrics["gated"])
                 self.assertEqual(row["cold_first_token_seconds"], metrics["diagnostic"]["cold_first_token"])
                 self.assertEqual(row["tokens"], PROTOCOL.token_identity(report, row["benchmark"]))
+                self.assertEqual(row["discarded_attempts"],
+                                 PROTOCOL.discarded_attempts(self.campaign / "campaign", planned))
                 log = self.evidence(row["log"]).decode().splitlines()
                 self.assertIn(f"== binary {planned['binary']} sha256 {planned['sha256']}", log)
                 self.assertIn(f"test {planned['test']} ... ok", log)
@@ -276,26 +317,66 @@ class Qwen35RebaselineRecordTests(unittest.TestCase):
                 self.assertGreaterEqual(checks["minimum_teacher_reference_cosine"], 0.999)
                 self.assertEqual(checks["reference_cached_decisions"], [32])
                 self.assertEqual(len(checks["prompt_reference_cosine"]), 1)
-        early = [sample for sample in PROTOCOL.load_campaign(self.campaign / "campaign") if sample["round"] <= 8]
+        samples = PROTOCOL.load_campaign(self.campaign / "campaign")
+        early = [sample for sample in samples if sample["round"] <= 8]
         self.assertEqual(execution["steady_state_after_8_rounds"], PROTOCOL.summarize(early)["steady_state"])
         self.assertIsNone(execution["steady_state_after_8_rounds"]["first_round"])
+        self.assertEqual(execution["steady_state_after_8_rounds"]["limiting_block"], 1)
+        self.assertEqual(execution["discarded_attempts_per_sample"],
+                         {f"r{sample['round']:02d}.p{sample['position']}.{sample['label']}.{sample['benchmark']}":
+                          len(sample["discarded_attempts"]) for sample in samples if sample["discarded_attempts"]})
+        self.assertEqual(sum(execution["discarded_attempts_per_sample"].values()),
+                         len(execution["contaminated_attempts"]))
 
     def test_steady_state_reference_and_control_are_recomputed(self):
         """The steady window, the head reference, and the September control follow from the raw reports."""
         summary = self.summary()
-        self.assertEqual(self.record["steady_state"], summary["steady_state"])
-        self.assertIsNotNone(summary["steady_state"]["first_round"])
-        self.assertLessEqual(summary["steady_state"]["maximum_absolute_drift"], PROTOCOL.STEADY_DRIFT)
+        steady = summary["steady_state"]
+        self.assertEqual(self.record["steady_state"], steady)
+        self.assertEqual(steady["rounds"], list(range(5, 13)))
+        self.assertEqual(steady["limiting_block"], 1)
+        for assessment in steady["assessments"]:
+            if assessment["first_round"] >= steady["first_round"]:
+                self.assertEqual(assessment["drifting"], [])
+        self.assertEqual((steady["first_round"] - 1) % PROTOCOL.BLOCK_ROUNDS, 0)
+        for cell, positions in steady["position_counts"].items():
+            with self.subTest(cell=cell):
+                self.assertEqual(positions, {str(position): len(steady["rounds"]) // 4 for position in range(1, 5)})
+        rule = self.record["steady_state_rule"]
+        self.assertEqual((rule["window_rounds_minimum"], rule["block_rounds"], rule["drift_tolerance"], rule["z_limit"]),
+                         (PROTOCOL.STEADY_WINDOW_ROUNDS, PROTOCOL.BLOCK_ROUNDS, PROTOCOL.STEADY_DRIFT,
+                          PROTOCOL.STEADY_Z))
         self.assertEqual(self.record["reference"], PROTOCOL.reference_block(summary, "head"))
         self.assertEqual(self.record["september_rebuild"], PROTOCOL.reference_block(summary, "september"))
         for kind in PROTOCOL.BENCHMARKS:
             for label in ("head", "september"):
                 self.assertEqual(self.record["cold_first_token"][kind][label],
                                  summary["cells"][f"{label}/{kind}"]["diagnostic"]["cold_first_token"])
+        exposure = self.record["cold_first_token"]["discarded_attempt_exposure"]
+        self.assertTrue(exposure["measured"].strip() and exposure["inferred"].startswith("Not measured"))
+
+    def test_reference_and_control_identify_their_binaries(self):
+        """Each block names the executable that the plan ran and the build log recorded, and its compiler."""
+        plan = self.json_evidence("campaign/plan.json")
+        for block, built in zip((self.record["reference"], self.record["september_rebuild"]), self.record["binaries"]):
+            with self.subTest(label=block["label"]):
+                binary = block["binary"]
+                planned = next(item for item in plan["binaries"] if item["label"] == block["label"])
+                self.assertEqual(binary["sha256"], planned["sha256"])
+                self.assertEqual(binary["sha256"], built["sha256"])
+                self.assertEqual(binary["source_commit"], SOURCES[block["label"]])
+                self.assertEqual(binary["worktree_status"], "")
+                self.assertTrue(binary["rustc"].startswith("rustc 1.92.0 (ded5c06cf 2025-12-08)\n"))
+                self.assertEqual(binary["rustup_toolchain"], "1.92.0-aarch64-apple-darwin")
+                self.assertEqual(binary["cargo_features"], sorted(built["features"]))
+                for kind in PROTOCOL.BENCHMARKS:
+                    self.assertEqual(block["series"][kind]["rustc"], binary["rustc"])
+                    self.assertEqual(block["series"][kind]["rustup_toolchain"], binary["rustup_toolchain"])
 
     def test_reference_judges_itself_ok_and_never_gates_cold(self):
         """Judging the head against its own reference passes; cold first token is only reported."""
-        verdict = PROTOCOL.judge(self.record["reference"], self.summary(), "head", "september")
+        verdict = PROTOCOL.judge(self.record["reference"], self.summary(), "head")
+        self.assertEqual(verdict["overall"], "ok")
         for name, item in verdict["metrics"].items():
             with self.subTest(metric=name):
                 if name.endswith("cold_first_token"):
@@ -304,6 +385,71 @@ class Qwen35RebaselineRecordTests(unittest.TestCase):
                 else:
                     self.assertEqual(item["ratio"], 1.0)
                     self.assertEqual(item["status"], "ok")
+
+    def test_only_the_reference_binary_can_rerun_the_reference(self):
+        """The September rebuild cannot serve as the reference binary; the head can, by its digest.
+
+        Judged against the head's reference with the head rerun beside it,
+        the September source is a confirmed failure on the metrics where it
+        is more than 10% slower than both the record and the rerun.
+        """
+        with self.assertRaisesRegex(PROTOCOL.ProtocolError, "'september' is not the reference binary"):
+            PROTOCOL.judge(self.record["reference"], self.summary(), "head", "september")
+        verdict = PROTOCOL.judge(self.record["reference"], self.summary(), "september", "head")
+        self.assertEqual(verdict["reference_binary"], {"label": "head", "matched_by": "sha256"})
+        self.assertEqual(verdict["overall"], "fail")
+        for name, item in verdict["metrics"].items():
+            if item["status"] == "fail":
+                self.assertGreater(item["ratio"], 1.0 + PROTOCOL.FAIL)
+                self.assertGreater(item["ratio_to_reference_binary"], 1.0 + PROTOCOL.FAIL)
+        self.assertEqual(verdict["metrics"]["baseline/source_512.prefill"]["status"], "fail")
+        self.assertEqual(verdict["metrics"]["public/strict_load"]["status"], "ok")
+
+    def test_original_rule_outcome_is_recomputed_with_the_campaign_script(self):
+        """The campaign script's half-median rule passes only from round 3; that window is not whole blocks."""
+        original = load_script(repository_evidence(self.campaign / "harness/qwen35_benchmark_protocol.py"),
+                               "campaign_protocol")
+        recorded = self.record["steady_state_rule"]["original_rule"]
+        self.assertEqual(recorded["script_sha256"], self.record["files"]["harness/qwen35_benchmark_protocol.py"])
+        samples = PROTOCOL.load_campaign(self.campaign / "campaign")
+        steady = original.summarize(samples)["steady_state"]
+        self.assertEqual((recorded["first_round"], recorded["rounds"], recorded["maximum_absolute_drift"]),
+                         (steady["first_round"], steady["rounds"], steady["maximum_absolute_drift"]))
+        self.assertEqual(recorded["first_round"], 3)
+        self.assertEqual((recorded["window_rounds_minimum"], recorded["drift_tolerance"]),
+                         (original.STEADY_WINDOW_ROUNDS, original.STEADY_DRIFT))
+        series = {}
+        for sample in sorted(samples, key=lambda item: item["round"]):
+            for metric, value in sample["metrics"]["gated"].items():
+                series.setdefault(f"{sample['label']}/{sample['benchmark']}/{metric}", []).append(value["median"])
+        for first, drifting in recorded["drifting_by_start"].items():
+            with self.subTest(start=first):
+                expected = {}
+                for name, values in series.items():
+                    window = values[int(first) - 1:]
+                    half = len(window) // 2
+                    drift = PROTOCOL.median(window[-half:]) / PROTOCOL.median(window[:half]) - 1.0
+                    if abs(drift) > original.STEADY_DRIFT:
+                        expected[name] = drift
+                self.assertEqual(drifting, expected)
+                self.assertEqual(drifting == {}, first == "3")
+        counts = {}
+        for sample in samples:
+            if sample["round"] >= 3:
+                cell = counts.setdefault(f"{sample['label']}/{sample['benchmark']}", {})
+                cell[str(sample["position"])] = cell.get(str(sample["position"]), 0) + 1
+        self.assertEqual(recorded["position_counts"], counts)
+        self.assertNotEqual({count for cell in counts.values() for count in cell.values()}, {2})
+        change = self.record["steady_state_rule"]["head_reference_change"]
+        for kind in PROTOCOL.BENCHMARKS:
+            for metric, row in change[kind].items():
+                with self.subTest(kind=kind, metric=metric):
+                    old = PROTOCOL.median(series[f"head/{kind}/{metric}"][2:])
+                    new = self.record["reference"]["benchmarks"][kind]["gated"][metric]["median"]
+                    self.assertEqual((row["original_window"], row["corrected_window"]), (old, new))
+                    self.assertEqual(row["corrected_over_original"], new / old)
+                    self.assertEqual(recorded["head_medians"][kind][metric], old)
+                    self.assertLess(abs(new / old - 1.0), 0.0066)
 
     def test_comparisons_are_recomputed(self):
         """Head over the September rebuild, and both over the approved September 10 values, follow from the blocks."""

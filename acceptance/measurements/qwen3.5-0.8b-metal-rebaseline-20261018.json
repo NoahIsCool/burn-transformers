@@ -2,6 +2,23 @@
  "schema_version": 1,
  "scope": "qwen3.5-0.8b_metal_f16_benchmark_rebaseline_not_a_support_declaration",
  "date_utc": "2026-10-18",
+ "review_amendment": {
+  "date_utc": "2026-10-19",
+  "reason": "The PR #1 review of this record found five faults, and the record was rebuilt from the unchanged evidence. The original steady-state rule (the earliest window of at least six final rounds whose half-medians agree within 2.5%) was ill-conditioned: only the window from round 3 passed, while those from rounds 1, 2, and 4 to 7 each failed on one strict load, a single observation per process. A controlled rerun could name any campaign label as the reference binary, because the reference block recorded no binary identity. The series identity omitted the compiler. Contaminated attempts warmed the shader cache before their reruns, which the cold-first-token diagnostic did not say. And the window from round 3 is not whole Latin-square blocks.",
+  "changes": [
+   "Steady state: windows of whole blocks, at least two, scanned back from the end; a block drifts when a gated median differs from the later rounds' median by more than 2.5% and by more than three standard errors of their robust noise. The campaign is now steady from round 5 (rounds 5 to 12), the 8-round campaign is still not steady, and the head's reference medians move by at most 0.65% (its strict load in the baseline benchmark).",
+   "Reference and control blocks: each records its binary's identity (SHA-256, source commit, tree status, rustc, rustup toolchain, features, profile). Judging a controlled rerun requires the rerun label to be that executable, or a clean build of that commit with that compiler, features, and profile, that reproduces the reference tokens.",
+   "Series identity: rustc and the rustup toolchain are part of it, so a candidate built with another compiler is not comparable.",
+   "Cold first token: each cell lists the rounds whose sample followed discarded attempts and those attempts' shader-cache growth, and repeats its statistics and correlations without those rounds.",
+   "No measurement file changed: the campaign, build, and aborted-attempt evidence and analysis/analysis.log keep their bytes; analysis/analysis-20261019.log is the analysis under the corrected rule."
+  ],
+  "historical_measurements_modified": false,
+  "added_files": [
+   "analysis/analysis-20261019.log"
+  ],
+  "unchanged_evidence_files": 230,
+  "unchanged_evidence_sha256": "8ee65d07bbcfc066565f1afd970e70cc726ca874502ecb84f0016137dbdc4ee9"
+ },
  "advertised_supported": false,
  "support_claims_changed": false,
  "repository": "Qwen/Qwen3.5-0.8B",
@@ -214,6 +231,7 @@
   "aborted-attempt-1/plan.json": "79d7659e6c490d998aa06d51efa9b13427542429cc1cff533ff5876aea9b2169",
   "aborted-attempt-1/qwen35_benchmark_protocol.py": "ea78894d0112a73b5d59cd3230e4e8fb33ab7c2332a08180439c4a85b88101b1",
   "aborted-attempt-1/runner.log": "17ccf3929503148cc1c95cf0684fd342300a8626813dd477c828eda2b432cef2",
+  "analysis/analysis-20261019.log": "fbb78b0d6d19251e2d5e3b99bf9f45bb54dce7fcbf4ea2b64447d7e562798274",
   "analysis/analysis.log": "578f7a1e4d2e1e35fdfaf02f35efb638bf09cf6ecb76d93e5706ec13bddd7623",
   "build/head-fa8426e/cargo.jsonl": "1d52c41a08339940cb83910e4ab208f545c00ccd46321f275a04068004b1ce47",
   "build/head-fa8426e/cargo.stderr": "61b07039965da29efcca507885043fdfb5da42f9ac062a6d4db6fcaf0d43803b",
@@ -436,11 +454,11 @@
   "campaign/plan-8-rounds.json": "1c1817c539abd762f27acaf8b6d7a8d462c06bc33f0b9074dca9b74caac0c2aa",
   "campaign/plan.json": "7dfa558d15380528c0f58d324bf059bbf4beb388773bd8d1c7e944b9d99901a3",
   "campaign/runner.log": "9ba7b588e2b44cf034e2a165696f31247edaa1c27f7fc65d3480ca475bedca48",
-  "harness/analyze.py": "81dd3caa4f2213e62f843e60b5f0240fb5fa2c605ecb21a463c09dcd370df2f5",
+  "harness/analyze.py": "4fa5d4ac93a8c9ee899def99096a7e9398a74a8477a6a2af99c3ba35f4ea8b2c",
   "harness/build.sh": "4deb0022b73189530cf689448ea1f09165fb20f7f154f87ffcae9cf986544ab5",
-  "harness/build_record.py": "fe69fd17f7c01f96da3009210673306018de1c88c398975a0f24314c2743fec3",
+  "harness/build_record.py": "f1f7c2dfa4fc08695b70f7204d36450b0c0c3074b0fa117e69c55005fd95ce2e",
   "harness/driver.sh": "2a7899655665b25c5aba2606a643611eb6cafb031ae644e0bfc801a76e916a37",
-  "harness/prose.json": "846c74a9631fbb08514b52506a0b09293ea180dfc36e7385f70d4546eccf9296",
+  "harness/prose.json": "bed108ed15878f76b125e53b2eab0d99684fc32953e124be50a4a3cf4fbfd547",
   "harness/qwen35_benchmark_protocol.py": "0be713dd66bbf9d3601cf896ce6d8491d73cfe9e97b832b67d02e2ea22531a72"
  },
  "execution": {
@@ -566,9 +584,281 @@
    }
   },
   "rounds_planned_first": 8,
+  "discarded_attempts_per_sample": {
+   "r01.p2.september.baseline": 1,
+   "r02.p4.head.baseline": 1,
+   "r09.p1.head.baseline": 1,
+   "r10.p4.head.baseline": 2
+  },
   "steady_state_after_8_rounds": {
    "first_round": null,
    "rounds": [],
+   "assessments": [
+    {
+     "first_round": 1,
+     "block": [
+      1,
+      2,
+      3,
+      4
+     ],
+     "later_rounds": [
+      5,
+      6,
+      7,
+      8
+     ],
+     "series": {
+      "head/baseline/strict_load": {
+       "drift": -0.01179296875476954,
+       "noise": 0.0021157561505662026,
+       "standard_error": 0.0018750400683240482,
+       "z": 6.326828739056518,
+       "drifting": false
+      },
+      "head/baseline/source_32.prefill": {
+       "drift": 0.018320803632406735,
+       "noise": 0.02956470328714248,
+       "standard_error": 0.02620103609608733,
+       "z": 0.6929115202878389,
+       "drifting": false
+      },
+      "head/baseline/source_32.first_token_latency": {
+       "drift": 0.015917178763091178,
+       "noise": 0.025242039512158945,
+       "standard_error": 0.02237017506901766,
+       "z": 0.7059322879422497,
+       "drifting": false
+      },
+      "head/baseline/source_32.decode_model_only": {
+       "drift": 0.0009953460912701662,
+       "noise": 0.00879833115461485,
+       "standard_error": 0.007797317968269532,
+       "z": 0.12758887951649328,
+       "drifting": false
+      },
+      "head/baseline/source_32.decode_including_greedy_readback": {
+       "drift": 0.0007324201897542792,
+       "noise": 0.006906082489706942,
+       "standard_error": 0.006120356251776111,
+       "z": 0.1196257326963711,
+       "drifting": false
+      },
+      "head/baseline/source_128.prefill": {
+       "drift": 0.004658813941488704,
+       "noise": 0.007462418774801116,
+       "standard_error": 0.00661339644723293,
+       "z": 0.7028151560827802,
+       "drifting": false
+      },
+      "head/baseline/source_128.first_token_latency": {
+       "drift": 0.004020847553568574,
+       "noise": 0.006086607695873179,
+       "standard_error": 0.005394115624750783,
+       "z": 0.7439190830711799,
+       "drifting": false
+      },
+      "head/baseline/source_128.decode_model_only": {
+       "drift": 0.00035961074457158126,
+       "noise": 0.008305969465594053,
+       "standard_error": 0.007360973782397905,
+       "z": 0.04884490975704541,
+       "drifting": false
+      },
+      "head/baseline/source_128.decode_including_greedy_readback": {
+       "drift": 0.00037979112421893113,
+       "noise": 0.0069131696387984285,
+       "standard_error": 0.006126637074125685,
+       "z": 0.06197837691886194,
+       "drifting": false
+      },
+      "head/baseline/source_512.prefill": {
+       "drift": -0.002073102832388707,
+       "noise": 0.001131696968624065,
+       "standard_error": 0.0010029403250479115,
+       "z": 2.0691706502956806,
+       "drifting": false
+      },
+      "head/baseline/source_512.first_token_latency": {
+       "drift": -0.0033634672776934327,
+       "noise": 0.002610782520364968,
+       "standard_error": 0.002313745766048848,
+       "z": 1.4561394336463052,
+       "drifting": false
+      },
+      "head/baseline/source_512.decode_model_only": {
+       "drift": -0.008201232493537325,
+       "noise": 0.008837835816949935,
+       "standard_error": 0.007832328063711804,
+       "z": 1.0514176046292172,
+       "drifting": false
+      },
+      "head/baseline/source_512.decode_including_greedy_readback": {
+       "drift": -0.0061000903875289,
+       "noise": 0.0068898666454699775,
+       "standard_error": 0.0061059853339943656,
+       "z": 1.0020941118860134,
+       "drifting": false
+      },
+      "head/baseline/natural_loop": {
+       "drift": -0.004958420545603581,
+       "noise": 0.006950897774039801,
+       "standard_error": 0.006160072763423712,
+       "z": 0.8069311014946492,
+       "drifting": false
+      },
+      "september/baseline/strict_load": {
+       "drift": -0.05692330749349128,
+       "noise": 0.006904766370812952,
+       "standard_error": 0.0061191898717751604,
+       "z": 9.577684737520354,
+       "drifting": true
+      },
+      "september/baseline/source_32.prefill": {
+       "drift": -0.05866109581175305,
+       "noise": 0.00818342488093208,
+       "standard_error": 0.00725237147190204,
+       "z": 8.335487397719666,
+       "drifting": true
+      },
+      "september/baseline/source_32.first_token_latency": {
+       "drift": -0.05276929374145256,
+       "noise": 0.007370147082731592,
+       "standard_error": 0.006531622789263832,
+       "z": 8.300019643199398,
+       "drifting": true
+      },
+      "september/baseline/source_32.decode_model_only": {
+       "drift": -0.028315612805966284,
+       "noise": 0.0005634967290759572,
+       "standard_error": 0.0004993859737116713,
+       "z": 57.519100044048606,
+       "drifting": true
+      },
+      "september/baseline/source_32.decode_including_greedy_readback": {
+       "drift": -0.021544713348487066,
+       "noise": 0.000568707001260774,
+       "standard_error": 0.0005040034572107935,
+       "z": 43.21436428034071,
+       "drifting": false
+      },
+      "september/baseline/source_128.prefill": {
+       "drift": -0.013070649688675773,
+       "noise": 0.008559608383468682,
+       "standard_error": 0.007585755420761102,
+       "z": 1.734411619220141,
+       "drifting": false
+      },
+      "september/baseline/source_128.first_token_latency": {
+       "drift": -0.012696765243400132,
+       "noise": 0.008382711815927504,
+       "standard_error": 0.007428984919585937,
+       "z": 1.720027452197164,
+       "drifting": false
+      },
+      "september/baseline/source_128.decode_model_only": {
+       "drift": 0.0002698631898350179,
+       "noise": 0.0019115821371723774,
+       "standard_error": 0.0016940955601766885,
+       "z": 0.15927483056857067,
+       "drifting": false
+      },
+      "september/baseline/source_128.decode_including_greedy_readback": {
+       "drift": 0.0010024783183153474,
+       "noise": 0.0017253952549548311,
+       "standard_error": 0.0015290917319893975,
+       "z": 0.655275384419162,
+       "drifting": false
+      },
+      "september/baseline/source_512.prefill": {
+       "drift": -0.033060613916564896,
+       "noise": 0.004916785139913105,
+       "standard_error": 0.004357387377657,
+       "z": 7.715510469149895,
+       "drifting": true
+      },
+      "september/baseline/source_512.first_token_latency": {
+       "drift": -0.032314370317813146,
+       "noise": 0.004960988821353013,
+       "standard_error": 0.004396561870353182,
+       "z": 7.471294194426773,
+       "drifting": true
+      },
+      "september/baseline/source_512.decode_model_only": {
+       "drift": -0.021356272343371785,
+       "noise": 0.0032201845385453594,
+       "standard_error": 0.0028538142429855623,
+       "z": 7.56447876260853,
+       "drifting": false
+      },
+      "september/baseline/source_512.decode_including_greedy_readback": {
+       "drift": -0.01570364035977445,
+       "noise": 0.003353949269101519,
+       "standard_error": 0.0029723601488803636,
+       "z": 5.3251449979305265,
+       "drifting": false
+      },
+      "september/baseline/natural_loop": {
+       "drift": 0.0018361797996482299,
+       "noise": 0.0016278904001182691,
+       "standard_error": 0.0014426803042708737,
+       "z": 1.271588776006669,
+       "drifting": false
+      },
+      "head/public/strict_load": {
+       "drift": -0.07786038024046238,
+       "noise": 0.00522147196729395,
+       "standard_error": 0.0046274090479126815,
+       "z": 17.517067248941093,
+       "drifting": true
+      },
+      "head/public/natural_loop": {
+       "drift": -0.07691680929942157,
+       "noise": 0.006625231024953478,
+       "standard_error": 0.005871458121658746,
+       "z": 13.631352913124463,
+       "drifting": true
+      },
+      "september/public/strict_load": {
+       "drift": -0.08547441094265251,
+       "noise": 0.007388848673671038,
+       "standard_error": 0.006548196642703173,
+       "z": 13.64495218220724,
+       "drifting": true
+      },
+      "september/public/natural_loop": {
+       "drift": -0.0037503090675603534,
+       "noise": 0.0010910400571016079,
+       "standard_error": 0.0009669090753509595,
+       "z": 3.885948745824829,
+       "drifting": false
+      }
+     },
+     "drifting": [
+      "september/baseline/strict_load",
+      "september/baseline/source_32.prefill",
+      "september/baseline/source_32.first_token_latency",
+      "september/baseline/source_32.decode_model_only",
+      "september/baseline/source_512.prefill",
+      "september/baseline/source_512.first_token_latency",
+      "head/public/strict_load",
+      "head/public/natural_loop",
+      "september/public/strict_load"
+     ]
+    }
+   ],
+   "limiting_block": 1,
+   "drifting": [
+    "september/baseline/strict_load",
+    "september/baseline/source_32.prefill",
+    "september/baseline/source_32.first_token_latency",
+    "september/baseline/source_32.decode_model_only",
+    "september/baseline/source_512.prefill",
+    "september/baseline/source_512.first_token_latency",
+    "head/public/strict_load",
+    "head/public/natural_loop",
+    "september/public/strict_load"
+   ],
    "drift": {
     "head/baseline/strict_load": -0.01179296875476954,
     "head/baseline/source_32.prefill": 0.018320803632406735,
@@ -603,18 +893,35 @@
     "september/public/strict_load": -0.08547441094265251,
     "september/public/natural_loop": -0.0037503090675603534
    },
-   "drifting": [
-    "september/baseline/strict_load",
-    "september/baseline/source_32.prefill",
-    "september/baseline/source_32.first_token_latency",
-    "september/baseline/source_32.decode_model_only",
-    "september/baseline/source_512.prefill",
-    "september/baseline/source_512.first_token_latency",
-    "head/public/strict_load",
-    "head/public/natural_loop",
-    "september/public/strict_load"
-   ],
-   "maximum_absolute_drift": 0.08547441094265251
+   "maximum_absolute_drift": 0.08547441094265251,
+   "beyond_tolerance": 9,
+   "maximum_z_beyond_tolerance": 57.519100044048606,
+   "position_counts": {
+    "head/baseline": {
+     "1": 0,
+     "2": 0,
+     "3": 0,
+     "4": 0
+    },
+    "head/public": {
+     "1": 0,
+     "2": 0,
+     "3": 0,
+     "4": 0
+    },
+    "september/baseline": {
+     "1": 0,
+     "2": 0,
+     "3": 0,
+     "4": 0
+    },
+    "september/public": {
+     "1": 0,
+     "2": 0,
+     "3": 0,
+     "4": 0
+    }
+   }
   }
  },
  "samples": [
@@ -863,7 +1170,8 @@
     "source_32": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
     "source_128": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
     "source_512": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c"
-   }
+   },
+   "discarded_attempts": []
   },
   {
    "index": 1,
@@ -1110,7 +1418,15 @@
     "source_32": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
     "source_128": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
     "source_512": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c"
-   }
+   },
+   "discarded_attempts": [
+    {
+     "host": "host/r01.p2.september.baseline.contaminated-2026-10-19T000636+0000.host.json",
+     "kind": "contaminated",
+     "started_utc": "2026-10-19T00:06:36+00:00",
+     "metal_cache_growth_bytes": 724816
+    }
+   ]
   },
   {
    "index": 2,
@@ -1174,7 +1490,8 @@
    "tokens": {
     "cold": "39ca0198c6fcae83b36801500e037213bd15de2c59b1a490dc3a35ebfa11e131",
     "natural": "39ca0198c6fcae83b36801500e037213bd15de2c59b1a490dc3a35ebfa11e131"
-   }
+   },
+   "discarded_attempts": []
   },
   {
    "index": 3,
@@ -1238,7 +1555,8 @@
    "tokens": {
     "cold": "39ca0198c6fcae83b36801500e037213bd15de2c59b1a490dc3a35ebfa11e131",
     "natural": "39ca0198c6fcae83b36801500e037213bd15de2c59b1a490dc3a35ebfa11e131"
-   }
+   },
+   "discarded_attempts": []
   },
   {
    "index": 4,
@@ -1302,7 +1620,8 @@
    "tokens": {
     "cold": "39ca0198c6fcae83b36801500e037213bd15de2c59b1a490dc3a35ebfa11e131",
     "natural": "39ca0198c6fcae83b36801500e037213bd15de2c59b1a490dc3a35ebfa11e131"
-   }
+   },
+   "discarded_attempts": []
   },
   {
    "index": 5,
@@ -1366,7 +1685,8 @@
    "tokens": {
     "cold": "39ca0198c6fcae83b36801500e037213bd15de2c59b1a490dc3a35ebfa11e131",
     "natural": "39ca0198c6fcae83b36801500e037213bd15de2c59b1a490dc3a35ebfa11e131"
-   }
+   },
+   "discarded_attempts": []
   },
   {
    "index": 6,
@@ -1613,7 +1933,8 @@
     "source_32": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
     "source_128": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
     "source_512": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c"
-   }
+   },
+   "discarded_attempts": []
   },
   {
    "index": 7,
@@ -1860,7 +2181,15 @@
     "source_32": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
     "source_128": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
     "source_512": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c"
-   }
+   },
+   "discarded_attempts": [
+    {
+     "host": "host/r02.p4.head.baseline.contaminated-2026-10-19T003935+0000.host.json",
+     "kind": "contaminated",
+     "started_utc": "2026-10-19T00:39:35+00:00",
+     "metal_cache_growth_bytes": 328632
+    }
+   ]
   },
   {
    "index": 8,
@@ -1924,7 +2253,8 @@
    "tokens": {
     "cold": "39ca0198c6fcae83b36801500e037213bd15de2c59b1a490dc3a35ebfa11e131",
     "natural": "39ca0198c6fcae83b36801500e037213bd15de2c59b1a490dc3a35ebfa11e131"
-   }
+   },
+   "discarded_attempts": []
   },
   {
    "index": 9,
@@ -1988,7 +2318,8 @@
    "tokens": {
     "cold": "39ca0198c6fcae83b36801500e037213bd15de2c59b1a490dc3a35ebfa11e131",
     "natural": "39ca0198c6fcae83b36801500e037213bd15de2c59b1a490dc3a35ebfa11e131"
-   }
+   },
+   "discarded_attempts": []
   },
   {
    "index": 10,
@@ -2235,7 +2566,8 @@
     "source_32": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
     "source_128": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
     "source_512": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c"
-   }
+   },
+   "discarded_attempts": []
   },
   {
    "index": 11,
@@ -2482,7 +2814,8 @@
     "source_32": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
     "source_128": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
     "source_512": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c"
-   }
+   },
+   "discarded_attempts": []
   },
   {
    "index": 12,
@@ -2729,7 +3062,8 @@
     "source_32": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
     "source_128": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
     "source_512": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c"
-   }
+   },
+   "discarded_attempts": []
   },
   {
    "index": 13,
@@ -2976,7 +3310,8 @@
     "source_32": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
     "source_128": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
     "source_512": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c"
-   }
+   },
+   "discarded_attempts": []
   },
   {
    "index": 14,
@@ -3040,7 +3375,8 @@
    "tokens": {
     "cold": "39ca0198c6fcae83b36801500e037213bd15de2c59b1a490dc3a35ebfa11e131",
     "natural": "39ca0198c6fcae83b36801500e037213bd15de2c59b1a490dc3a35ebfa11e131"
-   }
+   },
+   "discarded_attempts": []
   },
   {
    "index": 15,
@@ -3104,7 +3440,8 @@
    "tokens": {
     "cold": "39ca0198c6fcae83b36801500e037213bd15de2c59b1a490dc3a35ebfa11e131",
     "natural": "39ca0198c6fcae83b36801500e037213bd15de2c59b1a490dc3a35ebfa11e131"
-   }
+   },
+   "discarded_attempts": []
   },
   {
    "index": 16,
@@ -3351,7 +3688,8 @@
     "source_32": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
     "source_128": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
     "source_512": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c"
-   }
+   },
+   "discarded_attempts": []
   },
   {
    "index": 17,
@@ -3415,7 +3753,8 @@
    "tokens": {
     "cold": "39ca0198c6fcae83b36801500e037213bd15de2c59b1a490dc3a35ebfa11e131",
     "natural": "39ca0198c6fcae83b36801500e037213bd15de2c59b1a490dc3a35ebfa11e131"
-   }
+   },
+   "discarded_attempts": []
   },
   {
    "index": 18,
@@ -3479,7 +3818,8 @@
    "tokens": {
     "cold": "39ca0198c6fcae83b36801500e037213bd15de2c59b1a490dc3a35ebfa11e131",
     "natural": "39ca0198c6fcae83b36801500e037213bd15de2c59b1a490dc3a35ebfa11e131"
-   }
+   },
+   "discarded_attempts": []
   },
   {
    "index": 19,
@@ -3726,7 +4066,8 @@
     "source_32": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
     "source_128": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
     "source_512": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c"
-   }
+   },
+   "discarded_attempts": []
   },
   {
    "index": 20,
@@ -3790,7 +4131,8 @@
    "tokens": {
     "cold": "39ca0198c6fcae83b36801500e037213bd15de2c59b1a490dc3a35ebfa11e131",
     "natural": "39ca0198c6fcae83b36801500e037213bd15de2c59b1a490dc3a35ebfa11e131"
-   }
+   },
+   "discarded_attempts": []
   },
   {
    "index": 21,
@@ -4037,7 +4379,8 @@
     "source_32": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
     "source_128": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
     "source_512": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c"
-   }
+   },
+   "discarded_attempts": []
   },
   {
    "index": 22,
@@ -4284,7 +4627,8 @@
     "source_32": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
     "source_128": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
     "source_512": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c"
-   }
+   },
+   "discarded_attempts": []
   },
   {
    "index": 23,
@@ -4348,7 +4692,8 @@
    "tokens": {
     "cold": "39ca0198c6fcae83b36801500e037213bd15de2c59b1a490dc3a35ebfa11e131",
     "natural": "39ca0198c6fcae83b36801500e037213bd15de2c59b1a490dc3a35ebfa11e131"
-   }
+   },
+   "discarded_attempts": []
   },
   {
    "index": 24,
@@ -4412,7 +4757,8 @@
    "tokens": {
     "cold": "39ca0198c6fcae83b36801500e037213bd15de2c59b1a490dc3a35ebfa11e131",
     "natural": "39ca0198c6fcae83b36801500e037213bd15de2c59b1a490dc3a35ebfa11e131"
-   }
+   },
+   "discarded_attempts": []
   },
   {
    "index": 25,
@@ -4659,7 +5005,8 @@
     "source_32": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
     "source_128": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
     "source_512": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c"
-   }
+   },
+   "discarded_attempts": []
   },
   {
    "index": 26,
@@ -4906,7 +5253,8 @@
     "source_32": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
     "source_128": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
     "source_512": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c"
-   }
+   },
+   "discarded_attempts": []
   },
   {
    "index": 27,
@@ -4970,7 +5318,8 @@
    "tokens": {
     "cold": "39ca0198c6fcae83b36801500e037213bd15de2c59b1a490dc3a35ebfa11e131",
     "natural": "39ca0198c6fcae83b36801500e037213bd15de2c59b1a490dc3a35ebfa11e131"
-   }
+   },
+   "discarded_attempts": []
   },
   {
    "index": 28,
@@ -5217,7 +5566,8 @@
     "source_32": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
     "source_128": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
     "source_512": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c"
-   }
+   },
+   "discarded_attempts": []
   },
   {
    "index": 29,
@@ -5281,7 +5631,8 @@
    "tokens": {
     "cold": "39ca0198c6fcae83b36801500e037213bd15de2c59b1a490dc3a35ebfa11e131",
     "natural": "39ca0198c6fcae83b36801500e037213bd15de2c59b1a490dc3a35ebfa11e131"
-   }
+   },
+   "discarded_attempts": []
   },
   {
    "index": 30,
@@ -5345,7 +5696,8 @@
    "tokens": {
     "cold": "39ca0198c6fcae83b36801500e037213bd15de2c59b1a490dc3a35ebfa11e131",
     "natural": "39ca0198c6fcae83b36801500e037213bd15de2c59b1a490dc3a35ebfa11e131"
-   }
+   },
+   "discarded_attempts": []
   },
   {
    "index": 31,
@@ -5592,7 +5944,8 @@
     "source_32": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
     "source_128": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
     "source_512": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c"
-   }
+   },
+   "discarded_attempts": []
   },
   {
    "index": 32,
@@ -5839,7 +6192,15 @@
     "source_32": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
     "source_128": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
     "source_512": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c"
-   }
+   },
+   "discarded_attempts": [
+    {
+     "host": "host/r09.p1.head.baseline.contaminated-2026-10-19T025336+0000.host.json",
+     "kind": "contaminated",
+     "started_utc": "2026-10-19T02:53:36+00:00",
+     "metal_cache_growth_bytes": 147960
+    }
+   ]
   },
   {
    "index": 33,
@@ -6086,7 +6447,8 @@
     "source_32": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
     "source_128": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
     "source_512": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c"
-   }
+   },
+   "discarded_attempts": []
   },
   {
    "index": 34,
@@ -6150,7 +6512,8 @@
    "tokens": {
     "cold": "39ca0198c6fcae83b36801500e037213bd15de2c59b1a490dc3a35ebfa11e131",
     "natural": "39ca0198c6fcae83b36801500e037213bd15de2c59b1a490dc3a35ebfa11e131"
-   }
+   },
+   "discarded_attempts": []
   },
   {
    "index": 35,
@@ -6214,7 +6577,8 @@
    "tokens": {
     "cold": "39ca0198c6fcae83b36801500e037213bd15de2c59b1a490dc3a35ebfa11e131",
     "natural": "39ca0198c6fcae83b36801500e037213bd15de2c59b1a490dc3a35ebfa11e131"
-   }
+   },
+   "discarded_attempts": []
   },
   {
    "index": 36,
@@ -6278,7 +6642,8 @@
    "tokens": {
     "cold": "39ca0198c6fcae83b36801500e037213bd15de2c59b1a490dc3a35ebfa11e131",
     "natural": "39ca0198c6fcae83b36801500e037213bd15de2c59b1a490dc3a35ebfa11e131"
-   }
+   },
+   "discarded_attempts": []
   },
   {
    "index": 37,
@@ -6342,7 +6707,8 @@
    "tokens": {
     "cold": "39ca0198c6fcae83b36801500e037213bd15de2c59b1a490dc3a35ebfa11e131",
     "natural": "39ca0198c6fcae83b36801500e037213bd15de2c59b1a490dc3a35ebfa11e131"
-   }
+   },
+   "discarded_attempts": []
   },
   {
    "index": 38,
@@ -6589,7 +6955,8 @@
     "source_32": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
     "source_128": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
     "source_512": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c"
-   }
+   },
+   "discarded_attempts": []
   },
   {
    "index": 39,
@@ -6836,7 +7203,21 @@
     "source_32": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
     "source_128": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
     "source_512": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c"
-   }
+   },
+   "discarded_attempts": [
+    {
+     "host": "host/r10.p4.head.baseline.contaminated-2026-10-19T033600+0000.host.json",
+     "kind": "contaminated",
+     "started_utc": "2026-10-19T03:36:00+00:00",
+     "metal_cache_growth_bytes": 82368
+    },
+    {
+     "host": "host/r10.p4.head.baseline.contaminated-2026-10-19T034126+0000.host.json",
+     "kind": "contaminated",
+     "started_utc": "2026-10-19T03:41:26+00:00",
+     "metal_cache_growth_bytes": 197224
+    }
+   ]
   },
   {
    "index": 40,
@@ -6900,7 +7281,8 @@
    "tokens": {
     "cold": "39ca0198c6fcae83b36801500e037213bd15de2c59b1a490dc3a35ebfa11e131",
     "natural": "39ca0198c6fcae83b36801500e037213bd15de2c59b1a490dc3a35ebfa11e131"
-   }
+   },
+   "discarded_attempts": []
   },
   {
    "index": 41,
@@ -6964,7 +7346,8 @@
    "tokens": {
     "cold": "39ca0198c6fcae83b36801500e037213bd15de2c59b1a490dc3a35ebfa11e131",
     "natural": "39ca0198c6fcae83b36801500e037213bd15de2c59b1a490dc3a35ebfa11e131"
-   }
+   },
+   "discarded_attempts": []
   },
   {
    "index": 42,
@@ -7211,7 +7594,8 @@
     "source_32": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
     "source_128": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
     "source_512": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c"
-   }
+   },
+   "discarded_attempts": []
   },
   {
    "index": 43,
@@ -7458,7 +7842,8 @@
     "source_32": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
     "source_128": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
     "source_512": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c"
-   }
+   },
+   "discarded_attempts": []
   },
   {
    "index": 44,
@@ -7705,7 +8090,8 @@
     "source_32": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
     "source_128": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
     "source_512": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c"
-   }
+   },
+   "discarded_attempts": []
   },
   {
    "index": 45,
@@ -7952,7 +8338,8 @@
     "source_32": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
     "source_128": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c",
     "source_512": "eae4309d42a25599f632099b729248779932facad5d3fea8b83dc6fd7660757c"
-   }
+   },
+   "discarded_attempts": []
   },
   {
    "index": 46,
@@ -8016,7 +8403,8 @@
    "tokens": {
     "cold": "39ca0198c6fcae83b36801500e037213bd15de2c59b1a490dc3a35ebfa11e131",
     "natural": "39ca0198c6fcae83b36801500e037213bd15de2c59b1a490dc3a35ebfa11e131"
-   }
+   },
+   "discarded_attempts": []
   },
   {
    "index": 47,
@@ -8080,14 +8468,201 @@
    "tokens": {
     "cold": "39ca0198c6fcae83b36801500e037213bd15de2c59b1a490dc3a35ebfa11e131",
     "natural": "39ca0198c6fcae83b36801500e037213bd15de2c59b1a490dc3a35ebfa11e131"
-   }
+   },
+   "discarded_attempts": []
   }
  ],
+ "steady_state_rule": {
+  "document": "BENCHMARKS.md#metrics-steady-state-and-statistics",
+  "rule": "Candidate windows start at block boundaries (rounds 1, 5, 9, 13) and span at least two whole blocks. Working back from the end of the campaign, each candidate's first block is compared, series by series, with all later rounds: drift = median(later) / median(block) - 1. Its standard error is sqrt(pi/2) s sqrt(1/4 + 1/m), with m later rounds and s their relative round-to-round noise: the smaller of their median absolute deviation over 0.6745 and their median absolute successive difference over 0.6745 sqrt(2), divided by their median. A block drifts when |drift| exceeds 2.5% and |log(1 + drift)| exceeds three standard errors. The window starts at the earliest candidate from which no candidate block drifts.",
+  "why": "The 2.5% tolerance, half the alert threshold, keeps changes too small to matter from counting. The noise limit keeps one-observation-per-process noise from counting; that noise made the original rule's verdict depend on which strict load fell into which half. The backward scan makes the rule monotone, so no early window that passed can hide a later drift. Whole blocks keep every cell equally often in every position. The noise comes from the later rounds alone, which the scan has already accepted (it starts with the last block as its reference), so a transient block's own spread cannot widen its limit; and taking the smaller of an outlier-proof and a trend-proof scale keeps either an outlier or a trend among the later rounds from widening it.",
+  "limitations": "Derived from the rule, not measured: three standard errors of a block against four later rounds are 2.66 times their noise, and against eight later rounds 2.30 times, so with the 2% noise typical of a strict load a drift of 4.6 to 5.3% can pass as noise. In this campaign the head's baseline-benchmark strict loads in rounds 9 to 12 have 4.0% noise, and the 3.4% difference of their median from rounds 5 to 8 is 0.95 standard errors. Over rounds 5 to 12 the gated series' noise is 0.10% to 2.27% (the head's baseline strict load); a single-observation series' reference median is only as stable as its noise allows. The seeded-simulation tests in scripts/tests/test_qwen35_benchmark_protocol.py check that stationary 1% noise rarely blocks a steady state and that a 5% shift with 0.3% noise never passes.",
+  "script": "scripts/qwen35_benchmark_protocol.py",
+  "window_rounds_minimum": 8,
+  "block_rounds": 4,
+  "drift_tolerance": 0.025,
+  "z_limit": 3.0,
+  "original_rule": {
+   "description": "The earliest window of at least six final rounds in which, for every series, the median of the window's last n/2 rounds is within 2.5% of the median of its first n/2 rounds; later windows were not checked.",
+   "finding": "Only the window from round 3 passes. The windows from rounds 1 and 2 fail on the head's public-benchmark strict load (-5.6% and -4.4%), those from rounds 4 and 5 on the head's baseline-benchmark strict load (+3.1% and +3.4%), and those from rounds 6 and 7 on the September source's baseline-benchmark strict load (+3.4%). Each is one observation per process, so which window passed depended on which outlying loads fell into which half. The window from round 3 also uses layouts 3 and 4 twice and the other six once, so each cell ran 2, 3, 3, and 2 or 3, 2, 2, and 3 times in positions 1 to 4, not equally often; the mean position stays 2.5.",
+   "script": "harness/qwen35_benchmark_protocol.py",
+   "script_sha256": "0be713dd66bbf9d3601cf896ce6d8491d73cfe9e97b832b67d02e2ea22531a72",
+   "window_rounds_minimum": 6,
+   "drift_tolerance": 0.025,
+   "first_round": 3,
+   "rounds": [
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12
+   ],
+   "maximum_absolute_drift": 0.02087726427754455,
+   "drifting_by_start": {
+    "1": {
+     "head/public/strict_load": -0.05546452311539107
+    },
+    "2": {
+     "head/public/strict_load": -0.04413691550642462
+    },
+    "3": {},
+    "4": {
+     "head/baseline/strict_load": 0.030710789889721646
+    },
+    "5": {
+     "head/baseline/strict_load": 0.03430579074709761
+    },
+    "6": {
+     "september/baseline/strict_load": 0.03404678845888576
+    },
+    "7": {
+     "september/baseline/strict_load": 0.03404678845888576
+    }
+   },
+   "position_counts": {
+    "head/baseline": {
+     "1": 2,
+     "2": 3,
+     "3": 3,
+     "4": 2
+    },
+    "head/public": {
+     "1": 3,
+     "2": 2,
+     "3": 2,
+     "4": 3
+    },
+    "september/baseline": {
+     "1": 3,
+     "2": 2,
+     "3": 2,
+     "4": 3
+    },
+    "september/public": {
+     "1": 2,
+     "2": 3,
+     "3": 3,
+     "4": 2
+    }
+   },
+   "head_medians": {
+    "baseline": {
+     "strict_load": 0.9335378335,
+     "source_32.prefill": 0.048582979250000005,
+     "source_32.first_token_latency": 0.056544698000000004,
+     "source_32.decode_model_only": 3.5599227732500003,
+     "source_32.decode_including_greedy_readback": 4.571608104,
+     "source_128.prefill": 0.0609928125,
+     "source_128.first_token_latency": 0.068917052,
+     "source_128.decode_model_only": 3.5471337287500004,
+     "source_128.decode_including_greedy_readback": 4.56020144775,
+     "source_512.prefill": 0.16141279125,
+     "source_512.first_token_latency": 0.16964680225,
+     "source_512.decode_model_only": 3.54187679925,
+     "source_512.decode_including_greedy_readback": 4.556831895749999,
+     "natural_loop": 1.11009964575
+    },
+    "public": {
+     "strict_load": 0.9363571035,
+     "natural_loop": 1.41443846875
+    }
+   }
+  },
+  "head_reference_change": {
+   "baseline": {
+    "strict_load": {
+     "original_window": 0.9335378335,
+     "corrected_window": 0.93964875,
+     "corrected_over_original": 1.006545976264389
+    },
+    "source_32.prefill": {
+     "original_window": 0.048582979250000005,
+     "corrected_window": 0.048582979250000005,
+     "corrected_over_original": 1.0
+    },
+    "source_32.first_token_latency": {
+     "original_window": 0.056544698000000004,
+     "corrected_window": 0.056544698000000004,
+     "corrected_over_original": 1.0
+    },
+    "source_32.decode_model_only": {
+     "original_window": 3.5599227732500003,
+     "corrected_window": 3.557069879500001,
+     "corrected_over_original": 0.9991986079666008
+    },
+    "source_32.decode_including_greedy_readback": {
+     "original_window": 4.571608104,
+     "corrected_window": 4.5690301665,
+     "corrected_over_original": 0.9994360983178449
+    },
+    "source_128.prefill": {
+     "original_window": 0.0609928125,
+     "corrected_window": 0.0610253645,
+     "corrected_over_original": 1.0005337022292586
+    },
+    "source_128.first_token_latency": {
+     "original_window": 0.068917052,
+     "corrected_window": 0.0689572605,
+     "corrected_over_original": 1.0005834332553865
+    },
+    "source_128.decode_model_only": {
+     "original_window": 3.5471337287500004,
+     "corrected_window": 3.5447335012500005,
+     "corrected_over_original": 0.9993233332364817
+    },
+    "source_128.decode_including_greedy_readback": {
+     "original_window": 4.56020144775,
+     "corrected_window": 4.557876093499999,
+     "corrected_over_original": 0.9994900764195082
+    },
+    "source_512.prefill": {
+     "original_window": 0.16141279125,
+     "corrected_window": 0.161342177,
+     "corrected_over_original": 0.9995625238281728
+    },
+    "source_512.first_token_latency": {
+     "original_window": 0.16964680225,
+     "corrected_window": 0.16964680225,
+     "corrected_over_original": 1.0
+    },
+    "source_512.decode_model_only": {
+     "original_window": 3.54187679925,
+     "corrected_window": 3.537418826,
+     "corrected_over_original": 0.9987413528186683
+    },
+    "source_512.decode_including_greedy_readback": {
+     "original_window": 4.556831895749999,
+     "corrected_window": 4.551288302250001,
+     "corrected_over_original": 0.9987834544642367
+    },
+    "natural_loop": {
+     "original_window": 1.11009964575,
+     "corrected_window": 1.109537,
+     "corrected_over_original": 0.9994931574366732
+    }
+   },
+   "public": {
+    "strict_load": {
+     "original_window": 0.9363571035,
+     "corrected_window": 0.9342329165000001,
+     "corrected_over_original": 0.9977314349492731
+    },
+    "natural_loop": {
+     "original_window": 1.41443846875,
+     "corrected_window": 1.4126467395,
+     "corrected_over_original": 0.9987332575509039
+    }
+   }
+  }
+ },
  "steady_state": {
-  "first_round": 3,
+  "first_round": 5,
   "rounds": [
-   3,
-   4,
    5,
    6,
    7,
@@ -8097,42 +8672,581 @@
    11,
    12
   ],
+  "assessments": [
+   {
+    "first_round": 1,
+    "block": [
+     1,
+     2,
+     3,
+     4
+    ],
+    "later_rounds": [
+     5,
+     6,
+     7,
+     8,
+     9,
+     10,
+     11,
+     12
+    ],
+    "series": {
+     "head/baseline/strict_load": {
+      "drift": -0.0014813131827513537,
+      "noise": 0.02273338233272892,
+      "standard_error": 0.017447757977280258,
+      "z": 0.08496285962562182,
+      "drifting": false
+     },
+     "head/baseline/source_32.prefill": {
+      "drift": 0.011345632076275924,
+      "noise": 0.017461392240599907,
+      "standard_error": 0.013401531778301595,
+      "z": 0.8418256427780488,
+      "drifting": false
+     },
+     "head/baseline/source_32.first_token_latency": {
+      "drift": 0.010704173128570638,
+      "noise": 0.013533894347951573,
+      "standard_error": 0.010387196661588652,
+      "z": 1.02503970856229,
+      "drifting": false
+     },
+     "head/baseline/source_32.decode_model_only": {
+      "drift": -0.0027114830174088667,
+      "noise": 0.003979066022996948,
+      "standard_error": 0.0030539134005113946,
+      "z": 0.8890775179288448,
+      "drifting": false
+     },
+     "head/baseline/source_32.decode_including_greedy_readback": {
+      "drift": -0.00217683410208791,
+      "noise": 0.0036840169923389424,
+      "standard_error": 0.0028274647355918496,
+      "z": 0.7707282152879074,
+      "drifting": false
+     },
+     "head/baseline/source_128.prefill": {
+      "drift": 0.004058952971356389,
+      "noise": 0.0009718001666467079,
+      "standard_error": 0.0007458517989873182,
+      "z": 5.431022155014983,
+      "drifting": false
+     },
+     "head/baseline/source_128.first_token_latency": {
+      "drift": 0.004020847553568574,
+      "noise": 0.003121349959602769,
+      "standard_error": 0.0023956205838819044,
+      "z": 1.6750505386968004,
+      "drifting": false
+     },
+     "head/baseline/source_128.decode_model_only": {
+      "drift": -0.00326705617352141,
+      "noise": 0.0029416625396731836,
+      "standard_error": 0.002257711381959949,
+      "z": 1.4494344494417748,
+      "drifting": false
+     },
+     "head/baseline/source_128.decode_including_greedy_readback": {
+      "drift": -0.002437581800174282,
+      "noise": 0.0027454440957658238,
+      "standard_error": 0.002107114701278373,
+      "z": 1.1582461732776073,
+      "drifting": false
+     },
+     "head/baseline/source_512.prefill": {
+      "drift": -0.0011514384998118077,
+      "noise": 0.0037199888982006636,
+      "standard_error": 0.0028550729945948767,
+      "z": 0.40352800667630195,
+      "drifting": false
+     },
+     "head/baseline/source_512.first_token_latency": {
+      "drift": -0.0012082825750600046,
+      "noise": 0.0036842370406249343,
+      "standard_error": 0.0028276336215579197,
+      "z": 0.4275706469805223,
+      "drifting": false
+     },
+     "head/baseline/source_512.decode_model_only": {
+      "drift": -0.009109618097216776,
+      "noise": 0.005229347501030387,
+      "standard_error": 0.004013498222203216,
+      "z": 2.2801466161003927,
+      "drifting": false
+     },
+     "head/baseline/source_512.decode_including_greedy_readback": {
+      "drift": -0.006936212022045751,
+      "noise": 0.004206680342608244,
+      "standard_error": 0.0032286062597883746,
+      "z": 2.1558464546634646,
+      "drifting": false
+     },
+     "head/baseline/natural_loop": {
+      "drift": -0.0072706295793212306,
+      "noise": 0.0036827750141149936,
+      "standard_error": 0.002826511523476409,
+      "z": 2.5816945595699337,
+      "drifting": false
+     },
+     "september/baseline/strict_load": {
+      "drift": -0.04461798867104083,
+      "noise": 0.011012158824819812,
+      "standard_error": 0.008451777178190047,
+      "z": 5.4005217671644035,
+      "drifting": true
+     },
+     "september/baseline/source_32.prefill": {
+      "drift": -0.05813337012877828,
+      "noise": 0.011546428518068893,
+      "standard_error": 0.008861826512951166,
+      "z": 6.758380591133127,
+      "drifting": true
+     },
+     "september/baseline/source_32.first_token_latency": {
+      "drift": -0.05082576781738046,
+      "noise": 0.008192178304169455,
+      "standard_error": 0.00628745614118728,
+      "z": 8.296344419189287,
+      "drifting": true
+     },
+     "september/baseline/source_32.decode_model_only": {
+      "drift": -0.028684923580659216,
+      "noise": 0.0040873169354276795,
+      "standard_error": 0.0031369954378988522,
+      "z": 9.277787415592075,
+      "drifting": true
+     },
+     "september/baseline/source_32.decode_including_greedy_readback": {
+      "drift": -0.02192003611881188,
+      "noise": 0.0034185615743253166,
+      "standard_error": 0.0026237290213250177,
+      "z": 8.447461399351829,
+      "drifting": false
+     },
+     "september/baseline/source_128.prefill": {
+      "drift": -0.007922127721367245,
+      "noise": 0.009028039752575384,
+      "standard_error": 0.006928975649409747,
+      "z": 1.147886051244504,
+      "drifting": false
+     },
+     "september/baseline/source_128.first_token_latency": {
+      "drift": -0.007931711412845877,
+      "noise": 0.008677090875973757,
+      "standard_error": 0.006659624130497051,
+      "z": 1.1957633957968183,
+      "drifting": false
+     },
+     "september/baseline/source_128.decode_model_only": {
+      "drift": -0.0014959680201899195,
+      "noise": 0.006083191826006989,
+      "standard_error": 0.00466881949883604,
+      "z": 0.3206566666215834,
+      "drifting": false
+     },
+     "september/baseline/source_128.decode_including_greedy_readback": {
+      "drift": -0.00042059690747486833,
+      "noise": 0.004848687626042845,
+      "standard_error": 0.003721343659664474,
+      "z": 0.113046636279047,
+      "drifting": false
+     },
+     "september/baseline/source_512.prefill": {
+      "drift": -0.03140511931784051,
+      "noise": 0.0074424027147527265,
+      "standard_error": 0.005712007101974936,
+      "z": 5.5862735694838,
+      "drifting": true
+     },
+     "september/baseline/source_512.first_token_latency": {
+      "drift": -0.0308785212153605,
+      "noise": 0.006927983445608128,
+      "standard_error": 0.005317192869076451,
+      "z": 5.898847496863389,
+      "drifting": true
+     },
+     "september/baseline/source_512.decode_model_only": {
+      "drift": -0.021356272343371785,
+      "noise": 0.003290323461900652,
+      "standard_error": 0.002525306907259415,
+      "z": 8.548512329902092,
+      "drifting": false
+     },
+     "september/baseline/source_512.decode_including_greedy_readback": {
+      "drift": -0.01570364035977445,
+      "noise": 0.003353949269101519,
+      "standard_error": 0.002574139398126891,
+      "z": 6.148947796057958,
+      "drifting": false
+     },
+     "september/baseline/natural_loop": {
+      "drift": -0.002146436723278189,
+      "noise": 0.0038176354632829712,
+      "standard_error": 0.002930016248085847,
+      "z": 0.7333555305875336,
+      "drifting": false
+     },
+     "head/public/strict_load": {
+      "drift": -0.07551281523201503,
+      "noise": 0.0052082130005012784,
+      "standard_error": 0.003997277598065306,
+      "z": 19.642391133100162,
+      "drifting": true
+     },
+     "head/public/natural_loop": {
+      "drift": -0.07567615612383005,
+      "noise": 0.00747525639307181,
+      "standard_error": 0.005737222136833586,
+      "z": 13.716182933492298,
+      "drifting": true
+     },
+     "september/public/strict_load": {
+      "drift": -0.07820421082119533,
+      "noise": 0.011717044000188305,
+      "standard_error": 0.008992773047682638,
+      "z": 9.055223157136542,
+      "drifting": true
+     },
+     "september/public/natural_loop": {
+      "drift": -0.0031550200478348556,
+      "noise": 0.0015309774403952457,
+      "standard_error": 0.0011750175780150059,
+      "z": 2.6893279522456988,
+      "drifting": false
+     }
+    },
+    "drifting": [
+     "september/baseline/strict_load",
+     "september/baseline/source_32.prefill",
+     "september/baseline/source_32.first_token_latency",
+     "september/baseline/source_32.decode_model_only",
+     "september/baseline/source_512.prefill",
+     "september/baseline/source_512.first_token_latency",
+     "head/public/strict_load",
+     "head/public/natural_loop",
+     "september/public/strict_load"
+    ]
+   },
+   {
+    "first_round": 5,
+    "block": [
+     5,
+     6,
+     7,
+     8
+    ],
+    "later_rounds": [
+     9,
+     10,
+     11,
+     12
+    ],
+    "series": {
+     "head/baseline/strict_load": {
+      "drift": 0.03430579074709761,
+      "noise": 0.03996152512212301,
+      "standard_error": 0.035414979545382225,
+      "z": 0.9524350579964211,
+      "drifting": false
+     },
+     "head/baseline/source_32.prefill": {
+      "drift": -0.008082609217132108,
+      "noise": 0.00784820989812675,
+      "standard_error": 0.006955294928324773,
+      "z": 1.16680179186957,
+      "drifting": false
+     },
+     "head/baseline/source_32.first_token_latency": {
+      "drift": -0.006482247521058082,
+      "noise": 0.006033804617290867,
+      "standard_error": 0.00534732011476434,
+      "z": 1.2161883682532537,
+      "drifting": false
+     },
+     "head/baseline/source_32.decode_model_only": {
+      "drift": -0.0037031431995699915,
+      "noise": 0.002777927046469456,
+      "standard_error": 0.0024618737455246865,
+      "z": 1.506989062963099,
+      "drifting": false
+     },
+     "head/baseline/source_32.decode_including_greedy_readback": {
+      "drift": -0.0029071250547579863,
+      "noise": 0.0027052147593676574,
+      "standard_error": 0.002397434158883822,
+      "z": 1.2143645070066174,
+      "drifting": false
+     },
+     "head/baseline/source_128.prefill": {
+      "drift": -0.0011301783393767861,
+      "noise": 0.000791268109120098,
+      "standard_error": 0.0007012431035543217,
+      "z": 1.6125897948745458,
+      "drifting": false
+     },
+     "head/baseline/source_128.first_token_latency": {
+      "drift": -2.1303050459886563e-05,
+      "noise": 0.0026507624833444136,
+      "standard_error": 0.002349177085719837,
+      "z": 0.009068399952726796,
+      "drifting": false
+     },
+     "head/baseline/source_128.decode_model_only": {
+      "drift": -0.003625363198533793,
+      "noise": 0.0006913970234971408,
+      "standard_error": 0.0006127346584010593,
+      "z": 5.927444619359955,
+      "drifting": false
+     },
+     "head/baseline/source_128.decode_including_greedy_readback": {
+      "drift": -0.002816303317390134,
+      "noise": 0.0007499920205346346,
+      "standard_error": 0.000664663122472511,
+      "z": 4.243166900469212,
+      "drifting": false
+     },
+     "head/baseline/source_512.prefill": {
+      "drift": 0.0026716727307445343,
+      "noise": 0.0016863338722076181,
+      "standard_error": 0.0014944744828534016,
+      "z": 1.7853166365232278,
+      "drifting": false
+     },
+     "head/baseline/source_512.first_token_latency": {
+      "drift": 0.0033525417648703204,
+      "noise": 0.0010904875767143278,
+      "standard_error": 0.0009664194523559672,
+      "z": 3.4632317441556095,
+      "drifting": false
+     },
+     "head/baseline/source_512.decode_model_only": {
+      "drift": -0.0009158970886434803,
+      "noise": 0.0006235816095089296,
+      "standard_error": 0.0005526348125639809,
+      "z": 1.6580873260809414,
+      "drifting": false
+     },
+     "head/baseline/source_512.decode_including_greedy_readback": {
+      "drift": -0.0008412533560273605,
+      "noise": 0.000860697542259886,
+      "standard_error": 0.000762773336621724,
+      "z": 1.1033518973516907,
+      "drifting": false
+     },
+     "head/baseline/natural_loop": {
+      "drift": -0.0029830939639906573,
+      "noise": 0.0009820578904113986,
+      "standard_error": 0.0008703261448359153,
+      "z": 3.432681271340135,
+      "drifting": false
+     },
+     "september/baseline/strict_load": {
+      "drift": 0.023134809703798886,
+      "noise": 0.009787303282833469,
+      "standard_error": 0.008673771696819191,
+      "z": 2.6368294991447288,
+      "drifting": false
+     },
+     "september/baseline/source_32.prefill": {
+      "drift": 0.003393901067538785,
+      "noise": 0.012990666285050478,
+      "standard_error": 0.011512678241383087,
+      "z": 0.29429770485622175,
+      "drifting": false
+     },
+     "september/baseline/source_32.first_token_latency": {
+      "drift": 0.0046693846196466104,
+      "noise": 0.011193161873808926,
+      "standard_error": 0.009919681433520717,
+      "z": 0.46962363578611666,
+      "drifting": false
+     },
+     "september/baseline/source_32.decode_model_only": {
+      "drift": -0.003135878341884779,
+      "noise": 0.004008282923150292,
+      "standard_error": 0.003552248251328277,
+      "z": 0.8841739905324387,
+      "drifting": false
+     },
+     "september/baseline/source_32.decode_including_greedy_readback": {
+      "drift": -0.0027906102002940303,
+      "noise": 0.0036472543156489392,
+      "standard_error": 0.0032322949785018626,
+      "z": 0.8645594633796037,
+      "drifting": false
+     },
+     "september/baseline/source_128.prefill": {
+      "drift": 0.007943481167839828,
+      "noise": 0.004270976265689433,
+      "standard_error": 0.0037850541646236475,
+      "z": 2.090352598155504,
+      "drifting": false
+     },
+     "september/baseline/source_128.first_token_latency": {
+      "drift": 0.007337334505892246,
+      "noise": 0.004251238585411738,
+      "standard_error": 0.003767562100915577,
+      "z": 1.9403919624861752,
+      "drifting": false
+     },
+     "september/baseline/source_128.decode_model_only": {
+      "drift": -0.005255997837166793,
+      "noise": 0.006486036864991198,
+      "standard_error": 0.005748100509234394,
+      "z": 0.9168001110645493,
+      "drifting": false
+     },
+     "september/baseline/source_128.decode_including_greedy_readback": {
+      "drift": -0.004053954913850744,
+      "noise": 0.005212729577423887,
+      "standard_error": 0.004619661306617025,
+      "z": 0.8793273349511938,
+      "drifting": false
+     },
+     "september/baseline/source_512.prefill": {
+      "drift": 0.0026927344766081163,
+      "noise": 0.004884772894770134,
+      "standard_error": 0.004329017264067104,
+      "z": 0.6211838387686008,
+      "drifting": false
+     },
+     "september/baseline/source_512.first_token_latency": {
+      "drift": 0.002517321069306133,
+      "noise": 0.006592959862767787,
+      "standard_error": 0.005842858548814132,
+      "z": 0.4302958736620966,
+      "drifting": false
+     },
+     "september/baseline/source_512.decode_model_only": {
+      "drift": -0.0012346112304592038,
+      "noise": 0.006003835262066717,
+      "standard_error": 0.00532076046522624,
+      "z": 0.23217996729059684,
+      "drifting": false
+     },
+     "september/baseline/source_512.decode_including_greedy_readback": {
+      "drift": -0.001229667491264519,
+      "noise": 0.004938021097823128,
+      "standard_error": 0.004376207255344643,
+      "z": 0.28116222127953105,
+      "drifting": false
+     },
+     "september/baseline/natural_loop": {
+      "drift": -0.006400010810882262,
+      "noise": 0.0035621845766538197,
+      "standard_error": 0.0031569038852631488,
+      "z": 2.033821401219242,
+      "drifting": false
+     },
+     "head/public/strict_load": {
+      "drift": 0.008368137322822378,
+      "noise": 0.008560602928100475,
+      "standard_error": 0.007586636812992362,
+      "z": 1.098420654322173,
+      "drifting": false
+     },
+     "head/public/natural_loop": {
+      "drift": 0.002797018744515656,
+      "noise": 0.008332954856383662,
+      "standard_error": 0.007384888962309521,
+      "z": 0.378220225186951,
+      "drifting": false
+     },
+     "september/public/strict_load": {
+      "drift": 0.015483757696086231,
+      "noise": 0.006790939528355729,
+      "standard_error": 0.0060183134591503,
+      "z": 2.5530586972291927,
+      "drifting": false
+     },
+     "september/public/natural_loop": {
+      "drift": 0.0011732234933949925,
+      "noise": 0.0006452360220320547,
+      "standard_error": 0.0005718255359968358,
+      "z": 2.0505131910397068,
+      "drifting": false
+     }
+    },
+    "drifting": []
+   }
+  ],
+  "limiting_block": 1,
+  "drifting": [
+   "september/baseline/strict_load",
+   "september/baseline/source_32.prefill",
+   "september/baseline/source_32.first_token_latency",
+   "september/baseline/source_32.decode_model_only",
+   "september/baseline/source_512.prefill",
+   "september/baseline/source_512.first_token_latency",
+   "head/public/strict_load",
+   "head/public/natural_loop",
+   "september/public/strict_load"
+  ],
   "drift": {
-   "head/baseline/strict_load": 0.02087726427754455,
-   "head/baseline/source_32.prefill": -0.009476658244469971,
-   "head/baseline/source_32.first_token_latency": -0.008746804973952083,
-   "head/baseline/source_32.decode_model_only": -0.005763251150259108,
-   "head/baseline/source_32.decode_including_greedy_readback": -0.004545286564622053,
-   "head/baseline/source_128.prefill": 0.004494834442948736,
-   "head/baseline/source_128.first_token_latency": 0.003162940835315542,
-   "head/baseline/source_128.decode_model_only": -0.0030513380310133176,
-   "head/baseline/source_128.decode_including_greedy_readback": -0.00205964017556326,
-   "head/baseline/source_512.prefill": 0.000902339782144379,
-   "head/baseline/source_512.first_token_latency": 0.002810696567255855,
-   "head/baseline/source_512.decode_model_only": -0.0064650694273064024,
-   "head/baseline/source_512.decode_including_greedy_readback": -0.005450750224386569,
-   "head/baseline/natural_loop": -0.004639024408030545,
-   "september/baseline/strict_load": 0.01693294201700435,
-   "september/baseline/source_32.prefill": 0.002171406557161415,
-   "september/baseline/source_32.first_token_latency": 0.004854253951028342,
-   "september/baseline/source_32.decode_model_only": -0.0016639828057413153,
-   "september/baseline/source_32.decode_including_greedy_readback": -0.001298911491661281,
-   "september/baseline/source_128.prefill": 0.007189505281676611,
-   "september/baseline/source_128.first_token_latency": 0.006441435951909158,
-   "september/baseline/source_128.decode_model_only": -0.005260194636540483,
-   "september/baseline/source_128.decode_including_greedy_readback": -0.004642623565734527,
-   "september/baseline/source_512.prefill": 0.000900750395829597,
-   "september/baseline/source_512.first_token_latency": 0.0002697775290654292,
-   "september/baseline/source_512.decode_model_only": -0.0030534841754051856,
-   "september/baseline/source_512.decode_including_greedy_readback": -0.0025403920089765997,
-   "september/baseline/natural_loop": -0.004264992807415324,
-   "head/public/strict_load": -0.002551455305949135,
-   "head/public/natural_loop": -0.003620123486071436,
-   "september/public/strict_load": 0.011230555857711266,
-   "september/public/natural_loop": -0.0017671387970243924
+   "head/baseline/strict_load": 0.03430579074709761,
+   "head/baseline/source_32.prefill": -0.008082609217132108,
+   "head/baseline/source_32.first_token_latency": -0.006482247521058082,
+   "head/baseline/source_32.decode_model_only": -0.0037031431995699915,
+   "head/baseline/source_32.decode_including_greedy_readback": -0.0029071250547579863,
+   "head/baseline/source_128.prefill": -0.0011301783393767861,
+   "head/baseline/source_128.first_token_latency": -2.1303050459886563e-05,
+   "head/baseline/source_128.decode_model_only": -0.003625363198533793,
+   "head/baseline/source_128.decode_including_greedy_readback": -0.002816303317390134,
+   "head/baseline/source_512.prefill": 0.0026716727307445343,
+   "head/baseline/source_512.first_token_latency": 0.0033525417648703204,
+   "head/baseline/source_512.decode_model_only": -0.0009158970886434803,
+   "head/baseline/source_512.decode_including_greedy_readback": -0.0008412533560273605,
+   "head/baseline/natural_loop": -0.0029830939639906573,
+   "september/baseline/strict_load": 0.023134809703798886,
+   "september/baseline/source_32.prefill": 0.003393901067538785,
+   "september/baseline/source_32.first_token_latency": 0.0046693846196466104,
+   "september/baseline/source_32.decode_model_only": -0.003135878341884779,
+   "september/baseline/source_32.decode_including_greedy_readback": -0.0027906102002940303,
+   "september/baseline/source_128.prefill": 0.007943481167839828,
+   "september/baseline/source_128.first_token_latency": 0.007337334505892246,
+   "september/baseline/source_128.decode_model_only": -0.005255997837166793,
+   "september/baseline/source_128.decode_including_greedy_readback": -0.004053954913850744,
+   "september/baseline/source_512.prefill": 0.0026927344766081163,
+   "september/baseline/source_512.first_token_latency": 0.002517321069306133,
+   "september/baseline/source_512.decode_model_only": -0.0012346112304592038,
+   "september/baseline/source_512.decode_including_greedy_readback": -0.001229667491264519,
+   "september/baseline/natural_loop": -0.006400010810882262,
+   "head/public/strict_load": 0.008368137322822378,
+   "head/public/natural_loop": 0.002797018744515656,
+   "september/public/strict_load": 0.015483757696086231,
+   "september/public/natural_loop": 0.0011732234933949925
   },
-  "drifting": [],
-  "maximum_absolute_drift": 0.02087726427754455
+  "maximum_absolute_drift": 0.03430579074709761,
+  "beyond_tolerance": 1,
+  "maximum_z_beyond_tolerance": 0.9524350579964211,
+  "position_counts": {
+   "head/baseline": {
+    "1": 2,
+    "2": 2,
+    "3": 2,
+    "4": 2
+   },
+   "head/public": {
+    "1": 2,
+    "2": 2,
+    "3": 2,
+    "4": 2
+   },
+   "september/baseline": {
+    "1": 2,
+    "2": 2,
+    "3": 2,
+    "4": 2
+   },
+   "september/public": {
+    "1": 2,
+    "2": 2,
+    "3": 2,
+    "4": 2
+   }
+  }
  },
  "cold_first_token": {
   "baseline": {
@@ -8173,13 +9287,64 @@
     ],
     "spearman_with_metal_cache_growth": 0.7403554346427417,
     "spearman_with_round": -0.6293706293706294,
+    "discarded_attempts_metal_cache_growth_bytes": [
+     0,
+     328632,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     147960,
+     279592,
+     0,
+     0
+    ],
+    "rounds_after_discarded_attempts": [
+     2,
+     9,
+     10
+    ],
+    "spearman_with_metal_cache_growth_including_discarded_attempts": 0.15114445580158797,
+    "without_rounds_after_discarded_attempts": {
+     "all_rounds": {
+      "median": 0.20422775,
+      "minimum": 0.119575667,
+      "maximum": 0.252678042,
+      "values": [
+       0.252678042,
+       0.20422775,
+       0.205301833,
+       0.127008792,
+       0.226866375,
+       0.174732125,
+       0.22407025,
+       0.134313917,
+       0.119575667
+      ]
+     },
+     "spearman_with_metal_cache_growth": 0.7143109357936152,
+     "spearman_with_round": -0.5666666666666667,
+     "steady_state": {
+      "median": 0.15452302099999998,
+      "minimum": 0.119575667,
+      "maximum": 0.226866375,
+      "values": [
+       0.127008792,
+       0.226866375,
+       0.174732125,
+       0.22407025,
+       0.134313917,
+       0.119575667
+      ]
+     }
+    },
     "steady_state": {
-     "median": 0.15452302099999998,
+     "median": 0.13077429200000001,
      "minimum": 0.119575667,
      "maximum": 0.226866375,
      "values": [
-      0.20422775,
-      0.205301833,
       0.127008792,
       0.226866375,
       0.174732125,
@@ -8228,13 +9393,66 @@
     ],
     "spearman_with_metal_cache_growth": 0.8741258741258742,
     "spearman_with_round": -0.8391608391608392,
+    "discarded_attempts_metal_cache_growth_bytes": [
+     724816,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0
+    ],
+    "rounds_after_discarded_attempts": [
+     1
+    ],
+    "spearman_with_metal_cache_growth_including_discarded_attempts": 0.8741258741258742,
+    "without_rounds_after_discarded_attempts": {
+     "all_rounds": {
+      "median": 0.270021292,
+      "minimum": 0.189512458,
+      "maximum": 0.475362375,
+      "values": [
+       0.475362375,
+       0.366314708,
+       0.403215,
+       0.270021292,
+       0.23004375,
+       0.360537209,
+       0.235336417,
+       0.249929875,
+       0.320751,
+       0.189512458,
+       0.223421458
+      ]
+     },
+     "spearman_with_metal_cache_growth": 0.8363636363636363,
+     "spearman_with_round": -0.7909090909090909,
+     "steady_state": {
+      "median": 0.242633146,
+      "minimum": 0.189512458,
+      "maximum": 0.360537209,
+      "values": [
+       0.270021292,
+       0.23004375,
+       0.360537209,
+       0.235336417,
+       0.249929875,
+       0.320751,
+       0.189512458,
+       0.223421458
+      ]
+     }
+    },
     "steady_state": {
-     "median": 0.2599755835,
+     "median": 0.242633146,
      "minimum": 0.189512458,
-     "maximum": 0.403215,
+     "maximum": 0.360537209,
      "values": [
-      0.366314708,
-      0.403215,
       0.270021292,
       0.23004375,
       0.360537209,
@@ -8285,13 +9503,65 @@
     ],
     "spearman_with_metal_cache_growth": 0.6993006993006993,
     "spearman_with_round": -0.7692307692307693,
+    "discarded_attempts_metal_cache_growth_bytes": [
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0
+    ],
+    "rounds_after_discarded_attempts": [],
+    "spearman_with_metal_cache_growth_including_discarded_attempts": 0.6993006993006993,
+    "without_rounds_after_discarded_attempts": {
+     "all_rounds": {
+      "median": 0.177461979,
+      "minimum": 0.1183255,
+      "maximum": 0.365975416,
+      "values": [
+       0.27331175,
+       0.298206833,
+       0.365975416,
+       0.192667708,
+       0.241118583,
+       0.135089833,
+       0.159759458,
+       0.16225625,
+       0.158038041,
+       0.233061292,
+       0.156101125,
+       0.1183255
+      ]
+     },
+     "spearman_with_metal_cache_growth": 0.6993006993006993,
+     "spearman_with_round": -0.7692307692307693,
+     "steady_state": {
+      "median": 0.1588987495,
+      "minimum": 0.1183255,
+      "maximum": 0.241118583,
+      "values": [
+       0.241118583,
+       0.135089833,
+       0.159759458,
+       0.16225625,
+       0.158038041,
+       0.233061292,
+       0.156101125,
+       0.1183255
+      ]
+     }
+    },
     "steady_state": {
-     "median": 0.161007854,
+     "median": 0.1588987495,
      "minimum": 0.1183255,
-     "maximum": 0.365975416,
+     "maximum": 0.241118583,
      "values": [
-      0.365975416,
-      0.192667708,
       0.241118583,
       0.135089833,
       0.159759458,
@@ -8340,13 +9610,65 @@
     ],
     "spearman_with_metal_cache_growth": 0.7250448947301883,
     "spearman_with_round": -0.6573426573426573,
+    "discarded_attempts_metal_cache_growth_bytes": [
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0
+    ],
+    "rounds_after_discarded_attempts": [],
+    "spearman_with_metal_cache_growth_including_discarded_attempts": 0.7250448947301883,
+    "without_rounds_after_discarded_attempts": {
+     "all_rounds": {
+      "median": 0.2943988955,
+      "minimum": 0.248210166,
+      "maximum": 0.519412291,
+      "values": [
+       0.519412291,
+       0.459963333,
+       0.372067791,
+       0.44305875,
+       0.281133041,
+       0.2538925,
+       0.254618375,
+       0.303172833,
+       0.283181542,
+       0.307959708,
+       0.285624958,
+       0.248210166
+      ]
+     },
+     "spearman_with_metal_cache_growth": 0.7250448947301883,
+     "spearman_with_round": -0.6573426573426573,
+     "steady_state": {
+      "median": 0.2821572915,
+      "minimum": 0.248210166,
+      "maximum": 0.307959708,
+      "values": [
+       0.281133041,
+       0.2538925,
+       0.254618375,
+       0.303172833,
+       0.283181542,
+       0.307959708,
+       0.285624958,
+       0.248210166
+      ]
+     }
+    },
     "steady_state": {
-     "median": 0.28440325,
+     "median": 0.2821572915,
      "minimum": 0.248210166,
-     "maximum": 0.44305875,
+     "maximum": 0.307959708,
      "values": [
-      0.372067791,
-      0.44305875,
       0.281133041,
       0.2538925,
       0.254618375,
@@ -8358,10 +9680,28 @@
      ]
     }
    }
+  },
+  "discarded_attempt_exposure": {
+   "measured": "Five contaminated attempts, each running the same binary and benchmark as the clean rerun that followed it, grew the per-user Metal shader cache by 82,368 to 724,816 bytes before that rerun: the September source's baseline benchmark in round 1 and the head's in rounds 2, 9, and 10 (two attempts in round 10). The head's reruns read 0.149, 0.127, and 0.126 s, against 0.362, 0.209, 0.177, and 0.208 s for their attempts. Without those rounds, the head's baseline-benchmark cold first token has a steady-state median of 0.1545 s (6 rounds, range 0.1196 to 0.2269 s) instead of 0.1308 s (8 rounds), and Spearman correlations of +0.714 with shader-cache growth and -0.567 with the round number instead of +0.740 and -0.629. The September source's baseline cell keeps its steady-state statistics (its rerun is in round 1) and reads +0.836 and -0.791 over 11 rounds instead of +0.874 and -0.839. The public-benchmark cells had no discarded attempts. Counting each attempt's growth with its rerun's lowers the head's baseline-cell correlation with growth to +0.151. The campaign's first sample, the head's baseline benchmark in round 1, also followed the aborted attempt's sample of the same binary and benchmark, which grew the cache by 295,864 bytes.",
+   "inferred": "Not measured: a rerun's cold first token is lower because its attempt had already compiled most of the pipelines it needs, so the reruns pull the head's baseline-cell cold statistics down and strengthen its correlation with the round number. Its correlation with the process's own cache growth survives without them, which fits cold time following the compilation that each process performs itself."
   }
  },
  "reference": {
   "label": "head",
+  "binary": {
+   "sha256": "cb7bf1b53d045b53a8fadb8cc032c732fc8d40f57ddc347cc8500f1eb0723f99",
+   "source_commit": "fa8426e5dc8cbcb269c29e211b119ea0acd61054",
+   "worktree_status": "",
+   "rustc": "rustc 1.92.0 (ded5c06cf 2025-12-08)\nbinary: rustc\ncommit-hash: ded5c06cf21d2b93bffd5d884aa6e96934ee4234\ncommit-date: 2025-12-08\nhost: aarch64-apple-darwin\nrelease: 1.92.0\nLLVM version: 21.1.3",
+   "rustup_toolchain": "1.92.0-aarch64-apple-darwin",
+   "cargo_features": [
+    "chat-templates",
+    "metal",
+    "std",
+    "tokenizers"
+   ],
+   "profile": "release (debug assertions disabled)"
+  },
   "series": {
    "baseline": {
     "benchmark": "baseline",
@@ -8507,6 +9847,8 @@
      "tokenization_included": false,
      "warmup_repetitions": 3
     },
+    "rustc": "rustc 1.92.0 (ded5c06cf 2025-12-08)\nbinary: rustc\ncommit-hash: ded5c06cf21d2b93bffd5d884aa6e96934ee4234\ncommit-date: 2025-12-08\nhost: aarch64-apple-darwin\nrelease: 1.92.0\nLLVM version: 21.1.3",
+    "rustup_toolchain": "1.92.0-aarch64-apple-darwin",
     "cargo_features": [
      "chat-templates",
      "metal",
@@ -8553,6 +9895,8 @@
       ]
      }
     },
+    "rustc": "rustc 1.92.0 (ded5c06cf 2025-12-08)\nbinary: rustc\ncommit-hash: ded5c06cf21d2b93bffd5d884aa6e96934ee4234\ncommit-date: 2025-12-08\nhost: aarch64-apple-darwin\nrelease: 1.92.0\nLLVM version: 21.1.3",
+    "rustup_toolchain": "1.92.0-aarch64-apple-darwin",
     "cargo_features": [
      "chat-templates",
      "metal",
@@ -8568,8 +9912,6 @@
    }
   },
   "steady_state_rounds": [
-   3,
-   4,
    5,
    6,
    7,
@@ -8590,12 +9932,10 @@
     },
     "gated": {
      "strict_load": {
-      "median": 0.9335378335,
-      "minimum": 0.919093542,
+      "median": 0.93964875,
+      "minimum": 0.922841292,
       "maximum": 1.026705292,
       "values": [
-       0.919093542,
-       0.936781375,
        1.026705292,
        0.929595791,
        0.927640125,
@@ -8604,15 +9944,14 @@
        0.974691875,
        0.922841292,
        0.949003208
-      ]
+      ],
+      "noise": 0.02273338233272892
      },
      "source_32.prefill": {
       "median": 0.048582979250000005,
       "minimum": 0.047318374999999996,
       "maximum": 0.0529331665,
       "values": [
-       0.0480176875,
-       0.048909646,
        0.0529331665,
        0.048566771,
        0.0492693335,
@@ -8621,15 +9960,14 @@
        0.048082896,
        0.048446145999999995,
        0.0485991875
-      ]
+      ],
+      "noise": 0.017461392240599907
      },
      "source_32.first_token_latency": {
       "median": 0.056544698000000004,
       "minimum": 0.055208083000000005,
       "maximum": 0.0606322705,
       "values": [
-       0.0559973545,
-       0.056873167,
        0.0606322705,
        0.056529271000000006,
        0.057143417,
@@ -8638,15 +9976,14 @@
        0.0560507085,
        0.056375708499999996,
        0.056560125
-      ]
+      ],
+      "noise": 0.013533894347951573
      },
      "source_32.decode_model_only": {
-      "median": 3.5599227732500003,
+      "median": 3.557069879500001,
       "minimum": 3.5315144775,
       "maximum": 3.8747058135000008,
       "values": [
-       3.575356767000001,
-       3.560456875500001,
        3.8747058135000008,
        3.5489875254999994,
        3.5913624845,
@@ -8655,15 +9992,14 @@
        3.5315144775,
        3.5593886710000002,
        3.5547510880000015
-      ]
+      ],
+      "noise": 0.003979066022996948
      },
      "source_32.decode_including_greedy_readback": {
-      "median": 4.571608104,
+      "median": 4.5690301665,
       "minimum": 4.5435575625,
       "maximum": 4.899909292,
       "values": [
-       4.5875499165,
-       4.5718540625,
        4.899909292,
        4.561348021000001,
        4.6033552505,
@@ -8672,15 +10008,14 @@
        4.5435575625,
        4.5713621455,
        4.5666981875
-      ]
+      ],
+      "noise": 0.0036840169923389424
      },
      "source_128.prefill": {
-      "median": 0.0609928125,
+      "median": 0.0610253645,
       "minimum": 0.060450937499999996,
       "maximum": 0.0623625415,
       "values": [
-       0.060727042,
-       0.060536874500000004,
        0.0623625415,
        0.0610656255,
        0.060450937499999996,
@@ -8689,15 +10024,14 @@
        0.061,
        0.061050729,
        0.060985625
-      ]
+      ],
+      "noise": 0.0009718001666467079
      },
      "source_128.first_token_latency": {
-      "median": 0.068917052,
+      "median": 0.0689572605,
       "minimum": 0.06829064600000001,
       "maximum": 0.07042570849999999,
       "values": [
-       0.0687189585,
-       0.06836310400000001,
        0.07042570849999999,
        0.0689782085,
        0.0684120205,
@@ -8706,15 +10040,14 @@
        0.0691881455,
        0.0690137915,
        0.0688977915
-      ]
+      ],
+      "noise": 0.003121349959602769
      },
      "source_128.decode_model_only": {
-      "median": 3.5471337287500004,
+      "median": 3.5447335012500005,
       "minimum": 3.536120891500001,
       "maximum": 3.891676812,
       "values": [
-       3.549475643000001,
-       3.5555242945,
        3.891676812,
        3.539279749,
        3.575982664000002,
@@ -8723,15 +10056,14 @@
        3.5447918145000004,
        3.5414857110000004,
        3.5446751880000003
-      ]
+      ],
+      "noise": 0.0029416625396731836
      },
      "source_128.decode_including_greedy_readback": {
-      "median": 4.56020144775,
+      "median": 4.557876093499999,
       "minimum": 4.547058458,
       "maximum": 4.9153607085,
       "values": [
-       4.562445562500001,
-       4.567201646,
        4.9153607085,
        4.551813417,
        4.5896839995,
@@ -8740,15 +10072,14 @@
        4.557794854,
        4.553346020999999,
        4.557957332999999
-      ]
+      ],
+      "noise": 0.0027454440957658238
      },
      "source_512.prefill": {
-      "median": 0.16141279125,
+      "median": 0.161342177,
       "minimum": 0.1607573125,
       "maximum": 0.16190547900000002,
       "values": [
-       0.1613399995,
-       0.161542896,
        0.16190547900000002,
        0.1611878335,
        0.1609526875,
@@ -8757,15 +10088,14 @@
        0.16176233299999998,
        0.1607573125,
        0.161485583
-      ]
+      ],
+      "noise": 0.0037199888982006636
      },
      "source_512.first_token_latency": {
       "median": 0.16964680225,
       "minimum": 0.168779146,
       "maximum": 0.171416229,
       "values": [
-       0.1693309785,
-       0.170052771,
        0.171416229,
        0.1690747915,
        0.1688904995,
@@ -8774,15 +10104,14 @@
        0.1698896045,
        0.168779146,
        0.16980691650000002
-      ]
+      ],
+      "noise": 0.0036842370406249343
      },
      "source_512.decode_model_only": {
-      "median": 3.54187679925,
+      "median": 3.537418826,
       "minimum": 3.5179771664999997,
       "maximum": 3.5739470035000007,
       "values": [
-       3.5490355640000004,
-       3.5634404340000003,
        3.5601891455,
        3.52113427,
        3.5739470035000007,
@@ -8791,15 +10120,14 @@
        3.5371722754999997,
        3.534689703999999,
        3.5376653765000006
-      ]
+      ],
+      "noise": 0.005229347501030387
      },
      "source_512.decode_including_greedy_readback": {
-      "median": 4.556831895749999,
+      "median": 4.551288302250001,
       "minimum": 4.53262225,
       "maximum": 4.5874702915,
       "values": [
-       4.5642848125,
-       4.574986416,
        4.574958854,
        4.535281771,
        4.5874702915,
@@ -8808,15 +10136,14 @@
        4.5525547085,
        4.5472703745,
        4.5500218960000005
-      ]
+      ],
+      "noise": 0.004206680342608244
      },
      "natural_loop": {
-      "median": 1.11009964575,
+      "median": 1.109537,
       "minimum": 1.102568021,
       "maximum": 1.1205264160000001,
       "values": [
-       1.110116604,
-       1.1166327915,
        1.1205264160000001,
        1.102568021,
        1.1141440624999999,
@@ -8825,18 +10152,17 @@
        1.1049065205,
        1.1101008125,
        1.108975521
-      ]
+      ],
+      "noise": 0.0036827750141149936
      }
     },
     "diagnostic": {
      "cold_first_token": {
       "gated": false,
-      "median": 0.15452302099999998,
+      "median": 0.13077429200000001,
       "minimum": 0.119575667,
       "maximum": 0.226866375,
       "values": [
-       0.20422775,
-       0.205301833,
        0.127008792,
        0.226866375,
        0.174732125,
@@ -8845,7 +10171,20 @@
        0.125541875,
        0.134313917,
        0.119575667
-      ]
+      ],
+      "without_rounds_after_discarded_attempts": {
+       "median": 0.15452302099999998,
+       "minimum": 0.119575667,
+       "maximum": 0.226866375,
+       "values": [
+        0.127008792,
+        0.226866375,
+        0.174732125,
+        0.22407025,
+        0.134313917,
+        0.119575667
+       ]
+      }
      }
     }
    },
@@ -8856,12 +10195,10 @@
     },
     "gated": {
      "strict_load": {
-      "median": 0.9363571035,
+      "median": 0.9342329165000001,
       "minimum": 0.922158375,
       "maximum": 1.011035083,
       "values": [
-       0.978342041,
-       0.999842875,
        0.922158375,
        0.937553166,
        0.930989458,
@@ -8870,15 +10207,14 @@
        1.011035083,
        0.933304792,
        0.935161041
-      ]
+      ],
+      "noise": 0.0052082130005012784
      },
      "natural_loop": {
-      "median": 1.41443846875,
+      "median": 1.4126467395,
       "minimum": 1.3940655414999998,
-      "maximum": 1.65229925,
+      "maximum": 1.502805125,
       "values": [
-       1.4136685835,
-       1.65229925,
        1.4062929375,
        1.415208354,
        1.4202306045,
@@ -8887,18 +10223,17 @@
        1.502805125,
        1.4034053755,
        1.4100851250000002
-      ]
+      ],
+      "noise": 0.00747525639307181
      }
     },
     "diagnostic": {
      "cold_first_token": {
       "gated": false,
-      "median": 0.161007854,
+      "median": 0.1588987495,
       "minimum": 0.1183255,
-      "maximum": 0.365975416,
+      "maximum": 0.241118583,
       "values": [
-       0.365975416,
-       0.192667708,
        0.241118583,
        0.135089833,
        0.159759458,
@@ -8907,7 +10242,22 @@
        0.233061292,
        0.156101125,
        0.1183255
-      ]
+      ],
+      "without_rounds_after_discarded_attempts": {
+       "median": 0.1588987495,
+       "minimum": 0.1183255,
+       "maximum": 0.241118583,
+       "values": [
+        0.241118583,
+        0.135089833,
+        0.159759458,
+        0.16225625,
+        0.158038041,
+        0.233061292,
+        0.156101125,
+        0.1183255
+       ]
+      }
      }
     }
    }
@@ -8915,6 +10265,20 @@
  },
  "september_rebuild": {
   "label": "september",
+  "binary": {
+   "sha256": "e3f94714fa16f572d9c2fefdbb92aa4a34395300c368a9c891d55b9b63ad2eee",
+   "source_commit": "c70057e82510e085bc057910a99886c1ce551567",
+   "worktree_status": "",
+   "rustc": "rustc 1.92.0 (ded5c06cf 2025-12-08)\nbinary: rustc\ncommit-hash: ded5c06cf21d2b93bffd5d884aa6e96934ee4234\ncommit-date: 2025-12-08\nhost: aarch64-apple-darwin\nrelease: 1.92.0\nLLVM version: 21.1.3",
+   "rustup_toolchain": "1.92.0-aarch64-apple-darwin",
+   "cargo_features": [
+    "chat-templates",
+    "metal",
+    "std",
+    "tokenizers"
+   ],
+   "profile": "release (debug assertions disabled)"
+  },
   "series": {
    "baseline": {
     "benchmark": "baseline",
@@ -9060,6 +10424,8 @@
      "tokenization_included": false,
      "warmup_repetitions": 3
     },
+    "rustc": "rustc 1.92.0 (ded5c06cf 2025-12-08)\nbinary: rustc\ncommit-hash: ded5c06cf21d2b93bffd5d884aa6e96934ee4234\ncommit-date: 2025-12-08\nhost: aarch64-apple-darwin\nrelease: 1.92.0\nLLVM version: 21.1.3",
+    "rustup_toolchain": "1.92.0-aarch64-apple-darwin",
     "cargo_features": [
      "chat-templates",
      "metal",
@@ -9106,6 +10472,8 @@
       ]
      }
     },
+    "rustc": "rustc 1.92.0 (ded5c06cf 2025-12-08)\nbinary: rustc\ncommit-hash: ded5c06cf21d2b93bffd5d884aa6e96934ee4234\ncommit-date: 2025-12-08\nhost: aarch64-apple-darwin\nrelease: 1.92.0\nLLVM version: 21.1.3",
+    "rustup_toolchain": "1.92.0-aarch64-apple-darwin",
     "cargo_features": [
      "chat-templates",
      "metal",
@@ -9121,8 +10489,6 @@
    }
   },
   "steady_state_rounds": [
-   3,
-   4,
    5,
    6,
    7,
@@ -9143,12 +10509,10 @@
     },
     "gated": {
      "strict_load": {
-      "median": 0.973442917,
+      "median": 0.9766176255,
       "minimum": 0.954167292,
       "maximum": 0.997631042,
       "values": [
-       0.968213792,
-       0.960329584,
        0.978885334,
        0.972535917,
        0.954167292,
@@ -9157,15 +10521,14 @@
        0.974349917,
        0.997631042,
        0.988074792
-      ]
+      ],
+      "noise": 0.011012158824819812
      },
      "source_32.prefill": {
       "median": 0.06447465625,
       "minimum": 0.063268458,
       "maximum": 0.066017167,
       "values": [
-       0.0648576045,
-       0.063718291,
        0.0650800005,
        0.063268458,
        0.064368646,
@@ -9174,15 +10537,14 @@
        0.06487356250000001,
        0.066017167,
        0.064440896
-      ]
+      ],
+      "noise": 0.011546428518068893
      },
      "source_32.first_token_latency": {
       "median": 0.0724119685,
       "minimum": 0.0711317705,
       "maximum": 0.07395918800000001,
       "values": [
-       0.07281502100000001,
-       0.07166022899999999,
        0.072807188,
        0.0711317705,
        0.0720887295,
@@ -9191,15 +10553,14 @@
        0.07281697949999999,
        0.07395918800000001,
        0.0723852705
-      ]
+      ],
+      "noise": 0.008192178304169455
      },
      "source_32.decode_model_only": {
-      "median": 4.05286932625,
+      "median": 4.0570532645,
       "minimum": 4.027117561999999,
       "maximum": 4.083846146499999,
       "values": [
-       4.049974048000001,
-       4.049996023,
        4.058827753000001,
        4.055742629499999,
        4.076963648000001,
@@ -9208,15 +10569,14 @@
        4.048993943499999,
        4.083846146499999,
        4.0427431835
-      ]
+      ],
+      "noise": 0.0040873169354276795
      },
      "source_32.decode_including_greedy_readback": {
-      "median": 5.067562979250001,
+      "median": 5.0707835105,
       "minimum": 5.0381878545,
       "maximum": 5.094220229499999,
       "values": [
-       5.063262084,
-       5.065464521,
        5.069661437500001,
        5.073553104,
        5.0864606665,
@@ -9225,15 +10585,14 @@
        5.063076396,
        5.094220229499999,
        5.054070271
-      ]
+      ],
+      "noise": 0.0034185615743253166
      },
      "source_128.prefill": {
-      "median": 0.148328479,
-      "minimum": 0.1434396455,
+      "median": 0.148860375,
+      "minimum": 0.146712646,
       "maximum": 0.1498883335,
       "values": [
-       0.14796456200000002,
-       0.1434396455,
        0.147483292,
        0.148692396,
        0.1496453335,
@@ -9242,15 +10601,14 @@
        0.147514833,
        0.1498883335,
        0.149028354
-      ]
+      ],
+      "noise": 0.009028039752575384
      },
      "source_128.first_token_latency": {
-      "median": 0.1561769585,
-      "minimum": 0.1512753745,
+      "median": 0.15667876025,
+      "minimum": 0.154571354,
       "maximum": 0.15770868799999999,
       "values": [
-       0.1558043125,
-       0.1512753745,
        0.1553028125,
        0.1565496045,
        0.1574827915,
@@ -9259,15 +10617,14 @@
        0.155381271,
        0.15770868799999999,
        0.156807916
-      ]
+      ],
+      "noise": 0.008677090875973757
      },
      "source_128.decode_model_only": {
-      "median": 4.04991015525,
+      "median": 4.0526690942500005,
       "minimum": 4.012572188,
       "maximum": 4.075991688,
       "values": [
-       4.0351100805,
-       4.051913163000001,
        4.057431041000001,
        4.06224125,
        4.0696439785,
@@ -9276,15 +10633,14 @@
        4.0290881635,
        4.075991688,
        4.0479071475
-      ]
+      ],
+      "noise": 0.006083191826006989
      },
      "source_128.decode_including_greedy_readback": {
-      "median": 5.06371579175,
+      "median": 5.06635887525,
       "minimum": 5.025102938,
       "maximum": 5.088503375,
       "values": [
-       5.048906292,
-       5.066796604,
        5.072082771,
        5.075060666500001,
        5.083891625,
@@ -9293,15 +10649,14 @@
        5.045372395999999,
        5.088503375,
        5.0606349795
-      ]
+      ],
+      "noise": 0.004848687626042845
      },
      "source_512.prefill": {
-      "median": 0.5303756355,
-      "minimum": 0.525953458,
+      "median": 0.53123960425,
+      "minimum": 0.528136688,
       "maximum": 0.5357158125,
       "values": [
-       0.525953458,
-       0.530136875,
        0.5283473125,
        0.5318648125000001,
        0.5357158125,
@@ -9310,15 +10665,14 @@
        0.535028104,
        0.530614396,
        0.528136688
-      ]
+      ],
+      "noise": 0.0074424027147527265
      },
      "source_512.first_token_latency": {
-      "median": 0.5384013645,
-      "minimum": 0.5338838125,
+      "median": 0.53926833325,
+      "minimum": 0.5360029584999999,
       "maximum": 0.5445706035,
       "values": [
-       0.5338838125,
-       0.53832875,
        0.5368760205,
        0.5400626875000001,
        0.5436263955,
@@ -9327,15 +10681,14 @@
        0.5445706035,
        0.5384739789999999,
        0.5360029584999999
-      ]
+      ],
+      "noise": 0.006927983445608128
      },
      "source_512.decode_model_only": {
-      "median": 4.0394176022499995,
+      "median": 4.043467390249999,
       "minimum": 4.016386186,
       "maximum": 4.0786191034999995,
       "values": [
-       4.041417211,
-       4.0366354575,
        4.037417993499999,
        4.049516787,
        4.061936886000002,
@@ -9344,15 +10697,14 @@
        4.021459375000001,
        4.0786191034999995,
        4.055491185000001
-      ]
+      ],
+      "noise": 0.003290323461900652
      },
      "source_512.decode_including_greedy_readback": {
-      "median": 5.0540570835,
+      "median": 5.05898142725,
       "minimum": 5.031358,
       "maximum": 5.0919517705,
       "values": [
-       5.0552318125,
-       5.0528823544999995,
        5.050888979,
        5.0670738755,
        5.0758150415,
@@ -9361,15 +10713,14 @@
        5.037369083,
        5.0919517705,
        5.068152041499999
-      ]
+      ],
+      "noise": 0.003353949269101519
      },
      "natural_loop": {
-      "median": 1.2330486045,
+      "median": 1.23154252125,
       "minimum": 1.2033652085,
       "maximum": 1.2387274165000002,
       "values": [
-       1.2345380000000001,
-       1.2338452709999999,
        1.2360121665000001,
        1.2387274165000002,
        1.2369035,
@@ -9378,18 +10729,17 @@
        1.2307405834999998,
        1.2033652085,
        1.232251938
-      ]
+      ],
+      "noise": 0.0038176354632829712
      }
     },
     "diagnostic": {
      "cold_first_token": {
       "gated": false,
-      "median": 0.2599755835,
+      "median": 0.242633146,
       "minimum": 0.189512458,
-      "maximum": 0.403215,
+      "maximum": 0.360537209,
       "values": [
-       0.366314708,
-       0.403215,
        0.270021292,
        0.23004375,
        0.360537209,
@@ -9398,7 +10748,22 @@
        0.320751,
        0.189512458,
        0.223421458
-      ]
+      ],
+      "without_rounds_after_discarded_attempts": {
+       "median": 0.242633146,
+       "minimum": 0.189512458,
+       "maximum": 0.360537209,
+       "values": [
+        0.270021292,
+        0.23004375,
+        0.360537209,
+        0.235336417,
+        0.249929875,
+        0.320751,
+        0.189512458,
+        0.223421458
+       ]
+      }
      }
     }
    },
@@ -9411,10 +10776,8 @@
      "strict_load": {
       "median": 0.979433875,
       "minimum": 0.96260475,
-      "maximum": 1.133809041,
+      "maximum": 0.993942459,
       "values": [
-       0.968106041,
-       1.133809041,
        0.9849115,
        0.973964792,
        0.969453375,
@@ -9423,15 +10786,14 @@
        0.984902958,
        0.971661792,
        0.988606625
-      ]
+      ],
+      "noise": 0.011717044000188305
      },
      "natural_loop": {
-      "median": 1.57799110425,
+      "median": 1.5770837295,
       "minimum": 1.5606672705,
-      "maximum": 1.836348833,
+      "maximum": 1.5810387915,
       "values": [
-       1.580426792,
-       1.836348833,
        1.5757503745,
        1.5810387915,
        1.5765335005,
@@ -9440,18 +10802,17 @@
        1.579007458,
        1.5776339584999999,
        1.5606672705
-      ]
+      ],
+      "noise": 0.0015309774403952457
      }
     },
     "diagnostic": {
      "cold_first_token": {
       "gated": false,
-      "median": 0.28440325,
+      "median": 0.2821572915,
       "minimum": 0.248210166,
-      "maximum": 0.44305875,
+      "maximum": 0.307959708,
       "values": [
-       0.372067791,
-       0.44305875,
        0.281133041,
        0.2538925,
        0.254618375,
@@ -9460,7 +10821,22 @@
        0.307959708,
        0.285624958,
        0.248210166
-      ]
+      ],
+      "without_rounds_after_discarded_attempts": {
+       "median": 0.2821572915,
+       "minimum": 0.248210166,
+       "maximum": 0.307959708,
+       "values": [
+        0.281133041,
+        0.2538925,
+        0.254618375,
+        0.303172833,
+        0.283181542,
+        0.307959708,
+        0.285624958,
+        0.248210166
+       ]
+      }
      }
     }
    }
@@ -9512,12 +10888,12 @@
  "comparisons": {
   "baseline": {
    "strict_load": {
-    "head": 0.9335378335,
-    "september_rebuild": 0.973442917,
+    "head": 0.93964875,
+    "september_rebuild": 0.9766176255,
     "september_10_approved": 1.4129218749999999,
-    "head_over_september_rebuild": 0.9590062418626649,
-    "head_over_september_10": 0.6607144032645117,
-    "september_rebuild_over_september_10": 0.6889573544184813
+    "head_over_september_rebuild": 0.9621460082895054,
+    "head_over_september_10": 0.6650394240658212,
+    "september_rebuild_over_september_10": 0.6912042645669988
    },
    "source_32.prefill": {
     "head": 0.048582979250000005,
@@ -9536,126 +10912,126 @@
     "september_rebuild_over_september_10": 0.8598619764895356
    },
    "source_32.decode_model_only": {
-    "head": 3.5599227732500003,
-    "september_rebuild": 4.05286932625,
+    "head": 3.557069879500001,
+    "september_rebuild": 4.0570532645,
     "september_10_approved": 4.758459875,
-    "head_over_september_rebuild": 0.8783709729284294,
-    "head_over_september_10": 0.7481249956426291,
-    "september_rebuild_over_september_10": 0.8517187141879597
+    "head_over_september_rebuild": 0.8767619371983724,
+    "head_over_september_10": 0.7475254542311343,
+    "september_rebuild_over_september_10": 0.8525979773024777
    },
    "source_32.decode_including_greedy_readback": {
-    "head": 4.571608104,
-    "september_rebuild": 5.067562979250001,
+    "head": 4.5690301665,
+    "september_rebuild": 5.0707835105,
     "september_10_approved": 5.8152309165,
-    "head_over_september_rebuild": 0.902131482671104,
-    "head_over_september_10": 0.7861438642150265,
-    "september_rebuild_over_september_10": 0.8714293640294517
+    "head_over_september_rebuild": 0.9010501349621757,
+    "head_over_september_10": 0.7857005563675796,
+    "september_rebuild_over_september_10": 0.871983173722694
    },
    "source_128.prefill": {
-    "head": 0.0609928125,
-    "september_rebuild": 0.148328479,
+    "head": 0.0610253645,
+    "september_rebuild": 0.148860375,
     "september_10_approved": 0.1781127915,
-    "head_over_september_rebuild": 0.4112009568978321,
-    "head_over_september_10": 0.3424392599000954,
-    "september_rebuild_over_september_10": 0.8327783633664515
+    "head_over_september_rebuild": 0.4099503612025699,
+    "head_over_september_10": 0.3426220204964897,
+    "september_rebuild_over_september_10": 0.8357646508504696
    },
    "source_128.first_token_latency": {
-    "head": 0.068917052,
-    "september_rebuild": 0.1561769585,
+    "head": 0.0689572605,
+    "september_rebuild": 0.15667876025,
     "september_10_approved": 0.18756125,
-    "head_over_september_rebuild": 0.4412754138761129,
-    "head_over_september_10": 0.36743758105685476,
-    "september_rebuild_over_september_10": 0.8326717725542988
+    "head_over_september_rebuild": 0.4401187524714283,
+    "head_over_september_10": 0.3676519563609221,
+    "september_rebuild_over_september_10": 0.8353471745896339
    },
    "source_128.decode_model_only": {
-    "head": 3.5471337287500004,
-    "september_rebuild": 4.04991015525,
+    "head": 3.5447335012500005,
+    "september_rebuild": 4.0526690942500005,
     "september_10_approved": 4.747253018999999,
-    "head_over_september_rebuild": 0.8758549184484407,
-    "head_over_september_10": 0.7471971084231779,
-    "september_rebuild_over_september_10": 0.8531060255353963
+    "head_over_september_rebuild": 0.8746664035016656,
+    "head_over_september_10": 0.746691504974111,
+    "september_rebuild_over_september_10": 0.8536871908933324
    },
    "source_128.decode_including_greedy_readback": {
-    "head": 4.56020144775,
-    "september_rebuild": 5.06371579175,
+    "head": 4.557876093499999,
+    "september_rebuild": 5.06635887525,
     "september_10_approved": 5.7935767505,
-    "head_over_september_rebuild": 0.9005642566234967,
-    "head_over_september_10": 0.7871133229324084,
-    "september_rebuild_over_september_10": 0.8740223889004299
+    "head_over_september_rebuild": 0.8996354592577279,
+    "head_over_september_10": 0.7867119552885259,
+    "september_rebuild_over_september_10": 0.8744785981842323
    },
    "source_512.prefill": {
-    "head": 0.16141279125,
-    "september_rebuild": 0.5303756355,
+    "head": 0.161342177,
+    "september_rebuild": 0.53123960425,
     "september_10_approved": 0.6158041045,
-    "head_over_september_rebuild": 0.3043367388055668,
-    "head_over_september_10": 0.2621171084610723,
-    "september_rebuild_over_september_10": 0.8612733036760719
+    "head_over_september_rebuild": 0.3037088645297476,
+    "head_over_september_10": 0.2620024384718923,
+    "september_rebuild_over_september_10": 0.8626762965169552
    },
    "source_512.first_token_latency": {
     "head": 0.16964680225,
-    "september_rebuild": 0.5384013645,
+    "september_rebuild": 0.53926833325,
     "september_10_approved": 0.6236139795,
-    "head_over_september_rebuild": 0.31509355925861515,
+    "head_over_september_rebuild": 0.31458699090968734,
     "head_over_september_10": 0.272038164356128,
-    "september_rebuild_over_september_10": 0.8633567915390197
+    "september_rebuild_over_september_10": 0.8647470245653787
    },
    "source_512.decode_model_only": {
-    "head": 3.54187679925,
-    "september_rebuild": 4.0394176022499995,
+    "head": 3.537418826,
+    "september_rebuild": 4.043467390249999,
     "september_10_approved": 4.773885999999999,
-    "head_over_september_rebuild": 0.8768285797628689,
-    "head_over_september_10": 0.7419273940035436,
-    "september_rebuild_over_september_10": 0.8461487354850954
+    "head_over_september_rebuild": 0.8748478680772269,
+    "head_over_september_10": 0.7409935691803283,
+    "september_rebuild_over_september_10": 0.8469970565384259
    },
    "source_512.decode_including_greedy_readback": {
-    "head": 4.556831895749999,
-    "september_rebuild": 5.0540570835,
+    "head": 4.551288302250001,
+    "september_rebuild": 5.05898142725,
     "september_10_approved": 5.799062667,
-    "head_over_september_rebuild": 0.9016186047100074,
-    "head_over_september_10": 0.7857876621477109,
-    "september_rebuild_over_september_10": 0.8715299995394928
+    "head_over_september_rebuild": 0.8996451889968738,
+    "head_over_september_10": 0.7848317156752671,
+    "september_rebuild_over_september_10": 0.872379161556317
    },
    "natural_loop": {
-    "head": 1.11009964575,
-    "september_rebuild": 1.2330486045,
+    "head": 1.109537,
+    "september_rebuild": 1.23154252125,
     "september_10_approved": 1.420816125,
-    "head_over_september_rebuild": 0.9002886355807073,
-    "head_over_september_10": 0.7813112662625504,
-    "september_rebuild_over_september_10": 0.8678453058097155
+    "head_over_september_rebuild": 0.9009327577856054,
+    "head_over_september_10": 0.7809152644576018,
+    "september_rebuild_over_september_10": 0.8667852930300886
    },
    "cold_first_token": {
-    "head": 0.15452302099999998,
-    "september_rebuild": 0.2599755835,
+    "head": 0.13077429200000001,
+    "september_rebuild": 0.242633146,
     "september_10_approved": 0.16752,
-    "head_over_september_rebuild": 0.5943751290782274,
-    "head_over_september_10": 0.9224153593600763,
-    "september_rebuild_over_september_10": 1.5519077334049665
+    "head_over_september_rebuild": 0.5389795011766447,
+    "head_over_september_10": 0.7806488299904489,
+    "september_rebuild_over_september_10": 1.4483831542502388
    }
   },
   "public": {
    "strict_load": {
-    "head": 0.9363571035,
+    "head": 0.9342329165000001,
     "september_rebuild": 0.979433875,
     "september_10_approved": 1.40792075,
-    "head_over_september_rebuild": 0.9560187036618475,
-    "head_over_september_10": 0.6650637853728628,
+    "head_over_september_rebuild": 0.953849913042879,
+    "head_over_september_10": 0.6635550449128618,
     "september_rebuild_over_september_10": 0.695659805425838
    },
    "natural_loop": {
-    "head": 1.41443846875,
-    "september_rebuild": 1.57799110425,
+    "head": 1.4126467395,
+    "september_rebuild": 1.5770837295,
     "september_10_approved": 1.751402479,
-    "head_over_september_rebuild": 0.8963538925793028,
-    "head_over_september_10": 0.8076033268821244,
-    "september_rebuild_over_september_10": 0.900987136406811
+    "head_over_september_rebuild": 0.8957335067732052,
+    "head_over_september_10": 0.8065803014659316,
+    "september_rebuild_over_september_10": 0.9004690517512965
    },
    "cold_first_token": {
-    "head": 0.161007854,
-    "september_rebuild": 0.28440325,
+    "head": 0.1588987495,
+    "september_rebuild": 0.2821572915,
     "september_10_approved": 0.365948792,
-    "head_over_september_rebuild": 0.5661252253622278,
-    "head_over_september_10": 0.43997372725307426,
-    "september_rebuild_over_september_10": 0.7771667955116518
+    "head_over_september_rebuild": 0.5631566303151871,
+    "head_over_september_10": 0.434210340281708,
+    "september_rebuild_over_september_10": 0.7710294381843458
    }
   }
  },
@@ -9672,9 +11048,9 @@
    "== exit=0 wall=252.94s"
   ]
  },
- "extension": "After the planned 8 rounds no window was steady: nine series drifted by more than 2.5% between half-medians. The September binary's warm metrics drifted because its first two rounds ran up to 14% slow (prefill and first-token latency) and up to 9% slow (decode); the strict loads, one observation per process, and the head's public natural loop, whose per-run medians read 1.58 and 1.65 s in rounds 2 and 4 against about 1.41 s later, had not settled to within 2.5%. As the protocol prescribes, one block of four rounds was added (rounds 9 to 12, from a re-plan whose first 32 samples are unchanged; campaign/plan-8-rounds.json keeps the original plan), and the 12-round campaign is steady from round 3. A rule that also required the two halves not to overlap was drafted during the campaign and rejected: it would have declared the 8-round campaign steady from round 3, but it accepted half-medians 4.7% apart after 8 rounds and 5.5% apart after 12, too loose for a reference judged at a 5% alert.",
- "measured": "48 clean samples (12 rounds, 2 binaries, 2 benchmarks; 5 further attempts contaminated by other CPU work and rerun) between 00:01 and 04:23 UTC on October 19. Steady state from round 3 (maximum half-median drift 2.09%, the head's baseline-benchmark strict load). Head fa8426e reference medians over rounds 3 to 12: model-only decode of 128 forced steps 3.560, 3.547, and 3.542 s at 32, 128, and 512 source tokens (36.0 to 36.1 tokens/s); decode with greedy readback 4.572, 4.560, and 4.557 s; prefill 48.6, 61.0, and 161.4 ms; first-token latency 56.5, 68.9, and 169.6 ms; natural model-API loop 1.110 s and public-coordinator loop 1.414 s for 32 tokens; strict load 0.934 and 0.936 s. Against the September source c70057e rebuilt with the same toolchain and run in the same campaign the head takes 0.30 to 0.75 of its prefill time, 0.88 of its decode, 0.90 of its readback decode and natural loops, and 0.96 of its strict load. Against the approved September 10 values every gated median of both binaries is faster: the head by 19 to 74%, the September source by 10 to 31%. Cold first token (diagnostic): head median 0.1545 s (range 0.1196 to 0.2269 s) in the baseline benchmark and 0.1610 s (0.1183 to 0.3660 s) in the public one; September source 0.2600 s (0.1895 to 0.4032 s) and 0.2844 s (0.2482 to 0.4431 s); over all 12 rounds the ranges reach 0.2527 s and 0.5194 s. Approved September 10 values: 0.167520 s and 0.365949 s. In every cell the cold first token correlates with the Metal shader-cache growth of the same process (Spearman +0.70 to +0.87) and falls with the round number (-0.63 to -0.84). Every run passed the harness's official-reference check before timing (prompt cosine 0.999998486 for the head and 0.999998613 for the September source, all 32 cached greedy decisions), and every token and prediction hash equals the September 10 reports.",
- "inferred": "Not measured, inferred from the correlations above: cold first token on this host is dominated by Metal pipeline compilation, whose cost shrinks as the per-user shader cache accumulates each binary's pipelines, so a single cold observation measures the cache's state as much as the crate. The September source's own cold first token is 55% above its September 10 value in the baseline benchmark (and 22% below it in the public one) while its warm and natural-loop medians are 10 to 17% below theirs, which fits a host change (macOS 15.7.9 with Metal 3 to macOS 27.0.1 with Metal 4) rather than a source regression; the shader cache was neither cleared nor controlled, so this campaign does not attribute the cold time causally. The head's gains over the September 10 values combine source changes (the head-over-September-source ratios, measured on one host) and the host change (the September source's own gains); the historical approximately 36-to-27 tokens/s slowdown is not explained by this record and remains a documented limitation.",
+ "extension": "After the planned 8 rounds no window was steady under the original rule: nine series drifted by more than 2.5% between half-medians. The September binary's warm metrics drifted because its first two rounds ran up to 14% slow (prefill and first-token latency) and up to 9% slow (decode); the strict loads, one observation per process, and the head's public natural loop, whose per-run medians read 1.58 and 1.65 s in rounds 2 and 4 against about 1.41 s later, had not settled to within 2.5%. As the protocol prescribes, one block of four rounds was added (rounds 9 to 12, from a re-plan whose first 32 samples are unchanged; campaign/plan-8-rounds.json keeps the original plan). Under the original rule the 12-round campaign was steady from round 3. Under the corrected rule of the October 19 review amendment, the 8-round campaign is not steady either: its first block drifts against the second in the same nine series (2.8 to 8.6%, 7.5 to 57.5 standard errors). The 12-round campaign is steady from round 5: the first block drifts against rounds 5 to 12 in those nine series (2.9 to 7.8%, 5.4 to 19.6 standard errors), and the second block differs from the third by more than 2.5% only in the head's baseline-benchmark strict load (+3.4%, 0.95 standard errors). A rule that also required the two halves not to overlap was drafted during the campaign and rejected: it would have declared the 8-round campaign steady from round 3, but it accepted half-medians 4.7% apart after 8 rounds and 5.5% apart after 12, too loose for a reference judged at a 5% alert.",
+ "measured": "48 clean samples (12 rounds, 2 binaries, 2 benchmarks; 5 further attempts contaminated by other CPU work and rerun) between 00:01 and 04:23 UTC on October 19. Steady state from round 5 under the corrected rule (rounds 5 to 12, two whole blocks, every cell twice in every position). Head fa8426e reference medians over rounds 5 to 12: model-only decode of 128 forced steps 3.557, 3.545, and 3.537 s at 32, 128, and 512 source tokens (36.0 to 36.2 tokens/s); decode with greedy readback 4.569, 4.558, and 4.551 s; prefill 48.6, 61.0, and 161.3 ms; first-token latency 56.5, 69.0, and 169.6 ms; natural model-API loop 1.110 s and public-coordinator loop 1.413 s for 32 tokens; strict load 0.940 and 0.934 s. These differ from the medians over the original rule's rounds 3 to 12 by at most 0.65% (strict load in the baseline benchmark, 0.934 s before). Against the September source c70057e rebuilt with the same toolchain and run in the same campaign the head takes 0.30 to 0.75 of its prefill time, 0.87 to 0.88 of its decode, 0.90 of its readback decode and natural loops, and 0.95 to 0.96 of its strict load. Against the approved September 10 values every gated median of both binaries is faster: the head by 19 to 74%, the September source by 10 to 31%. Cold first token (diagnostic): head median 0.1308 s (range 0.1196 to 0.2269 s) in the baseline benchmark and 0.1589 s (0.1183 to 0.2411 s) in the public one; September source 0.2426 s (0.1895 to 0.3605 s) and 0.2822 s (0.2482 to 0.3080 s); over all 12 rounds the ranges reach 0.2527 s and 0.5194 s. The head's baseline value includes two reruns after contaminated attempts; without them it is 0.1545 s (see cold_first_token.discarded_attempt_exposure). Approved September 10 values: 0.167520 s and 0.365949 s. In every cell the cold first token correlates with the Metal shader-cache growth of the same process (Spearman +0.70 to +0.87) and falls with the round number (-0.63 to -0.84). Every run passed the harness's official-reference check before timing (prompt cosine 0.999998486 for the head and 0.999998613 for the September source, all 32 cached greedy decisions), and every token and prediction hash equals the September 10 reports.",
+ "inferred": "Not measured, inferred from the correlations above: cold first token on this host is dominated by Metal pipeline compilation, whose cost shrinks as the per-user shader cache accumulates each binary's pipelines, so a single cold observation measures the cache's state as much as the crate; discarded attempts add to that state unevenly (see cold_first_token.discarded_attempt_exposure). The September source's own steady-state cold first token is 45% above its September 10 value in the baseline benchmark (and 23% below it in the public one) while its warm and natural-loop medians are 10 to 17% below theirs, which fits a host change (macOS 15.7.9 with Metal 3 to macOS 27.0.1 with Metal 4) rather than a source regression; the shader cache was neither cleared nor controlled, so this campaign does not attribute the cold time causally. The head's gains over the September 10 values combine source changes (the head-over-September-source ratios, measured on one host) and the host change (the September source's own gains); the historical approximately 36-to-27 tokens/s slowdown is not explained by this record and remains a documented limitation.",
  "not_run": [
   "The long-prefill series qwen::qwen35_metal_long_prefill_benchmark, which the protocol does not cover",
   "A supervised process-memory run; the campaign's reports carry only boundary RSS snapshots",
@@ -9683,14 +11059,28 @@
  ],
  "quotes": [
   {
+   "log": "analysis/analysis-20261019.log",
+   "quotes": [
+    "== rounds 12; steady state from round 5 (rounds [5, 6, 7, 8, 9, 10, 11, 12]); limiting block from round 1",
+    "block from round 1 against rounds 5 to 12: 9 drifting, 9 beyond tolerance",
+    "head/baseline/strict_load drift +0.0343 noise 0.0400 z 0.95 within noise",
+    "== after 8 rounds: steady state from round None; limiting block from round 1 with 9 drifting series",
+    "start 4: drifting: head/baseline/strict_load +0.0307",
+    "== original window position counts {\"head/baseline\": {\"1\": 2, \"2\": 3, \"3\": 3, \"4\": 2}",
+    "source_32.decode_model_only: head 3.557070 [3.531514, 3.874706] | september 4.057053 [4.027118, 4.083846] | head/september 0.877",
+    "strict_load: head 0.939649 [0.922841, 1.026705]",
+    "head over rounds 3 to 12 0.933538 (+0.65%)",
+    "cold first token (diagnostic) head: steady median 0.1308 range [0.1196, 0.2269]",
+    "without those rounds: steady median 0.1545 range [0.1196, 0.2269] (6 rounds)",
+    "clean rerun: growth 246712 bytes, cold 0.1490 s",
+    "token and prediction hashes: identical in every run of both binaries and to September 10"
+   ]
+  },
+  {
    "log": "analysis/analysis.log",
    "quotes": [
     "== rounds 12; steady state from round 3 (rounds [3, 4, 5, 6, 7, 8, 9, 10, 11, 12]); maximum |drift| 0.0209 (limit 0.025)",
-    "== after 8 rounds: steady state from round None",
-    "source_32.decode_model_only: head 3.559923 [3.531514, 3.874706] | september 4.052869 [4.027118, 4.083846] | head/september 0.878",
-    "cold first token (diagnostic) head: steady median 0.1545 range [0.1196, 0.2269]",
-    "cold first token (diagnostic) september: steady median 0.2600 range [0.1895, 0.4032]",
-    "token and prediction hashes: identical in every run of both binaries and to September 10"
+    "== after 8 rounds: steady state from round None"
    ]
   },
   {
