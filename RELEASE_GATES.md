@@ -1110,6 +1110,22 @@ No benchmark ran again and no support claim changed.
   nothing unrelated was swept in. The commit is kept as it is, because
   rewriting it would change no content, and this round stages explicit
   paths.
+- Source validation of the tree committed as `33c33ff` passes. This round
+  changed the protocol script, its Python tests, the record and its
+  harness, `tests/acceptance_records.rs`, and documentation; no library
+  source, Cargo manifest, or lockfile changed. The checks were:
+  formatting; warning-denied Clippy of all targets on the default nightly
+  (1.94.0-nightly 2025-12-22) and on 1.99.1, with all features and with
+  `std,flex,cpu,cuda,rocm,tokenizers,chat-templates,autodiff,train`;
+  `cargo test --locked` with default features (3,734 passed, 83 ignored) and
+  with `std,flex,tokenizers,chat-templates,autodiff,train` (4,037 passed, 113
+  ignored); the Rust 1.92.0 check of all targets with the latter features;
+  warning-denied private rustdoc; the documentation audit (0 gaps in 23,659
+  authored items); and the 645 Python tests (14 opt-in native fixtures
+  skipped). Not run: `check_release.py --gate source`; coverage; the
+  Metal-feature Clippy of `qwen35_benchmarks`, which this round does not
+  touch; and every benchmark and Metal checkpoint gate, since no
+  measurement was repeated.
 
 Record each replay as a new measurement with its exact source identity; do not
 overwrite the historical records below.
