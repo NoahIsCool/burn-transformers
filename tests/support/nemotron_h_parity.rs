@@ -34,8 +34,13 @@
 //! cos(burn[i], truth[i]) >= floor[k]      (inclusive, no slack),
 //! ```
 //!
-//! so a Burn F16 row must be at least as faithful to F32 as the worst official
-//! F16 row of its path. The floor must lie in
+//! so a Burn F16 row must be at least as faithful to F32 as the worst row of
+//! its path in those two calibrating evaluations. The floor is not the worst
+//! row of every official F16 graph: of the four-graph diagnostic's other
+//! graphs, CPU SDPA (teacher decision 18) and MPS SDPA (cached decision 22)
+//! fall below it, as does a repeat of the oracle's MPS eager graph (cached
+//! decision 22); that is diagnostic context and leaves the rule unchanged
+//! (`NEMOTRON_H_ACCEPTANCE.md`). The floor must lie in
 //! `[MINIMUM_HALF_PRECISION_FLOOR, 1]`. The bound is per path, not per
 //! decision: half-precision deviations spike at implementation-specific rows.
 //! Every row of a path is measured before any row is judged

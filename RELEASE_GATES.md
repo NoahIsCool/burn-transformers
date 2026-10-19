@@ -881,10 +881,17 @@ profile), and its integrated-head rerun:
 - real-weight Nemotron MTP parity, and official F32 hidden traces for its
   base gate;
 - the Nemotron-H official-precision failure, an open finding: cached decision
-  22 is `0.998558` against its `0.998635` floor since `f9f78b5` (above; not
-  rerun at `8181605`, which compiles the same library code), traced to the
-  once-rounded Mamba-2 convolution SiLU. The gate's floors are each path's
-  worst row of the two official F16 evaluations, with no slack, so Burn-side
+  22 is `0.998558` against its `0.998635` floor, measured at `f9f78b5` (above;
+  not rerun at `8181605`, which compiles the same library code) and at the
+  current source inferred from the rows measured at `2cf83d7` (the restored
+  gate was not rerun), traced to the once-rounded Mamba-2 convolution SiLU.
+  The gate's floors are each path's worst row of the two official F16
+  evaluations it is calibrated on, not of every official F16 graph: measured
+  by the envelope round's derivation, CPU SDPA at teacher decision 18
+  (`0.994420097` against `0.994466421`), MPS SDPA at cached decision 22
+  (`0.998622490` against `0.998635047`), and the MPS eager repeat of the
+  oracle's graph at cached decision 22 (`0.998595604`) fall below them, which
+  is diagnostic context and does not change the rule. With no slack, Burn-side
   half-precision deviations such as teacher decision 30 (`0.997612` from F32
   at `7bd057e` and `0.996039` at `2cf83d7`, where the official F16 graphs
   reach `0.999958` CPU eager, `0.999346` CPU SDPA, `0.999968` MPS eager, and

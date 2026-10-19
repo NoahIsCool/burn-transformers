@@ -22,8 +22,10 @@ A four-graph official F16 envelope proposed to replace that floor passed at
 and the maintainer did not adopt it (decision of October 18,
 [envelope decision record](acceptance/measurements/nemotron-h-envelope-decision-20261018.json)).
 The gate keeps its two-graph floors and fails at cached decision 22
-(`0.998558` against `0.998635`), an open finding; the four-graph data is a
-printed diagnostic (see [the envelope diagnostic](#official-f16-envelope-diagnostic)).
+(`0.998558` against `0.998635`; measured at `f9f78b5`, and at the current
+source inferred from the rows measured at `2cf83d7`, not rerun), an open
+finding; the four-graph data is a printed diagnostic (see
+[the envelope diagnostic](#official-f16-envelope-diagnostic)).
 Real-weight MTP parity and the remaining release gates are incomplete, so the
 model is not advertised as supported. The committed machine-readable state remains
 [`acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24bcc1d289a1950fa9d2b978c47cf903b9.json`](acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24bcc1d289a1950fa9d2b978c47cf903b9.json).
@@ -336,11 +338,14 @@ and the CPU/F16 rows, both with eager attention) reaches against F32 on that
 path, computed in the test from authenticated rows with no slack and required
 to stay at or above `0.99`: prompt `0.999194`, teacher `0.994466`, cached
 `0.998635`. Every Burn F16 row must be at least as close to F32 as the worst
-official F16 row on its path, with exact top-1 everywhere. This is a per-path
-bound, not a per-decision one: half-precision deviations spike at
-implementation-specific rows. Every row is measured before any is judged, so a
-failing run lists each violation. A four-graph envelope evaluated as a
-replacement was not adopted and is printed as a
+row on its path of those two evaluations, with exact top-1 everywhere; the
+floor is the worst row of the two evaluations the gate is calibrated on, not
+of every official F16 graph (three other official F16 evaluations each fall
+below one floor; see [the envelope diagnostic](#official-f16-envelope-diagnostic)).
+This is a per-path bound, not a per-decision one: half-precision deviations
+spike at implementation-specific rows. Every row is measured before any is
+judged, so a failing run lists each violation. A four-graph envelope
+evaluated as a replacement was not adopted and is printed as a
 [diagnostic](#official-f16-envelope-diagnostic). The three hidden traces exist
 only at F16 and keep the `0.999` floor against the oracle.
 
@@ -428,7 +433,16 @@ decision 22, `0.998557984` against `0.998635047` (the oracle's own decision
 22), and at no other row: prompt `0.999200341` against `0.999194145`, teacher
 minimum `0.996039427` against `0.994466421`. That verdict applies the restored
 rule to the rows measured at `2cf83d7`, whose library code the current source
-compiles; the restored gate was not rerun on the checkpoint. The bundle-only
+compiles; the restored gate was not rerun on the checkpoint. The floors are
+the worst rows of the two evaluations the gate is calibrated on, not of every
+official F16 graph: measured by the derivation from the authenticated
+bundles, three other official F16 evaluations fall below a restored floor,
+each at one row and each with exact top-1 everywhere. They are CPU SDPA at
+teacher decision 18 (`0.994420097` against `0.994466421`), MPS SDPA at cached
+decision 22 (`0.998622490` against `0.998635047`), and the MPS eager control,
+a repeat of the oracle's own graph, at cached decision 22 (`0.998595604`).
+On the cached path they miss by `1.3e-5` and `3.9e-5`, Burn by `7.7e-5`.
+This is diagnostic context; it does not change the rule. The bundle-only
 `reports_official_f16_floors_and_four_graph_envelope` recomputes the three
 floors and the envelope from the authenticated bundles at the current source.
 When `TRANSFORMERS_NEMOTRON_H_F16_GRAPHS_DIR` is set, the gate prints the
@@ -591,7 +605,17 @@ and the MPS graph with `--device mps --attn-implementation sdpa` and the same
 load swapped beyond the watchdog's limit). The envelope diagnostic and the
 registered method's slacks follow from the bundles alone with
 [`scripts/derive_nemotron_h_envelope.py`](scripts/derive_nemotron_h_envelope.py)
-(`--precision-dir`, `--oracle-dir`, and one `--graph` per SDPA bundle).
+(`--precision-dir`, `--oracle-dir`, and one `--graph` per SDPA bundle; the
+recorded run also passed the MPS eager repeat as `--control`). The tool's
+bytes changed at `530a82a`, in comments and docstrings only (its code, without
+docstrings, is unchanged, which the envelope decision record's test checks):
+from then on its SHA-256 is
+`b8a487bdce771d9dbf0b59dc213449bdec73f13e212c62c6e028b27ba3c6d438`, not the
+`2c4b5fc1143a0b067670d4bb2645db896b2f37df823954ea6eb5d63431c8e498` that the
+recorded
+[`derivation/envelope.txt`](acceptance/measurements/nemotron-h-envelope-20261018/derivation/envelope.txt)
+names. Reproducing that recorded digest needs the tool as of `b4e2bdb`
+(`git show b4e2bdb:scripts/derive_nemotron_h_envelope.py`).
 
 Generate a new immutable base oracle only from generator commit `0f222f6`, the
 pinned CPython 3.11.9 environment, the exact clean Transformers checkout, and an
@@ -627,11 +651,12 @@ on the integrated source after the Mamba-2 scan, `dt` softplus, batched cached
 execution, and MTP verification changes
 ([large-checkpoint replay](acceptance/measurements/large-checkpoint-replay-20261016.json)),
 and the official base gate passed against the official F32 rows at `9a9c730`
-and fails its two-graph floor since `f9f78b5` with the once-rounded Mamba-2
-convolution SiLU (cached decision 22, `0.998558` against `0.998635`), an open
-finding; the four-graph envelope under which it passed at `2cf83d7` was not
-adopted ([envelope diagnostic](#official-f16-envelope-diagnostic)). Before
-this checkpoint can be advertised as supported:
+and fails its two-graph floor with the once-rounded Mamba-2 convolution SiLU
+(cached decision 22, `0.998558` against `0.998635`; measured at `f9f78b5`, and
+at the current source inferred from the rows measured at `2cf83d7`, not
+rerun), an open finding; the four-graph envelope under which it passed at
+`2cf83d7` was not adopted ([envelope diagnostic](#official-f16-envelope-diagnostic)).
+Before this checkpoint can be advertised as supported:
 
 1. Resolve the official-precision failure at cached decision 22 (and explain
    teacher decision 30) without widening the floors by an unmeasured slack.

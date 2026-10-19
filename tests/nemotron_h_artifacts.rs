@@ -1897,11 +1897,15 @@ fn loads_pinned_nemotron_f16_and_smokes_base_inference() {
 /// evaluation reaches against F32 on that path, computed here from the
 /// authenticated rows with no slack (prompt `0.999194`, teacher `0.994466`,
 /// cached `0.998635`; `nemotron_h_parity`). Each Burn F16 row must therefore be
-/// at least as faithful to F32 as the worst official F16 row on its path (a
-/// per-path, not per-decision, bound); a `0.999` floor against the F16 oracle
-/// was unreachable even for the oracle, which is `0.994466` from F32 at teacher
-/// decision 18. Every row of all three paths is measured before any floor is
-/// applied, so a failing run reports each path's rows and every violation.
+/// at least as faithful to F32 as the worst row on its path of those two
+/// calibrating evaluations (a per-path, not per-decision, bound). That is not
+/// the worst row of every official F16 graph: the CPU SDPA, MPS SDPA, and
+/// repeated MPS eager graphs each fall below one floor at one row
+/// (`NEMOTRON_H_ACCEPTANCE.md`), diagnostic context that leaves the rule
+/// unchanged. A `0.999` floor against the F16 oracle was unreachable even for
+/// the oracle, which is `0.994466` from F32 at teacher decision 18. Every row
+/// of all three paths is measured before any floor is applied, so a failing
+/// run reports each path's rows and every violation.
 /// When `TRANSFORMERS_NEMOTRON_H_F16_GRAPHS_DIR` is set, the four-graph
 /// envelope (CPU and MPS, each with eager and SDPA attention) and Burn's worst
 /// row of each path as a multiple of it are printed as a diagnostic that
