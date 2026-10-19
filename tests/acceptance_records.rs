@@ -11,7 +11,10 @@
 //! the gated metrics (warm, natural-loop and strict-load medians at the 5%
 //! alert / 10% confirmed-failure thresholds) and the ungated cold first token,
 //! and its reference medians are what `scripts/qwen35_benchmark_protocol.py`
-//! judges a candidate against.
+//! judges a candidate against. Its reference block also names the executable
+//! those medians came from and its compiler, because only that binary, or a
+//! clean rebuild of its commit with the same compiler, features and profile,
+//! may serve as the reference in the controlled rerun that confirms a failure.
 
 use std::{collections::BTreeSet, fs, path::PathBuf};
 
@@ -186,13 +189,76 @@ fn positive_seconds(value: &Value, field: &str) -> Result<f64, String> {
         .ok_or_else(|| format!("{field} must be positive finite seconds"))
 }
 
+/// Requires lowercase hexadecimal text of exactly `digits` characters.
+fn lowercase_hex<'a>(value: &'a Value, digits: usize, field: &str) -> Result<&'a str, String> {
+    value
+        .as_str()
+        .filter(|text| {
+            text.len() == digits
+                && text
+                    .bytes()
+                    .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+        })
+        .ok_or_else(|| format!("{field} must be {digits} lowercase hexadecimal digits"))
+}
+
+/// Validates the identity of the reference block's binary, which a controlled rerun must match.
+///
+/// A rerun confirms a failure only when it runs this executable (by SHA-256)
+/// or a build of its source commit from a clean tree with the same compiler,
+/// features and profile, so the identity must be complete: a 64-digit
+/// executable digest, a 40-digit commit, an empty tree status, the
+/// `rustc -vV` text and rustup toolchain, a profile, and exactly the
+/// advertised profile's features. The compiler is also part of the benchmark
+/// series, so each benchmark's series must name the binary's compiler.
+fn validate_reference_binary(reference: &Value) -> Result<(), String> {
+    let binary = &reference["binary"];
+    lowercase_hex(&binary["sha256"], 64, "rebaseline reference binary.sha256")?;
+    lowercase_hex(
+        &binary["source_commit"],
+        40,
+        "rebaseline reference binary.source_commit",
+    )?;
+    if binary["worktree_status"] != json!("") {
+        return Err(
+            "rebaseline reference binary.worktree_status must be empty (a clean tree)".to_owned(),
+        );
+    }
+    let rustc = nonempty_text(&binary["rustc"], "rebaseline reference binary.rustc")?;
+    if !rustc.starts_with("rustc ") {
+        return Err("rebaseline reference binary.rustc must be `rustc -vV` output".to_owned());
+    }
+    nonempty_text(
+        &binary["rustup_toolchain"],
+        "rebaseline reference binary.rustup_toolchain",
+    )?;
+    nonempty_text(&binary["profile"], "rebaseline reference binary.profile")?;
+    let features = approved_features(PROFILE_IDS[0]).ok_or("the Qwen profile has no features")?;
+    exact_string_set(
+        &binary["cargo_features"],
+        features,
+        "rebaseline reference binary.cargo_features",
+    )?;
+    for benchmark in ["baseline", "public"] {
+        for field in ["rustc", "rustup_toolchain"] {
+            if reference["series"][benchmark][field] != binary[field] {
+                return Err(format!(
+                    "rebaseline reference series.{benchmark}.{field} must name the binary's compiler"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Validates the October 18 re-baseline: its authorization, what it supersedes, and its gates.
 ///
 /// The record changes no support claim and edits no earlier record; it names
 /// the release record and the September 10 series it supersedes by their
 /// digests. Its reference must hold exactly the gated metrics of each
 /// benchmark, each with a positive median, and an explicitly ungated cold
-/// first token; nothing else may gate.
+/// first token; nothing else may gate. The reference must also identify its
+/// binary and compiler (see [`validate_reference_binary`]).
 fn validate_rebaseline(record: &Value) -> Result<(), String> {
     for (pointer, expected) in [
         ("/schema_version", json!(1)),
@@ -290,7 +356,7 @@ fn validate_rebaseline(record: &Value) -> Result<(), String> {
             &format!("rebaseline reference {benchmark}.cold_first_token.median"),
         )?;
     }
-    Ok(())
+    validate_reference_binary(&record["reference"])
 }
 
 /// Pins execution metadata and requires nonblank scope/limit prose for human review.
@@ -788,8 +854,10 @@ fn committed_rebaseline_supersedes_the_unchanged_release_baseline() {
     validate_rebaseline(&rebaseline).expect("the committed re-baseline must be exact");
 }
 
-/// Creates a compact re-baseline fixture with placeholder medians, not measured results.
+/// Creates a compact re-baseline fixture with placeholder medians and identities, not measured results.
 fn valid_rebaseline_fixture() -> Value {
+    let rustc = "rustc 1.92.0 (ded5c06cf 2025-12-08)\nrelease: 1.92.0";
+    let toolchain = "1.92.0-aarch64-apple-darwin";
     let reference = |metrics: &[&str]| {
         json!({
             "gated": metrics.iter().map(|metric| ((*metric).to_owned(), json!({"median": 1.0})))
@@ -813,13 +881,24 @@ fn valid_rebaseline_fixture() -> Value {
                 "qwen_model_loop_baseline_sha256": QWEN_BASELINE_SHA256
             }
         },
-        "reference": {"label": "head", "benchmarks": {
-            "baseline": reference(&BASELINE_GATED), "public": reference(&PUBLIC_GATED)
-        }}
+        "reference": {
+            "label": "head",
+            "binary": {
+                "sha256": "a".repeat(64), "source_commit": "b".repeat(40), "worktree_status": "",
+                "rustc": rustc, "rustup_toolchain": toolchain,
+                "cargo_features": ["chat-templates", "metal", "std", "tokenizers"],
+                "profile": "release (debug assertions disabled)"
+            },
+            "series": {
+                "baseline": {"rustc": rustc, "rustup_toolchain": toolchain},
+                "public": {"rustc": rustc, "rustup_toolchain": toolchain}
+            },
+            "benchmarks": {"baseline": reference(&BASELINE_GATED), "public": reference(&PUBLIC_GATED)}
+        }
     })
 }
 
-/// Mutations cannot drop the authorization, gate cold first token, or change what is superseded.
+/// Mutations cannot drop the authorization, gate cold first token, change what is superseded, or blur the reference binary.
 #[test]
 fn rebaseline_rejects_mutated_decisions_and_gates() {
     let record = valid_rebaseline_fixture();
@@ -928,6 +1007,57 @@ fn rebaseline_rejects_mutated_decisions_and_gates() {
             json!(-1.0),
             "positive finite",
         ),
+        (
+            "/reference/binary/sha256",
+            json!("A".repeat(64)),
+            "binary.sha256 must be 64 lowercase",
+        ),
+        (
+            "/reference/binary/sha256",
+            Value::Null,
+            "binary.sha256 must be 64 lowercase",
+        ),
+        (
+            "/reference/binary/source_commit",
+            json!("fa8426e"),
+            "binary.source_commit must be 40 lowercase",
+        ),
+        (
+            "/reference/binary/worktree_status",
+            json!(" M src/lib.rs"),
+            "clean tree",
+        ),
+        (
+            "/reference/binary/rustc",
+            json!(" "),
+            "binary.rustc must be nonempty",
+        ),
+        ("/reference/binary/rustc", json!("1.92.0"), "rustc -vV"),
+        (
+            "/reference/binary/rustup_toolchain",
+            Value::Null,
+            "binary.rustup_toolchain must be nonempty",
+        ),
+        (
+            "/reference/binary/profile",
+            json!(""),
+            "binary.profile must be nonempty",
+        ),
+        (
+            "/reference/binary/cargo_features",
+            json!(["std", "metal", "tokenizers"]),
+            "binary.cargo_features must contain exactly",
+        ),
+        (
+            "/reference/series/public/rustc",
+            json!("rustc 1.99.1 (aaaaaaaaa 2026-09-01)"),
+            "series.public.rustc must name the binary's compiler",
+        ),
+        (
+            "/reference/series/baseline/rustup_toolchain",
+            json!("nightly-aarch64-apple-darwin"),
+            "series.baseline.rustup_toolchain must name the binary's compiler",
+        ),
     ] {
         let mut changed = record.clone();
         *changed.pointer_mut(pointer).expect("fixture field exists") = value;
@@ -951,5 +1081,15 @@ fn rebaseline_rejects_mutated_decisions_and_gates() {
         validate_rebaseline(&missing)
             .unwrap_err()
             .contains("gate exactly")
+    );
+    let mut unidentified = record.clone();
+    unidentified["reference"]
+        .as_object_mut()
+        .unwrap()
+        .remove("binary");
+    assert!(
+        validate_rebaseline(&unidentified)
+            .unwrap_err()
+            .contains("binary.sha256")
     );
 }
