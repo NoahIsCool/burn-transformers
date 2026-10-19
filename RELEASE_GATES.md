@@ -1044,6 +1044,19 @@ reports.
   pins the release record's digest), the support claims, and the documented
   historical slowdown. Not run: the long-prefill series, a supervised memory
   run, the FLAN-T5-small benchmarks, and CUDA/ROCm.
+- Source validation at `0d3bba6` (no library source, Cargo manifest, or
+  lockfile changed in this round) passes: formatting; warning-denied Clippy
+  of all targets on nightly and on 1.99.1 with all features and with
+  `std,flex,cpu,cuda,rocm,tokenizers,chat-templates,autodiff,train`, and on
+  1.99.1 for `qwen35_benchmarks` and `acceptance_records` with the Metal
+  profile's features (the only build that compiles the edited Metal module);
+  `cargo test --locked` with default features (3,734 passed, 83 ignored) and
+  with `std,flex,tokenizers,chat-templates,autodiff,train` (4,037 passed, 113
+  ignored); the Rust 1.92.0 check of all targets with the latter features;
+  warning-denied private rustdoc; the documentation audit (0 gaps in 23,657
+  authored items); and the 632 Python tests (14 opt-in native fixtures
+  skipped). Not run: `check_release.py --gate source`, coverage, and the
+  Metal checkpoint gates, which no change here reaches.
 
 Record each replay as a new measurement with its exact source identity; do not
 overwrite the historical records below.
