@@ -1,0 +1,550 @@
+{
+ "schema_version": 1,
+ "scope": "nemotron_h_official_precision_envelope_decision_not_a_support_declaration",
+ "date_utc": "2026-10-18",
+ "advertised_supported": false,
+ "passed": false,
+ "passed_note": "The record states a maintainer decision and the gate verdict it implies: the Nemotron-H Metal/F16 official-precision gate fails under its restored two-graph floors at cached decision 22, an open finding. The bundle-only run and every source check passed; they are not a gate pass.",
+ "extends": {
+  "record": "nemotron-h-envelope-20261018.json",
+  "commit": "995ae022fd4358f33432b5f7a0605ac8352d5136",
+  "sha256": "7bdc8c606c7c4c79a2c89fc2231861ff3451c533e85a1ed10612aff07ec572af",
+  "note": "The envelope record stays byte-identical. Its gate pass is a pass of the proposed rule, which was not adopted; its measurements stand as diagnostic evidence, and the statements listed under corrections are corrected here."
+ },
+ "revision": {
+  "first_version_commit": "665762c7d2973aaae9bf850d6e6b5d79a160a1e6",
+  "first_version_sha256": "4d7d300baa933205620f18fd95b13250e179713d51c37a7f3f3221cd0f095a93",
+  "documentation_commit": "fee841386292750fcfb9634275a9efda4ab43b2f",
+  "added": [
+   "revision",
+   "verdict.official_f16_rows_below_floors",
+   "corrections[floor-is-two-evaluations-worst-row]",
+   "corrections[derivation-tool-digest]"
+  ],
+  "note": "Revised before integration in response to review. The additions are computed from the envelope round's committed evidence and from Git objects of fixed commits. Every other value of the first version is unchanged except the builder's own digest under files; no log, measurement, status, or verdict changes. The source checks below remain those run at 603ec5c; the revision's own checks are listed in its commit message."
+ },
+ "decision": {
+  "date": "2026-10-18",
+  "by": "the maintainer",
+  "relayed": "quoted verbatim from the task text that carried the decision to this session; no other statement of it exists in the repository",
+  "quote": "the Nemotron-H official-precision gate stays an open finding. Do NOT adopt the four-graph envelope rule. Its slack is 1.1 only because leave-one-out ratios of at most 1.0046 round up, and Burn's cached decision 22 sits at 1.023 times the envelope.",
+  "effects": [
+   "The gate's pass/fail criterion returns to the per-path floors of the two official F16 evaluations, with no slack.",
+   "The four-graph envelope is printed as a diagnostic only: the compiled slacks and the leave-one-out assertion are removed, and the F16 graph bundles are optional for the gate.",
+   "The gate's failure at cached decision 22 stays an open finding; no checkpoint support changes."
+  ]
+ },
+ "base_commit": "995ae022fd4358f33432b5f7a0605ac8352d5136",
+ "gate_commit": "a5d4d86eace4c447a28ad5bf35c89ac54bfcc644",
+ "code_head": "530a82a1f5714a5a1f7eb8425b1a53d8e5dcd166",
+ "documentation_commit": "603ec5c41d4fcb8b4895010157f347dda4f57e26",
+ "source_commit": "603ec5c41d4fcb8b4895010157f347dda4f57e26",
+ "head_note": "The gate code changed in a5d4d86 (tests/ and the envelope record's test), the derivation tool's docstring in 530a82a, and documentation in 603ec5c. Every check ran from the clean worktree at 603ec5c (dirty counts changes outside this campaign directory). Its library code (src/, Cargo.toml, Cargo.lock) equals 2cf83d7's and fa8426e's; the commit after it adds only this record, its campaign directory, and its Python test.",
+ "campaign_directory": "nemotron-h-envelope-decision-20261018",
+ "host": "Apple M3 Max, 96 GiB unified memory, macOS 27.0.1 (26A434), shared with desktop applications and other sessions; external volumes /Volumes/bag of holding and /Volumes/T9 mounted throughout",
+ "harness": "run_check.py runs each check once from the clean worktree at the documentation commit and refuses a dirty or moved checkout; the bundle-only run reads the external oracle, precision, and F16 graph bundles without the checkpoint or Metal, so it ran without the heavy-model lock. No real-checkpoint run or benchmark ran.",
+ "rule": {
+  "statement": "Every Burn F16 row of a path needs exact top-1 and a cosine to its F32 truth row at least the path's floor: the worst cosine against F32 that the MPS/F16 oracle or the precision bundle's CPU/F16 rows (both eager attention) reach on that path, with no slack. Every row is measured before any is judged.",
+  "floors": {
+   "prompt": 0.999194145,
+   "teacher": 0.994466421,
+   "cached": 0.998635047
+  },
+  "floor_rows": {
+   "prompt": {
+    "graph": "cpu-eager",
+    "decision": 0,
+    "cosine": 0.9991941451648229
+   },
+   "teacher": {
+    "graph": "mps-eager",
+    "decision": 18,
+    "cosine": 0.9944664214635931
+   },
+   "cached": {
+    "graph": "mps-eager",
+    "decision": 22,
+    "cosine": 0.9986350472017987
+   }
+  },
+  "previous_rule_commit": "fa8426e5dc8cbcb269c29e211b119ea0acd61054",
+  "evidence": [
+   {
+    "log": "nemotron-h-envelope-decision-20261018/logs/bundles.reports_official_f16_floors_and_four_graph_envelope.log",
+    "quotes": [
+     "Nemotron official F16 floors (the gate's rule) [prompt, teacher, cached]: [0.999194145, 0.994466421, 0.998635047]",
+     "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 51 filtered out; finished in 8.71s"
+    ]
+   }
+  ]
+ },
+ "verdict": {
+  "status": "fails: an open finding",
+  "basis": "inferred",
+  "basis_note": "Inferred, not measured at the new source: the restored rule applied to Burn's rows measured at 2cf83d7 (the envelope record's gate run), whose library code the new source compiles, against the floors the bundle-only run measured at the new source. The restored gate was not run on the checkpoint. The same criterion failed, measured, at f9f78b5 with the same cosine at cached decision 22 (half-precision envelope record).",
+  "failing_rows": [
+   {
+    "path": "cached",
+    "decision": 22,
+    "cosine": 0.998557984489,
+    "floor": 0.998635047
+   }
+  ],
+  "paths": {
+   "prompt": {
+    "rows": 1,
+    "minimum_cosine": 0.999200341318,
+    "decision": 0,
+    "floor": 0.999194145,
+    "floor_row": {
+     "graph": "cpu-eager",
+     "decision": 0,
+     "cosine": 0.9991941451648229
+    },
+    "margin": 6.196318e-06,
+    "rows_below_floor": []
+   },
+   "teacher": {
+    "rows": 32,
+    "minimum_cosine": 0.996039426551,
+    "decision": 30,
+    "floor": 0.994466421,
+    "floor_row": {
+     "graph": "mps-eager",
+     "decision": 18,
+     "cosine": 0.9944664214635931
+    },
+    "margin": 0.001573005551,
+    "rows_below_floor": []
+   },
+   "cached": {
+    "rows": 32,
+    "minimum_cosine": 0.998557984489,
+    "decision": 22,
+    "floor": 0.998635047,
+    "floor_row": {
+     "graph": "mps-eager",
+     "decision": 22,
+     "cosine": 0.9986350472017987
+    },
+    "margin": -7.7062511e-05,
+    "rows_below_floor": [
+     22
+    ]
+   }
+  },
+  "top1": "32/32 on the teacher and cached paths and 1/1 on the prompt row at 2cf83d7",
+  "evidence": [
+   {
+    "log": "nemotron-h-envelope-20261018/gates/logs/nemotron-h.f16.metal.official-precision.log",
+    "quotes": [
+     "Nemotron Burn F16 against the F32 truth Cached: 32 rows, minimum cosine 0.998557984489 at decision 22 (delta 5.370318e-2, 1.0231 of the envelope, 0.9301 of the bound 5.773712e-2; floor 0.998333213)",
+     "Nemotron Burn F16 against the F32 truth Teacher: 32 rows, minimum cosine 0.996039426551 at decision 30 (delta 8.900083e-2, 0.8425 of the envelope, 0.7659 of the bound 1.162040e-1; floor 0.993248318)",
+     "Nemotron Burn F16 against the F32 truth Prompt: 1 rows, minimum cosine 0.999200341318 at decision 0 (delta 3.999147e-2, 0.9961 of the envelope, 0.9056 of the bound 4.416071e-2; floor 0.999024916)"
+    ]
+   }
+  ],
+  "official_f16_rows_below_floors": {
+   "basis": "measured",
+   "status": "diagnostic context; the rule is unchanged",
+   "note": "The floors are the worst rows of the two evaluations the gate is calibrated on (the MPS/F16 oracle and the precision bundle's CPU/F16 rows), not of every official F16 graph. Measured by the envelope round's derivation from the authenticated bundles, three other official F16 evaluations fall below a restored floor, each at one row and each with exact top-1 on every row: CPU SDPA at teacher decision 18, MPS SDPA at cached decision 22, and the MPS eager control, a repeat of the oracle's own graph, at cached decision 22. The restored criterion would reject all three. This is diagnostic context and does not change the rule.",
+   "rows": [
+    {
+     "graph": "cpu-sdpa",
+     "path": "teacher",
+     "decision": 18,
+     "cosine": 0.9944200973425317,
+     "floor": 0.994466421,
+     "miss": 4.6323657e-05,
+     "source": "derivation/envelope.json"
+    },
+    {
+     "graph": "mps-sdpa",
+     "path": "cached",
+     "decision": 22,
+     "cosine": 0.9986224898590363,
+     "floor": 0.998635047,
+     "miss": 1.2557141e-05,
+     "source": "derivation/envelope.json"
+    },
+    {
+     "graph": "mps-eager-control",
+     "path": "cached",
+     "decision": 22,
+     "cosine": 0.9985956044836493,
+     "floor": 0.998635047,
+     "miss": 3.9442516e-05,
+     "source": "bundles/f16-mps-eager-control/reference.json"
+    }
+   ],
+   "top1": {
+    "cpu-sdpa": {
+     "prompt": [
+      1,
+      1
+     ],
+     "teacher": [
+      32,
+      32
+     ],
+     "cached": [
+      32,
+      32
+     ]
+    },
+    "mps-sdpa": {
+     "prompt": [
+      1,
+      1
+     ],
+     "teacher": [
+      32,
+      32
+     ],
+     "cached": [
+      32,
+      32
+     ]
+    },
+    "mps-eager-control": {
+     "prompt": [
+      1,
+      1
+     ],
+     "teacher": [
+      32,
+      32
+     ],
+     "cached": [
+      32,
+      32
+     ]
+    }
+   },
+   "evidence": [
+    {
+     "log": "nemotron-h-envelope-20261018/derivation/envelope.txt",
+     "quotes": [
+      "- cpu-sdpa: max delta 1.056400e-01 at decision 18 (cosine 0.994420097), mean delta 2.886415e-02; leave-one-out 1.0042 (deficit 1.0084, mean 1.5945)",
+      "- mps-sdpa: max delta 5.248829e-02 at decision 22 (cosine 0.998622490), mean delta 1.718501e-02; leave-one-out 1.0046 (deficit 1.0092, mean 0.9706)",
+      "- cached: max delta 5.299803e-02 at decision 22 (cosine 0.998595604); minimum cosine to mps-eager 0.999869702, bitwise equal False"
+     ]
+    }
+   ]
+  }
+ },
+ "diagnostic": {
+  "status": "printed, not adopted",
+  "note": "The four-graph envelope, its leave-one-out ratios, and the registered method's slack, as the bundle-only run printed them at the new source (equal to the envelope round's derivation), with Burn's worst row of each path as a multiple of the envelope from the 2cf83d7 run.",
+  "paths": {
+   "prompt": {
+    "envelope": 0.04014610404951256,
+    "envelope_graph": "cpu-eager",
+    "largest_leave_one_out": 1.000221775877657,
+    "largest_leave_one_out_graph": "cpu-eager",
+    "registered_method_slack_not_adopted": 1.1,
+    "burn_worst_of_envelope": 0.9961,
+    "burn_beyond_every_official_graph": false
+   },
+   "teacher": {
+    "envelope": 0.10563997971855472,
+    "envelope_graph": "cpu-sdpa",
+    "largest_leave_one_out": 1.0041770053811698,
+    "largest_leave_one_out_graph": "cpu-sdpa",
+    "registered_method_slack_not_adopted": 1.1,
+    "burn_worst_of_envelope": 0.8425,
+    "burn_beyond_every_official_graph": false
+   },
+   "cached": {
+    "envelope": 0.05248828709271538,
+    "envelope_graph": "mps-sdpa",
+    "largest_leave_one_out": 1.0045893870822387,
+    "largest_leave_one_out_graph": "mps-sdpa",
+    "registered_method_slack_not_adopted": 1.1,
+    "burn_worst_of_envelope": 1.0231,
+    "burn_beyond_every_official_graph": true
+   }
+  },
+  "evidence": [
+   {
+    "log": "nemotron-h-envelope-decision-20261018/logs/bundles.reports_official_f16_floors_and_four_graph_envelope.log",
+    "quotes": [
+     "Nemotron four-graph F16 envelope diagnostic (not a gate) Prompt: envelope 4.014610e-2 (cpu-eager); largest leave-one-out 1.0002 (cpu-eager); the registered method's slack 1.1 (cosine floor 0.999024916) is not adopted and judges no row",
+     "Nemotron four-graph F16 envelope diagnostic (not a gate) Teacher: envelope 1.056400e-1 (cpu-sdpa); largest leave-one-out 1.0042 (cpu-sdpa); the registered method's slack 1.1 (cosine floor 0.993248318) is not adopted and judges no row",
+     "Nemotron four-graph F16 envelope diagnostic (not a gate) Cached: envelope 5.248829e-2 (mps-sdpa); largest leave-one-out 1.0046 (mps-sdpa); the registered method's slack 1.1 (cosine floor 0.998333213) is not adopted and judges no row",
+     "Nemotron four-graph F16 envelope diagnostic (not a gate) Cached: official mps-sdpa worst delta 5.248829e-2 (cosine 0.998622490) at decision 22, leave-one-out 1.0046"
+    ]
+   },
+   {
+    "log": "nemotron-h-envelope-20261018/gates/logs/nemotron-h.f16.metal.official-precision.log",
+    "quotes": [
+     "Nemotron Burn F16 against the F32 truth Cached: 32 rows, minimum cosine 0.998557984489 at decision 22 (delta 5.370318e-2, 1.0231 of the envelope, 0.9301 of the bound 5.773712e-2; floor 0.998333213)"
+    ]
+   }
+  ]
+ },
+ "corrections": [
+  {
+   "id": "teacher-decision-30-official-cosines",
+   "corrects": [
+    "nemotron-h-envelope-20261018.json findings[teacher-decision-30].summary",
+    "nemotron-h-envelope-20261018.json awaiting_maintainer[2]",
+    "NEMOTRON_H_ACCEPTANCE.md before 603ec5c"
+   ],
+   "statement": "every official F16 graph is near 0.99996",
+   "correction": "At teacher decision 30 the official F16 graphs reach 0.999958 (CPU eager), 0.999346 (CPU SDPA), 0.999968 (MPS eager), and 0.999954 (MPS SDPA) from F32, and the MPS eager control 0.999957: CPU SDPA's deficit 1 - cosine is 14 to 21 times the other three graphs'. Burn's 0.996039 has a deficit six times CPU SDPA's and 85 to 125 times the other three graphs'.",
+   "teacher_decision_30_cosines": {
+    "cpu-eager": 0.9999582653174326,
+    "mps-eager": 0.9999682999006393,
+    "cpu-sdpa": 0.9993461707811689,
+    "mps-sdpa": 0.9999535620411756,
+    "mps-eager-control": 0.9999570201953141
+   },
+   "burn_teacher_decision_30_cosine": 0.996039426551
+  },
+  {
+   "id": "teacher-spike-is-not-attention-path-alone",
+   "corrects": [
+    "nemotron-h-envelope-20261018.json findings[teacher-spike-is-attention-path].summary",
+    "nemotron-h-envelope-20261018/derivation/assessment.txt limit 2"
+   ],
+   "statement": "the teacher decision-18 spike follows the attention path, not the device",
+   "correction": "The spike is absent only from CPU eager. CPU SDPA, which differs from CPU eager only in the attention implementation, has it, and both MPS graphs have it with eager or SDPA attention, so neither the attention implementation nor the device alone accounts for it. The cosines are measured; no attribution is.",
+   "teacher_decision_18_cosines": {
+    "cpu-eager": 0.9996884346101002,
+    "mps-eager": 0.9944664214635931,
+    "cpu-sdpa": 0.9944200973425317,
+    "mps-sdpa": 0.9945057708659372
+   }
+  },
+  {
+   "id": "hidden-trace-minimum",
+   "corrects": [
+    "nemotron-h-envelope-20261018.json findings[closer-to-the-f16-oracle].summary",
+    "NEMOTRON_H_ACCEPTANCE.md before 603ec5c"
+   ],
+   "statement": "hidden traces at least 0.999995",
+   "correction": "The hidden traces' minimum cosine to the F16 oracle at 2cf83d7 is 0.999994958685 (first recurrent decode, boundary 27), which rounds up to 0.999995; they are at least 0.99999495.",
+   "hidden_minimum_cosines": {
+    "stateless_hidden": 0.999996915653,
+    "cached_prefill_hidden": 0.999996915653,
+    "cached_decode_hidden": 0.999994958685
+   },
+   "evidence": [
+    {
+     "log": "nemotron-h-envelope-20261018/gates/logs/nemotron-h.f16.metal.official-precision.log",
+     "quotes": [
+      "cached_decode_hidden_minimum_cosine=0.999994958685@27"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "mps-sdpa-resident-budget",
+   "corrects": [
+    "NEMOTRON_H_ACCEPTANCE.md reproduction commands before 603ec5c"
+   ],
+   "statement": "the MPS graph with --device mps --attn-implementation sdpa and no budget",
+   "correction": "The MPS SDPA graph ran with --max-resident-gib 16 and an offload directory, as the CPU SDPA graph and the MPS eager control did.",
+   "evidence": [
+    {
+     "log": "nemotron-h-envelope-20261018/generator/logs/mps-sdpa.log",
+     "quotes": [
+      "\"--device\", \"mps\", \"--attn-implementation\", \"sdpa\", \"--output\", \"/Volumes/bag of holding/models/transformers-acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24-f16-graphs/f16-mps-sdpa.bundle\", \"--max-resident-gib\", \"16\""
+     ]
+    }
+   ]
+  },
+  {
+   "id": "gate-pass-superseded",
+   "corrects": [
+    "nemotron-h-envelope-20261018.json passed, findings[gate-passes-on-the-rounded-slack], decisions[nemotron-envelope-rule]"
+   ],
+   "statement": "the gate passes under the envelope rule; the rule awaits review",
+   "correction": "The rule was reviewed and not adopted; the gate's criterion is the two-graph floors, under which it fails at cached decision 22."
+  },
+  {
+   "id": "generator-docstring-not-corrected",
+   "corrects": [
+    "scripts/generate_nemotron_h_f16_graph_reference.py module docstring"
+   ],
+   "statement": "Its bound is the envelope of the official float16 graphs",
+   "correction": "Not corrected in place: the two graph bundles and the strict reader pin the generator's SHA-256 (81f5bd77...), so its bytes must not change. The gate's bound is the two-graph floors; the derivation tool's docstring was corrected in 530a82a."
+  },
+  {
+   "id": "floor-is-two-evaluations-worst-row",
+   "corrects": [
+    "tests/nemotron_h_artifacts.rs compares_pinned_nemotron_f16_with_official_base_reference documentation at 603ec5c",
+    "tests/support/nemotron_h_parity.rs module documentation at 603ec5c",
+    "NEMOTRON_H_ACCEPTANCE.md First official comparison at 603ec5c"
+   ],
+   "statement": "the worst official F16 row",
+   "correction": "The floor is the worst row of the two official F16 evaluations the gate is calibrated on, the MPS/F16 oracle and the CPU/F16 rows, not of every official F16 graph: three other official F16 evaluations fall below a restored floor (verdict.official_f16_rows_below_floors). The three descriptions were reworded in fee8413; the rule is unchanged.",
+   "reworded_in": "fee841386292750fcfb9634275a9efda4ab43b2f"
+  },
+  {
+   "id": "derivation-tool-digest",
+   "corrects": [
+    "nemotron-h-envelope-decision-20261018.json corrections[generator-docstring-not-corrected].correction as first committed",
+    "NEMOTRON_H_ACCEPTANCE.md reproduction commands at 603ec5c"
+   ],
+   "statement": "the derivation tool's docstring was corrected in",
+   "correction": "That correction changed the derivation tool's bytes, in comments and docstrings only, which the first version did not say: from 530a82a on, including this record's source commit 603ec5c, its SHA-256 is b8a487bd..., while the envelope round's derivation/envelope.txt names 2c4b5fc1..., the tool as of b4e2bdb. A derivation rerun at a later source therefore reports a different tool digest from the evidence; reproducing the recorded digest needs the tool as of b4e2bdb (git show b4e2bdb:scripts/derive_nemotron_h_envelope.py). Without docstrings the two versions' code is identical, so the derivation computes the same result.",
+   "tool": "scripts/derive_nemotron_h_envelope.py",
+   "recorded_commit": "b4e2bdbeb6e011d77ba29b0e10903593bf59925c",
+   "recorded_sha256": "2c4b5fc1143a0b067670d4bb2645db896b2f37df823954ea6eb5d63431c8e498",
+   "edit_commit": "530a82a1f5714a5a1f7eb8425b1a53d8e5dcd166",
+   "sha256_from_edit_commit": "b8a487bdce771d9dbf0b59dc213449bdec73f13e212c62c6e028b27ba3c6d438",
+   "evidence": [
+    {
+     "log": "nemotron-h-envelope-20261018/derivation/envelope.txt",
+     "quotes": [
+      "== source b4e2bdbeb6e011d77ba29b0e10903593bf59925c tool scripts/derive_nemotron_h_envelope.py sha256 2c4b5fc1143a0b067670d4bb2645db896b2f37df823954ea6eb5d63431c8e498"
+     ]
+    }
+   ]
+  }
+ ],
+ "runs": [
+  {
+   "name": "bundles.reports_official_f16_floors_and_four_graph_envelope",
+   "test": "reports_official_f16_floors_and_four_graph_envelope",
+   "kind": "bundle-only",
+   "heavy_model_lock": false,
+   "commit": "603ec5c41d4fcb8b4895010157f347dda4f57e26",
+   "exit": 0,
+   "result": "pass",
+   "expected": "pass",
+   "log": "logs/bundles.reports_official_f16_floors_and_four_graph_envelope.log"
+  }
+ ],
+ "source_validation": {
+  "commit": "603ec5c41d4fcb8b4895010157f347dda4f57e26",
+  "checks": [
+   {
+    "name": "fmt",
+    "purpose": "formatting",
+    "log": "validation/fmt.log",
+    "command": "cargo fmt --check",
+    "commit": "603ec5c41d4fcb8b4895010157f347dda4f57e26",
+    "exit": 0
+   },
+   {
+    "name": "clippy-default-all-features",
+    "purpose": "warning-denied Clippy, default toolchain, all targets and features",
+    "log": "validation/clippy-default-all-features.log",
+    "command": "cargo clippy --locked --all-targets --all-features -- -D warnings",
+    "commit": "603ec5c41d4fcb8b4895010157f347dda4f57e26",
+    "exit": 0
+   },
+   {
+    "name": "clippy-1.99.1-all-features",
+    "purpose": "warning-denied Clippy, Rust 1.99.1, all targets and features",
+    "log": "validation/clippy-1.99.1-all-features.log",
+    "command": "cargo +1.99.1 clippy --locked --all-targets --all-features -- -D warnings",
+    "commit": "603ec5c41d4fcb8b4895010157f347dda4f57e26",
+    "exit": 0
+   },
+   {
+    "name": "clippy-1.99.1-backends",
+    "purpose": "warning-denied Clippy, Rust 1.99.1, every backend feature without defaults",
+    "log": "validation/clippy-1.99.1-backends.log",
+    "command": "cargo +1.99.1 clippy --locked --all-targets --no-default-features --features std,flex,cpu,cuda,rocm,tokenizers,chat-templates,autodiff,train -- -D warnings",
+    "commit": "603ec5c41d4fcb8b4895010157f347dda4f57e26",
+    "exit": 0
+   },
+   {
+    "name": "test-default",
+    "purpose": "Rust tests and doctests, default features",
+    "log": "validation/test-default.log",
+    "command": "cargo test --locked",
+    "commit": "603ec5c41d4fcb8b4895010157f347dda4f57e26",
+    "exit": 0,
+    "rust_tests_passed": 3744,
+    "rust_tests_failed": 0
+   },
+   {
+    "name": "test-std-flex-train",
+    "purpose": "Rust tests and doctests, std,flex,tokenizers,chat-templates,autodiff,train",
+    "log": "validation/test-std-flex-train.log",
+    "command": "cargo test --locked --no-default-features --features std,flex,tokenizers,chat-templates,autodiff,train",
+    "commit": "603ec5c41d4fcb8b4895010157f347dda4f57e26",
+    "exit": 0,
+    "rust_tests_passed": 4047,
+    "rust_tests_failed": 0
+   },
+   {
+    "name": "msrv-1.92.0-check",
+    "purpose": "MSRV check, all targets",
+    "log": "validation/msrv-1.92.0-check.log",
+    "command": "cargo +1.92.0 check --locked --all-targets --no-default-features --features std,flex,tokenizers,chat-templates,autodiff,train",
+    "commit": "603ec5c41d4fcb8b4895010157f347dda4f57e26",
+    "exit": 0
+   },
+   {
+    "name": "rustdoc-private",
+    "purpose": "warning-denied private rustdoc",
+    "log": "validation/rustdoc-private.log",
+    "command": "cargo doc --locked --no-deps --document-private-items --no-default-features --features std,flex,tokenizers,chat-templates,autodiff,train",
+    "commit": "603ec5c41d4fcb8b4895010157f347dda4f57e26",
+    "exit": 0
+   },
+   {
+    "name": "python-tests",
+    "purpose": "Python tooling tests",
+    "log": "validation/python-tests.log",
+    "command": "python3 -m unittest discover -s scripts/tests",
+    "commit": "603ec5c41d4fcb8b4895010157f347dda4f57e26",
+    "exit": 0,
+    "python_tests_ran": 628,
+    "python_result": "OK (skipped=14)"
+   },
+   {
+    "name": "documentation-audit",
+    "purpose": "documentation audit with --standards",
+    "log": "validation/documentation-audit.log",
+    "command": "python3 scripts/check_documentation.py --standards --classifier '/Volumes/bag of holding/cargo-targets/tfm-polish-layout/debug/transformers-coverage-layout' --output /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/nemo-decision/documentation-audit.json",
+    "commit": "603ec5c41d4fcb8b4895010157f347dda4f57e26",
+    "exit": 0,
+    "gaps": 0
+   }
+  ],
+  "passed": true
+ },
+ "not_run": [
+  "The Nemotron-H Metal/F16 official-precision gate on the 30B checkpoint at the new source: the library code equals 2cf83d7's, whose run measured every row; the change judges and prints those rows differently, which the unit tests and the bundle-only run cover; the task forbade a 30B rerun unless a code change requires it.",
+  "Every other real-checkpoint gate, benchmark, and smoke: no library code changed.",
+  "check_release.py, CUDA and ROCm runs (Clippy compiled their features), coverage, and Verus.",
+  "Official F32 hidden traces and real-weight MTP parity for Nemotron-H (still open)."
+ ],
+ "open": [
+  "The Nemotron-H official-precision failure at cached decision 22 (0.998557984 against 0.998635047).",
+  "Burn's teacher decision 30 (0.996039 from F32, where the official F16 graphs reach 0.999346 to 0.999968).",
+  "Whether more official graphs (a regenerated oracle on the current macOS, other experts implementations) or a repeat-based slack could ever justify a wider bound; none is adopted."
+ ],
+ "historical_records": {
+  "half-precision-calibration-20261017.json": "3649f61e5cf3357659488585aad32dd4991500b6c7c1c729291bec41ba67d376",
+  "mac-validation-20261017.json": "df865651e42b98427e6537be1292544a59450b54c92d0b89febd172ae0226c41",
+  "half-precision-envelope-20261018.json": "f7be043ec694e98a0ad8fdb223e8eff935c9aa19b3bb46463abce11f6492ab18",
+  "half-precision-followups-20261017.json": "606b662b8b14064c756c2b8b7a9940c5d6478067f6a198bb905226e06190fc6d",
+  "half-precision-review-20261018.json": "87a6aad328798a481c34c3c2eee7ca3ec50a5ce6ef10baaba3de5faa8b4caf8b",
+  "reference-precision-followups-20261016.json": "bcfd19b68b049593cb83d495712e4e0a7ed0acf6ca1a07f559b068362bfa7120",
+  "nemotron-h-envelope-20261018.json": "7bdc8c606c7c4c79a2c89fc2231861ff3451c533e85a1ed10612aff07ec572af",
+  "../nemotron-3.5-lightning-30b-a3b-a9904d24bcc1d289a1950fa9d2b978c47cf903b9.json": "5b2cd355fa9da7f23113ba84ba5d84eed735cbe1f4c83eb53c4403dbbcdb80ca"
+ },
+ "files": {
+  "logs/bundles.reports_official_f16_floors_and_four_graph_envelope.log": "3fb658463d649580b528353b8ea913804ee337baa90ea9d76f2022634e4bb3bc",
+  "record/build_record.py": "b7cfacd5bfc0a9f8d06a126863183d477e8ff5e2fa99d1db17109b9c0fbd1405",
+  "run_check.py": "98a4f26b3312027166567343cf7a3d166559d32dba5375656f4e99df1c3847b3",
+  "validation/clippy-1.99.1-all-features.log": "1d477d5a7c3c8fc8c5aee4bc51a2553c46bf3b595ca793cfa2815a9e938de119",
+  "validation/clippy-1.99.1-backends.log": "b39469abef6fb0f575e76c95d6fc2cd28aa1d17987b66655ab1deaf4a5363fe7",
+  "validation/clippy-default-all-features.log": "30ba8d649a1f7921218f2ea73cf26ac7f933dbd34a66170bc1b6476457f5ed76",
+  "validation/documentation-audit.log": "0b789c18550957b817e8a25e75f8c7bd4a62e0d14742776d8a7e64a4a103bf40",
+  "validation/fmt.log": "18e16b285ca3a9417464480d2ab3023d99cebc0752cf88de4690b9d4290fdbc9",
+  "validation/msrv-1.92.0-check.log": "0fa80403997b36ad48f19607f03556af4944f7230cb302ab3a333e338a7e4f30",
+  "validation/python-tests.log": "961304a83233a6db9d38f3d669de03aef5e955e5e8c28dfecd001d4af2c6206c",
+  "validation/rustdoc-private.log": "1489da005034a00734b5fbf4d64db430920b64d06e651346c5ab67e4fb42a4d6",
+  "validation/test-default.log": "116b47b5e7e70c619e5c381c5313d36c18c27a82c8b21bd6560c19b87dd73229",
+  "validation/test-std-flex-train.log": "64ed3ca87ef83bba501ab8d9f8f29aaded7ccd225c40a001a46e034b79644e48"
+ }
+}

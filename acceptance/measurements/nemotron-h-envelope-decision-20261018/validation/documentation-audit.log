@@ -1,0 +1,15 @@
+== source 603ec5c41d4fcb8b4895010157f347dda4f57e26 dirty=0
+== cmd python3 scripts/check_documentation.py --standards --classifier '/Volumes/bag of holding/cargo-targets/tfm-polish-layout/debug/transformers-coverage-layout' --output /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/nemo-decision/documentation-audit.json
+== env CARGO_TARGET_DIR=/Volumes/bag of holding/cargo-targets/tfm-nemotron-envelope
+== start 2026-10-18T23:42:47+00:00 uptime 19:42  up 17 days,  5:03, 3 users, load averages: 16.84 18.00 14.62
+== start free /Volumes/bag of holding 146.0 GiB
+checkpoint: 0/2583 authored sites missing required line docs; 811 test sites included; 0 inline test bodies; 0 opaque authored functions; 0 opaque authored declarations
+examples: 0/795 authored sites missing required line docs; 58 test sites included; 0 inline test bodies; 0 opaque authored functions; 0 opaque authored declarations
+fuzz: 0/515 authored sites missing required line docs; 126 test sites included; 0 inline test bodies; 0 opaque authored functions; 0 opaque authored declarations
+integration_tests: 0/3388 authored sites missing required line docs; 547 test sites included; 0 inline test bodies; 0 opaque authored functions; 0 opaque authored declarations
+models: 0/8499 authored sites missing required line docs; 3199 test sites included; 0 inline test bodies; 0 opaque authored functions; 0 opaque authored declarations
+shared: 0/7606 authored sites missing required line docs; 2606 test sites included; 0 inline test bodies; 0 opaque authored functions; 0 opaque authored declarations
+tooling: 0/351 authored sites missing required line docs; 62 test sites included; 0 inline test bodies; 0 opaque authored functions; 0 opaque authored declarations
+== end 2026-10-18T23:43:15+00:00 wall=28.2s
+== source after run 603ec5c41d4fcb8b4895010157f347dda4f57e26 dirty=0
+== exit=0

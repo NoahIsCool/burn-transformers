@@ -939,7 +939,9 @@ and `0.9999994`. The clamp asymmetry causes the split: the official class's F32 
 cached rows still differ by cosine `0.930777` ([reference-precision follow-ups](acceptance/measurements/reference-precision-followups-20261016.json)). Corresponding-path Burn
 comparisons keep their separate reference streams and are judged against those
 official F32 rows, with each path's floor set by the official F16 evaluations'
-own distance from F32 (see [the official comparison](NEMOTRON_H_ACCEPTANCE.md#first-official-comparison)).
+own distance from F32 (see [the official comparison](NEMOTRON_H_ACCEPTANCE.md#first-official-comparison));
+a four-graph F16 envelope is printed beside that verdict as a diagnostic only
+(see [the envelope diagnostic](NEMOTRON_H_ACCEPTANCE.md#official-f16-envelope-diagnostic)).
 
 **Implementation:** [`chunked_gated_delta_rule`](src/delta_net.rs) and the
 chunked mode in [`mamba2.rs`](src/mamba2.rs).

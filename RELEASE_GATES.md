@@ -795,7 +795,9 @@ record promotes no checkpoint.
   s; in the public benchmark the base binary's median (`0.406` s, `+11.0%`)
   exceeds `1.1 x 0.366` s and the head's three samples (`0.234` to `0.307` s)
   do not. The breach of the approved baseline awaits the maintainer
-  ([review record](acceptance/measurements/half-precision-review-20261018.json)).
+  ([review record](acceptance/measurements/half-precision-review-20261018.json));
+  the maintainer has since re-baselined (see "Qwen3.5-0.8B benchmark
+  re-baseline (October 18)" below).
   The supervised memory run passes its 93 phases with
   no sampling or validation error and a kernel lifetime maximum of 3.67 GB.
 - Larger checkpoints whose numerics the SiLU change touches: the Qwen3.8-27B
@@ -904,14 +906,28 @@ profile), and its integrated-head rerun:
 
 - real-weight Nemotron MTP parity, and official F32 hidden traces for its
   base gate;
-- the Nemotron-H official-precision failure at `f9f78b5` (above; not rerun at
-  `8181605`, which compiles the same library code), traced to
-  the once-rounded Mamba-2 convolution SiLU. That gate's floors are each
-  path's worst official F16 row, so Burn-side half-precision deviations such
-  as teacher decision 30 (`0.997612` from F32 at `7bd057e`, where both
-  official F16 evaluations reach `0.99996`) and cached decision 22 pass or
-  fail by margins no calibration explains; the rule needs a reviewed decision,
-  for example an official-graph envelope like the Llama family's;
+- the Nemotron-H official-precision failure, an open finding: cached decision
+  22 is `0.998558` against its `0.998635` floor, measured at `f9f78b5` (above;
+  not rerun at `8181605`, which compiles the same library code) and at the
+  current source inferred from the rows measured at `2cf83d7` (the restored
+  gate was not rerun), traced to the once-rounded Mamba-2 convolution SiLU.
+  The gate's floors are each path's worst row of the two official F16
+  evaluations it is calibrated on, not of every official F16 graph: measured
+  by the envelope round's derivation, CPU SDPA at teacher decision 18
+  (`0.994420097` against `0.994466421`), MPS SDPA at cached decision 22
+  (`0.998622490` against `0.998635047`), and the MPS eager repeat of the
+  oracle's graph at cached decision 22 (`0.998595604`) fall below them, which
+  is diagnostic context and does not change the rule. With no slack, Burn-side
+  half-precision deviations such as teacher decision 30 (`0.997612` from F32
+  at `7bd057e` and `0.996039` at `2cf83d7`, where the official F16 graphs
+  reach `0.999958` CPU eager, `0.999346` CPU SDPA, `0.999968` MPS eager, and
+  `0.999954` MPS SDPA) and cached decision 22 pass or fail by margins no
+  calibration explains. The Nemotron-H envelope round below proposed a
+  four-graph envelope under which the gate passed; the maintainer did not
+  adopt it (October 18), because its slacks are the rounding of leave-one-out
+  ratios of at most `1.0046` and Burn's cached decision 22 lies at `1.023` of
+  the envelope. The four-graph data is a printed diagnostic, and the failure
+  stands;
 - Q8/Q4 quantized-reference and quality gates (Qwen3.8, Qwen3-30B-A3B, Muse),
   and an official reference for Qwen3-30B-A3B (no bundle exists);
 - the packed Muse Q8 smoke's unexplained peak variance (31.87 to 45.68 GB
@@ -942,8 +958,9 @@ profile), and its integrated-head rerun:
   Gemma 3 sizes; Gemma 2 declares no hazard until it is measured (the
   gate-level refusal recorded here had anticipated the decision and was
   withdrawn in the review round below);
-- Metal BF16, unavailable on the pinned Burn 0.21; a Burn 0.22 upgrade (MSRV
-  1.95 and the backend-erased tensor API) is a maintainer decision;
+- Metal BF16, unavailable on the pinned Burn 0.21; the maintainer decided
+  (October 18) to migrate to Burn 0.22 (MSRV 1.95 and the backend-erased
+  tensor API) in a separate pull request after this one;
 - a non-finite guard in generation (a maintainer decision) and a
   post-attention-add hook (the residual between a block's two additions);
 - three Burn Flex deviations pinned by tests, to report upstream: the
@@ -1004,7 +1021,8 @@ worktree, under the heavy-model lock except for the bundle-only tests.
   the gate run (`+12.2%`) and the base binary's median (`+11.0%`) do, and the
   head's three samples do not. The base binary `7bd057e` shows the breach
   too, so it is not attributable to this branch. The breach of the approved
-  baseline awaits the maintainer, and nothing is re-baselined.
+  baseline awaits the maintainer, and nothing is re-baselined (the maintainer
+  has since re-baselined; see the October 18 re-baseline below).
 - Source validation at `1e38eec` (formatting, warning-denied Clippy on
   nightly and 1.99.1, the Rust tests in three feature sets, MSRV 1.92, both
   rustdoc builds, the documentation audit, the Python tests, and
@@ -1151,6 +1169,97 @@ No benchmark ran again and no support claim changed.
   Metal-feature Clippy of `qwen35_benchmarks`, which this round does not
   touch; and every benchmark and Metal checkpoint gate, since no
   measurement was repeated.
+
+### Nemotron-H envelope round (October 18)
+
+The [Nemotron-H envelope record](acceptance/measurements/nemotron-h-envelope-20261018.json)
+proposed to replace the Nemotron-H official-precision gate's floor, the worst
+cosine of two official F16 graphs with no slack, by the envelope rule of the
+Llama-family and Gemma gates, applied to the gate's row statistic. The
+maintainer did not adopt the rule (the decision below); the record's
+measurements stand as diagnostic evidence.
+
+- Method: registered and committed (`8ad5fb9`) before any new official graph
+  or Burn row. The statistic is a row's normalized deviation
+  `sqrt(2 (1 - cosine))` from its F32 truth row; each path's envelope is the
+  largest worst-row deviation of four official F16 graphs (CPU and MPS, eager
+  and SDPA attention), and its slack the largest leave-one-out ratio rounded
+  up to two significant digits.
+- Graphs: `scripts/generate_nemotron_h_f16_graph_reference.py` produced the
+  CPU and MPS SDPA graphs under the heavy-model lock, each differing from its
+  device's existing graph only in the attention implementation, with the
+  precision tool's 16 GiB resident budget (CPU 497 s, MPS 602 s). A first,
+  resident MPS load grew swap by 12.5 GiB in 80 s and was stopped by the
+  watchdog; its kill left both generators orphaned for about a minute, and the
+  driver now kills the process group. A control repeating the oracle's MPS
+  eager graph is not bitwise equal to the oracle (cosine `0.999686` at worst).
+- Derivation (committed `0a6a124`, before any Burn row): the largest
+  leave-one-out ratios are `1.0002`, `1.0042`, and `1.0046`, so every slack is
+  `1.1`, set by the rounding; the cosine floors are `0.999025` (prompt),
+  `0.993248` (teacher), and `0.998333` (cached), from `0.999194`, `0.994466`,
+  and `0.998635`.
+- Gate at `2cf83d7` (the library code of `fa8426e`), in its own process under
+  the lock: passed under the proposed rule. Cached decision 22 reproduces
+  `0.998558`, `1.0231` of the envelope and `0.930` of the bound; teacher rows
+  at least `0.996039` (decision 30); prompt `0.999200`; 32/32 top-1 on both
+  paths. The cached row sits further outside the four-graph envelope than any
+  official graph does (`1.0046`), so the pass rested on the rounded slack.
+- Source validation at `2cf83d7`: `cargo fmt --check`, warning-denied Clippy
+  of the Nemotron target with and without Metal, its tests on nightly (debug,
+  and release with Metal) and on MSRV 1.92.0, and the bundle-only
+  `official_f16_graphs_admit_each_other_leave_one_out`; the Python tests at
+  the record commit. Not run: the crate-wide test and Clippy matrix, the
+  documentation audit, `check_release.py`, the other checkpoints' gates (no
+  library code changed), CUDA, and coverage.
+  `scripts/tests/test_nemotron_h_envelope_record.py` recomputes the record's
+  statuses, figures, quotes, and identities.
+
+### Nemotron-H envelope decision (October 18)
+
+The [envelope decision record](acceptance/measurements/nemotron-h-envelope-decision-20261018.json)
+extends the envelope record, which stays byte-identical, with the
+maintainer's decision of October 18: the official-precision gate stays an
+open finding, and the four-graph envelope rule is not adopted, because its
+slack is `1.1` only by rounding leave-one-out ratios of at most `1.0046` and
+Burn's cached decision 22 lies at `1.023` of the envelope.
+
+- Rule: the gate again requires exact top-1 and, on each path, a cosine to
+  the F32 truth at least the worst cosine of the MPS/F16 oracle and the
+  CPU/F16 rows (prompt `0.999194145`, teacher `0.994466421`, cached
+  `0.998635047`), with no slack. Every row is measured before any is judged.
+  The compiled slacks and the leave-one-out assertion are removed; the F16
+  graph bundles are optional, and when they are supplied the gate prints the
+  four-graph envelope, each graph's leave-one-out ratio, the slack the
+  registered method would round to (marked not adopted), and Burn's worst row
+  of each path as a multiple of the envelope, all judging nothing.
+- Verdict (inferred, not measured at the new source): applied to the rows
+  measured at `2cf83d7`, whose library code the new source compiles, the gate
+  fails at cached decision 22 (`0.998557984` against `0.998635047`) and at no
+  other row. The 30B gate was not rerun; the bundle-only
+  `reports_official_f16_floors_and_four_graph_envelope` recomputes the floors
+  and the envelope from the authenticated bundles at the new source.
+- Corrections to the envelope record: at teacher decision 30 the official F16
+  graphs reach `0.999958`, `0.999346`, `0.999968`, and `0.999954` (CPU eager,
+  CPU SDPA, MPS eager, MPS SDPA), not all near `0.99996`; the teacher
+  decision-18 spike is absent only from CPU eager, so it does not follow the
+  attention path alone; the hidden traces' minimum against the F16 oracle is
+  `0.99999496`, not at least `0.999995`; and the MPS SDPA graph ran with the
+  16 GiB block budget that the reproduction command omitted.
+- Revision before integration (the first version, committed at `665762c`, is
+  pinned by digest and otherwise unchanged): next to the verdict, the record
+  lists the official F16 rows outside the floor pair that fall below a
+  restored floor, measured by the envelope round's derivation (CPU SDPA at
+  teacher decision 18, MPS SDPA and the MPS eager control at cached decision
+  22; diagnostic context, the rule unchanged), and corrects two statements:
+  the floor descriptions that called it the worst official F16 row, and its
+  own correction of the derivation tool's docstring, which did not say that
+  the edit at `530a82a` changed the tool's SHA-256 from the `2c4b5fc1...`
+  that `derivation/envelope.txt` records to `b8a487bd...`, comments and
+  docstrings only.
+- The record lists the source checks run at its documentation commit, the
+  checks not run, and their results;
+  `scripts/tests/test_nemotron_h_envelope_decision_record.py` recomputes its
+  figures, quotes, and identities and keeps the earlier records byte-identical.
 
 Record each replay as a new measurement with its exact source identity; do not
 overwrite the historical records below.

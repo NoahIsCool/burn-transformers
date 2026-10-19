@@ -1,0 +1,39 @@
+== source 4155bf0a915fb491833e1552f2e48bec7e808b24 (git archive export /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/nemo/export-4155bf0)
+== tool /private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/nemo/export-4155bf0/scripts/generate_nemotron_h_f16_graph_reference.py sha256 05bcbeafc85736a00efb7a0d4b64cc1e3f9dc70140b8fe88e5ad73d1c24b59ef
+== cmd /usr/bin/time -l ["/Volumes/bag of holding/models/transformers-acceptance/envs/muse-cfa309-py311/bin/python", "-I", "/private/tmp/claude-501/-Users-nover-repos-transformers/804c4b01-7ddc-4f18-a02c-672082928230/scratchpad/nemo/export-4155bf0/scripts/generate_nemotron_h_f16_graph_reference.py", "--model-dir", "/Volumes/bag of holding/models/nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16-a9904d24bcc1d289a1950fa9d2b978c47cf903b9", "--transformers-dir", "/Volumes/bag of holding/models/hf-transformers-reference", "--oracle-dir", "/Volumes/bag of holding/models/transformers-acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24-reference.bundle", "--precision-dir", "/Volumes/bag of holding/models/transformers-acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24-precision.bundle", "--device", "cpu", "--attn-implementation", "sdpa", "--output", "/Volumes/bag of holding/models/transformers-acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24-f16-graphs/f16-cpu-sdpa.bundle", "--max-resident-gib", "16", "--offload-dir", "/Volumes/T9/transformers-offload/nemotron-h-envelope-20261018"]
+== start 2026-10-18T08:21:14+00:00
+== start uptime 4:21  up 16 days, 13:41, 3 users, load averages: 2.81 2.51 2.89
+== start top-cpu   PID  %CPU    RSS     ELAPSED COMM
+== start top-cpu  1866 115.6  16544 02-13:38:48 /usr/libexec/pkd
+== start top-cpu 98027  21.3   8608 02-06:40:17 /System/Library/ExtensionKit/Extensions/DefaultExtensionEnablement.appex/Contents/MacOS/DefaultExtensionEnablement
+== start top-cpu 98020  14.2  10576 02-06:40:17 /System/Library/ExtensionKit/Extensions/LoginItems.appex/Contents/MacOS/LoginItems
+== start top-cpu  1960   8.6  18592 02-13:38:48 /System/Library/PrivateFrameworks/CacheDelete.framework/deleted
+== start top-cpu  1199   8.5   4640 16-13:38:50 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdbulkimport
+== start top-cpu   796   8.5  22304 16-13:39:18 /usr/sbin/coreaudiod
+== start top-cpu  3656   8.2   4144 16-13:26:44 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/Metadata.framework/Versions/A/Support/mdbulkimport
+== start top-cpu  1872   8.2   4704 02-13:38:48 /usr/libexec/trustd
+== start free-memory 36% swap-used 17487825469 bytes
+== start disk / free 11.8 GiB
+== start disk /Volumes/bag of holding free 20.3 GiB
+== start disk /Volumes/T9 free 293.6 GiB
+[transformers] `causal_conv1d_fn` is falling back to its reference PyTorch implementation because `causal_conv1d` is not installed. This is correct but much slower; install `causal_conv1d` for the optimized kernel.
+[transformers] `mamba_chunk_scan_combined` is falling back to its reference PyTorch implementation because `mamba_ssm` is not installed. This is correct but much slower; install `mamba_ssm` for the optimized kernel.
+[transformers] `causal_conv1d_update` is falling back to its reference PyTorch implementation because `causal_conv1d` is not installed. This is correct but much slower; install `causal_conv1d` for the optimized kernel.
+[transformers] `selective_state_update` is falling back to its reference PyTorch implementation because `mamba_ssm` is not installed. This is correct but much slower; install `mamba_ssm` for the optimized kernel.
+Some parameters are on the meta device because they were offloaded to the disk and cpu.
+== exit=-9 wall=10.0s min_free_pct=32 max_swap_growth_mib=2035 swapin_mib=386 pressured_swapin_mib=0 min_root_free_gib=9.9 WATCHDOG_KILLED: system volume down to 9.9 GiB free
+== end 2026-10-18T08:21:24+00:00
+== end uptime 4:21  up 16 days, 13:41, 3 users, load averages: 3.55 2.68 2.95
+== end top-cpu   PID  %CPU    RSS     ELAPSED COMM
+== end top-cpu 80435 128.6 2801408       00:10 /Library/Frameworks/Python.framework/Versions/3.11/Resources/Python.app/Contents/MacOS/Python
+== end top-cpu   554  39.6   8320 16-13:39:36 /System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/FSEvents.framework/Versions/A/Support/fseventsd
+== end top-cpu  2075  25.8   6448 02-13:38:57 /System/Library/CoreServices/TimeMachine/backupd
+== end top-cpu  6933  20.9 168608 02-18:00:59 /Applications/Firefox.app/Contents/MacOS/firefox
+== end top-cpu 80477  10.7  12112       00:00 /System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.Networking.xpc/Contents/MacOS/com.apple.WebKit.Networking
+== end top-cpu 20184   9.9 340576 03-07:20:10 /Users/nover/Library/Application Support/Claude/claude-code/2.1.295/9d6405864fdc/claude.app/Contents/MacOS/claude
+== end top-cpu   626   6.9  21392 16-13:39:36 /usr/libexec/runningboardd
+== end top-cpu   796   6.5  23008 16-13:39:28 /usr/sbin/coreaudiod
+== end free-memory 32% swap-used 19630852669 bytes
+== end disk / free 9.9 GiB
+== end disk /Volumes/bag of holding free 20.3 GiB
+== end disk /Volumes/T9 free 293.6 GiB

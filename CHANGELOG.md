@@ -860,6 +860,38 @@ earlier row-by-row or per-chunk algorithm, which each test keeps as an oracle.
   `scripts/tests/test_qwen35_rebaseline_record.py` and
   `tests/acceptance_records.rs`
   ([record](acceptance/measurements/qwen3.5-0.8b-metal-rebaseline-20261018.json)).
+- A Nemotron-H envelope round evaluated replacing the Nemotron-H
+  official-precision gate's floor (the worst cosine of two official F16
+  graphs, no slack) with an envelope over four official F16 graphs (CPU and
+  MPS, eager and SDPA attention) and per-path leave-one-out slacks from those
+  graphs alone, on the normalized deviation `sqrt(2 (1 - cosine))`: new
+  `scripts/generate_nemotron_h_f16_graph_reference.py` and
+  `scripts/derive_nemotron_h_envelope.py` and a strict reader of the two new
+  SDPA bundles. The method and the derivation were committed before any Burn
+  row; every slack is `1.1`, set by rounding largest ratios of `1.0002` to
+  `1.0046`. Under that rule the gate passed at `2cf83d7`, cached decision 22
+  at `0.998558` against `0.998333` (`1.023` of the envelope), checked by
+  `scripts/tests/test_nemotron_h_envelope_record.py`
+  ([record](acceptance/measurements/nemotron-h-envelope-20261018.json)).
+- The maintainer did not adopt that rule (October 18): the Nemotron-H gate
+  judges by its two official F16 floors again and fails at cached decision 22
+  (`0.998558` against `0.998635`), an open finding inferred from the rows
+  measured at `2cf83d7`. The four-graph envelope is a printed diagnostic
+  (Burn's worst row of each path as a multiple of it, the leave-one-out
+  ratios, and the slack the method would round to, marked not adopted), the
+  F16 graph bundles are optional for the gate, and the bundle-only test prints
+  the floors and the envelope. The decision record corrects the envelope
+  record's teacher decision-30, decision-18 spike, hidden-trace, and MPS
+  budget statements, checked by
+  `scripts/tests/test_nemotron_h_envelope_decision_record.py`
+  ([record](acceptance/measurements/nemotron-h-envelope-decision-20261018.json)).
+  A revision of that record, before integration, lists the three other
+  official F16 rows below a restored floor (CPU SDPA at teacher decision 18,
+  MPS SDPA and the MPS eager control at cached decision 22) as diagnostic
+  context, and discloses the derivation tool's comment-only digest change at
+  `530a82a`; the floor descriptions now name only the two calibrating
+  evaluations, and the model tables say the current-source verdict is
+  inferred. No checkpoint is promoted.
 - The configuration fuzz target covers all eleven family parsers without
   count filters, and the modular-spec generator draws clamped experts,
   embedding scales, and logit caps.

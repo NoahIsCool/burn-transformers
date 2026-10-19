@@ -1,0 +1,12 @@
+2026-10-18T07:33:53Z waiting for the lock (mps-sdpa)
+2026-10-18T08:19:53Z lock acquired for mps-sdpa
+2026-10-18T08:21:14Z mps-sdpa exit=0
+2026-10-18T08:21:14Z lock released
+2026-10-18T08:21:14Z waiting for the lock (cpu-sdpa)
+2026-10-18T08:21:14Z lock acquired for cpu-sdpa
+2026-10-18T08:21:24Z cpu-sdpa exit=0
+2026-10-18T08:21:24Z lock released
+2026-10-18T08:21:24Z waiting for the lock (mps-eager-control)
+2026-10-18T08:21:24Z lock acquired for mps-eager-control
+Terminated: 15
+2026-10-18T08:22:29Z lock released

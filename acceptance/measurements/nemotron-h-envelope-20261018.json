@@ -1,0 +1,767 @@
+{
+ "schema_version": 1,
+ "scope": "nemotron_h_official_precision_envelope_round_not_a_support_declaration",
+ "date_utc": "2026-10-18",
+ "advertised_supported": false,
+ "passed": true,
+ "passed_note": "Every run of the round passed: the bundle-only leave-one-out re-derivation and the Nemotron-H Metal/F16 official-precision gate under the new rule. That is a gate pass, not a support claim.",
+ "base_commit": "fa8426e5dc8cbcb269c29e211b119ea0acd61054",
+ "source_commit": "2cf83d7030867dae96b7b23d2a8bbdc3efe06fc2",
+ "code_head": "2354b22c1f7dd005da22ad7a9b95c0ae408f32f5",
+ "documentation_commit": "bae4f05aeab3b7542894d6e98362650d516956ec",
+ "head_note": "The gate and bundle-only binary was built from 2cf83d7 in the clean worktree; its Rust sources equal the code head 2354b22 (the commit after it changes only NEMOTRON_H_ACCEPTANCE.md). Its library code (src/, Cargo.*) equals the base fa8426e: the round changes only tests/, scripts/, documentation, and this campaign. Later commits change only documentation, this record, its campaign directory, and its Python test.",
+ "campaign_directory": "nemotron-h-envelope-20261018",
+ "host": "Apple M3 Max, 96 GiB unified memory, macOS 27.0.1 (26A434), shared with desktop applications and other sessions; external volumes /Volumes/bag of holding and /Volumes/T9 mounted throughout",
+ "harness": "Official graphs: generator/run_locked.sh and generator/run_graph.py, one graph per process under /Users/nover/repos/transformers-worktrees/.heavy-model.lock (mkdir, retried every 60 s, rmdir in a trap), from a git archive export of the generator commit, under /usr/bin/time -l with the earlier rounds' memory watchdog plus a 10 GiB system-volume reserve; each log records uptime, the processes using the most CPU, free memory, swap, and free disk at start and end, and every timed phase in a manifest carries a load-average and top-process sample. Burn: gates/run_locked_gate.sh and gates/run_gate.py, the prebuilt release binary, one test per process from the clean worktree at the source commit (`dirty` counts changes outside this campaign directory), the real-checkpoint gate under the same lock and watchdog, the bundle-only test without the lock.",
+ "method": {
+  "file": "derivation/method.txt",
+  "commit": "8ad5fb96577d8f54c04109b2f1d2c53cfa1c1682",
+  "registered_utc": "2026-10-18T07:27:09Z",
+  "summary": "Four official F16 graphs {cpu, mps} x {eager, sdpa}; per row the normalized deviation sqrt(2 (1 - cosine)) from the F32 truth row; per path the envelope E = largest worst-row deviation, each graph's leave-one-out ratio over the largest other graph, and the slack s = the largest ratio rounded up to two significant digits; a Burn row passes when its deviation is at most s E (cosine at least 1 - (s E)^2 / 2) with exact top-1. Registered before any new official graph or Burn row of the round."
+ },
+ "graphs": [
+  {
+   "graph": "cpu-eager",
+   "source": "float16 rows of the precision bundle (October 16)",
+   "bundle": "/Volumes/bag of holding/models/transformers-acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24-precision.bundle",
+   "worst_rows": {
+    "prompt": {
+     "normalized_deviation": 0.04014610404951256,
+     "cosine": 0.9991941451648229,
+     "decision": 0,
+     "leave_one_out": 1.000221775877657
+    },
+    "teacher": {
+     "normalized_deviation": 0.05230606613975339,
+     "cosine": 0.9986320377224919,
+     "decision": 27,
+     "leave_one_out": 0.4951351399262555
+    },
+    "cached": {
+     "normalized_deviation": 0.0424986044470692,
+     "cosine": 0.9990969343100258,
+     "decision": 26,
+     "leave_one_out": 0.8096778691215358
+    }
+   },
+   "reference_json_sha256": "5da4427df4c882d3c4d42b5c2d37c2c61a4837597c944b9c67a23903a7ce73f9"
+  },
+  {
+   "graph": "cpu-sdpa",
+   "source": "generator/logs/cpu-sdpa.log",
+   "bundle": "/Volumes/bag of holding/models/transformers-acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24-f16-graphs/f16-cpu-sdpa.bundle",
+   "worst_rows": {
+    "prompt": {
+     "normalized_deviation": 0.040006495831980834,
+     "cosine": 0.9991997401456229,
+     "decision": 0,
+     "leave_one_out": 0.9965224964953125
+    },
+    "teacher": {
+     "normalized_deviation": 0.10563997971855472,
+     "cosine": 0.9944200973425317,
+     "decision": 18,
+     "leave_one_out": 1.0041770053811698
+    },
+    "cached": {
+     "normalized_deviation": 0.040006495831980834,
+     "cosine": 0.9991997401456229,
+     "decision": 0,
+     "leave_one_out": 0.7621985408156549
+    }
+   },
+   "reference_json_sha256": "96253a039c3fb3580cf9fdd2bc12cfb88d6dad265f445f76f6559c40cb2d7f53",
+   "files_sha256": {
+    "float16-cached-logits.f32le": "de2f89005459473d73a3c504f6a547e36b8084116c97428abd8d34d170f174e5",
+    "float16-prompt-logits.f32le": "2693474fbaa46efa994df55c7d0385ed53897944c0a6b83f45e93f02a60edef6",
+    "float16-teacher-logits.f32le": "ac2ea1d0ef480472d23583cddcd5e1fcac833a9b853e7857d4d86608e22cff4a",
+    "reference.json": "96253a039c3fb3580cf9fdd2bc12cfb88d6dad265f445f76f6559c40cb2d7f53"
+   },
+   "generator_commit": "c25a2cb48eacfe5ff0a6cf543795175cd745a4ad",
+   "generator_sha256": "81f5bd7735e79fde9e0d10bab5049bafa6803e8e469e3f0d9b44d0898e97b48f",
+   "resolved": {
+    "attention_implementation": "sdpa",
+    "experts_implementation": "grouped_mm"
+   },
+   "experts_implementation_requested": null,
+   "max_resident_gib": 16.0,
+   "offloaded_blocks": 23,
+   "offload_execution_devices": [
+    "cpu"
+   ],
+   "self_check": {
+    "finite": true,
+    "graph": {
+     "attention_implementation": "sdpa",
+     "experts_implementation": "grouped_mm"
+    },
+    "harness_bitwise_equal": true,
+    "offloaded_bitwise_equal": true
+   },
+   "log": "generator/logs/cpu-sdpa.log",
+   "wall_seconds": 497.3,
+   "peak_memory_footprint_bytes": 22102386960,
+   "max_swap_growth_mib": 0,
+   "phase_seconds": {
+    "self-check": 1.247,
+    "load": 141.67,
+    "evaluate": 346.749
+   },
+   "host_load_average_at_start": [
+    1.93,
+    2.72,
+    2.97
+   ]
+  },
+  {
+   "graph": "mps-eager",
+   "source": "the authenticated MPS/F16 oracle (September 8, macOS 15.7.9)",
+   "bundle": "/Volumes/bag of holding/models/transformers-acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24-reference.bundle",
+   "worst_rows": {
+    "prompt": {
+     "normalized_deviation": 0.040137202586182315,
+     "cosine": 0.9991945024842779,
+     "decision": 0,
+     "leave_one_out": 0.9997782732959773
+    },
+    "teacher": {
+     "normalized_deviation": 0.10520055642825187,
+     "cosine": 0.9944664214635931,
+     "decision": 18,
+     "leave_one_out": 0.9958403694181543
+    },
+    "cached": {
+     "normalized_deviation": 0.05224849850859367,
+     "cosine": 0.9986350472017987,
+     "decision": 22,
+     "leave_one_out": 0.9954315791693079
+    }
+   },
+   "reference_json_sha256": "bd3abb417f2fee82d1bef8bb654ca846fa4816351b1d9d7d0d057105f92de196"
+  },
+  {
+   "graph": "mps-sdpa",
+   "source": "generator/logs/mps-sdpa.log",
+   "bundle": "/Volumes/bag of holding/models/transformers-acceptance/nemotron-3.5-lightning-30b-a3b-a9904d24-f16-graphs/f16-mps-sdpa.bundle",
+   "worst_rows": {
+    "prompt": {
+     "normalized_deviation": 0.039961995444786375,
+     "cosine": 0.9992015194600354,
+     "decision": 0,
+     "leave_one_out": 0.9954140355811582
+    },
+    "teacher": {
+     "normalized_deviation": 0.10482584732844122,
+     "cosine": 0.9945057708659372,
+     "decision": 18,
+     "leave_one_out": 0.992293330685196
+    },
+    "cached": {
+     "normalized_deviation": 0.05248828709271538,
+     "cosine": 0.9986224898590363,
+     "decision": 22,
+     "leave_one_out": 1.0045893870822387
+    }
+   },
+   "reference_json_sha256": "4298f895b7ed5f174d15008398359e7240c238f89112915860897618b974fba7",
+   "files_sha256": {
+    "float16-cached-logits.f32le": "d4cb3139faa109835c00b83be79c1174663ff4d68555dcdd4e6b16c9aad2ec8f",
+    "float16-prompt-logits.f32le": "250f59e53528cf60fc7fd68f9cd45e82ebabf373e4b94b82b0c62cf213071af3",
+    "float16-teacher-logits.f32le": "328f593f52d21c875e7e1688f689f6195028a90107cbaf63aadc054b8413e4e6",
+    "reference.json": "4298f895b7ed5f174d15008398359e7240c238f89112915860897618b974fba7"
+   },
+   "generator_commit": "c25a2cb48eacfe5ff0a6cf543795175cd745a4ad",
+   "generator_sha256": "81f5bd7735e79fde9e0d10bab5049bafa6803e8e469e3f0d9b44d0898e97b48f",
+   "resolved": {
+    "attention_implementation": "sdpa",
+    "experts_implementation": "eager"
+   },
+   "experts_implementation_requested": "eager",
+   "max_resident_gib": 16.0,
+   "offloaded_blocks": 23,
+   "offload_execution_devices": [
+    "mps"
+   ],
+   "self_check": {
+    "finite": true,
+    "graph": {
+     "attention_implementation": "sdpa",
+     "experts_implementation": "eager"
+    },
+    "harness_bitwise_equal": true,
+    "offloaded_bitwise_equal": true
+   },
+   "log": "generator/logs/mps-sdpa.log",
+   "wall_seconds": 602.2,
+   "peak_memory_footprint_bytes": 35652383800,
+   "max_swap_growth_mib": 0,
+   "phase_seconds": {
+    "self-check": 2.615,
+    "load": 163.42,
+    "evaluate": 425.981
+   },
+   "host_load_average_at_start": [
+    4.59,
+    2.62,
+    2.49
+   ]
+  }
+ ],
+ "controls": [
+  {
+   "graph": "mps-eager",
+   "repeats": "the MPS/F16 oracle",
+   "adopted": false,
+   "bundle": "/Volumes/bag of holding/models/transformers-acceptance/nemotron-h-envelope-20261018/f16-mps-eager-control.bundle",
+   "reference_json_sha256": "a5f62fda6383a541c4956e6e920e475241b8c295191c57cdaa7c4b96fd4171bf",
+   "files_sha256": {
+    "float16-cached-logits.f32le": "c92a06e4577498b2a09424f56ea4351cc898c0643e8b177ed9ae4f7c8de57039",
+    "float16-prompt-logits.f32le": "aa6c60531742a3555e21ce457bca701f9d18d8f4f9689418777eba80f2de1f0c",
+    "float16-teacher-logits.f32le": "95ed7ea2e0cfbccc003490308cadcafbb7ed33fa89aaef5ddbd8d4eda7a605ef",
+    "reference.json": "a5f62fda6383a541c4956e6e920e475241b8c295191c57cdaa7c4b96fd4171bf"
+   },
+   "log": "generator/logs/mps-eager-control.log",
+   "wall_seconds": 2659.3,
+   "peak_memory_footprint_bytes": 35703174392,
+   "platform": "macOS-27.0.1-arm64-arm-64bit",
+   "paths": {
+    "prompt": {
+     "cosine": 0.9991981183241847,
+     "decision": 0,
+     "normalized_deviation": 0.04004701426611719,
+     "minimum_cosine_to_the_oracle": 0.9999995880909925,
+     "bitwise_equal_to_the_oracle": false
+    },
+    "teacher": {
+     "cosine": 0.9944822879133529,
+     "decision": 18,
+     "normalized_deviation": 0.10504962719255206,
+     "minimum_cosine_to_the_oracle": 0.999686217705879,
+     "bitwise_equal_to_the_oracle": false
+    },
+    "cached": {
+     "cosine": 0.9985956044836797,
+     "decision": 22,
+     "normalized_deviation": 0.05299802857315209,
+     "minimum_cosine_to_the_oracle": 0.999869701567415,
+     "bitwise_equal_to_the_oracle": false
+    }
+   },
+   "replacing_the_oracle": {
+    "slacks": {
+     "prompt": 1.1,
+     "teacher": 1.1,
+     "cached": 1.1
+    },
+    "bounds": {
+     "prompt": 0.044160714454463824,
+     "teacher": 0.1162039776904102,
+     "cached": 0.0582978314304673
+    },
+    "cosine_floors": {
+     "prompt": 0.9990249156494356,
+     "teacher": 0.9932483177844633,
+     "cached": 0.9983006814252524
+    }
+   },
+   "added_as_a_fifth_graph": {
+    "slacks": {
+     "prompt": 1.1,
+     "teacher": 1.1,
+     "cached": 1.1
+    },
+    "bounds": {
+     "prompt": 0.044160714454463824,
+     "teacher": 0.1162039776904102,
+     "cached": 0.0582978314304673
+    },
+    "cosine_floors": {
+     "prompt": 0.9990249156494356,
+     "teacher": 0.9932483177844633,
+     "cached": 0.9983006814252524
+    }
+   }
+  }
+ ],
+ "attempts": [
+  {
+   "attempt": 1,
+   "generator_commit": "4155bf0a915fb491833e1552f2e48bec7e808b24",
+   "logs": "generator/logs/attempt-1/",
+   "runs": [
+    {
+     "label": "mps-sdpa",
+     "status": -9,
+     "wall_seconds": 80.4,
+     "killed": "swap grew by 12478 MiB",
+     "max_swap_growth_mib": 12478,
+     "min_root_free_gib": 11.8
+    },
+    {
+     "label": "cpu-sdpa",
+     "status": -9,
+     "wall_seconds": 10.0,
+     "killed": "system volume down to 9.9 GiB free",
+     "max_swap_growth_mib": 2035,
+     "min_root_free_gib": 9.9
+    }
+   ],
+   "account": "The MPS SDPA graph loaded the whole F16 model onto MPS; swap grew by 12,478 MiB in 80 s and the system volume fell from 22.6 to 11.8 GiB, and the watchdog stopped it. The CPU SDPA graph then started into that swap and was stopped 10 s later when the system volume reached 9.9 GiB. Both kills reached only /usr/bin/time: the two generators kept running until they were stopped by hand about a minute later (system volume at 5.2 GiB, recovering to 20.3 GiB as the swap files shrank); the queued control was stopped at its start gate. The driver now kills the process group, waits for 70% free memory and 15 GiB on the system volume before each graph, and reports the real exit status (attempt 1's driver.log shows exit=0 for killed runs, a $? read after a command substitution). No bundle was published by attempt 1."
+  }
+ ],
+ "derivation": {
+  "result": "derivation/envelope.json",
+  "tables": "derivation/envelope.txt",
+  "assessment": "derivation/assessment.txt",
+  "commit": "0a6a1245b79868cecf3df17168af07f1bd37e458",
+  "derived_utc": "2026-10-18T09:29:39Z",
+  "assessed_utc": "2026-10-18T09:30:46Z",
+  "graph_count": 4,
+  "slacks": {
+   "prompt": 1.1,
+   "teacher": 1.1,
+   "cached": 1.1
+  },
+  "largest_ratio": {
+   "prompt": 1.000221775877657,
+   "teacher": 1.0041770053811698,
+   "cached": 1.0045893870822387
+  },
+  "largest_ratio_graph": {
+   "prompt": "cpu-eager",
+   "teacher": "cpu-sdpa",
+   "cached": "mps-sdpa"
+  },
+  "envelope": {
+   "prompt": 0.04014610404951256,
+   "teacher": 0.10563997971855472,
+   "cached": 0.05248828709271538
+  },
+  "envelope_graph": {
+   "prompt": "cpu-eager",
+   "teacher": "cpu-sdpa",
+   "cached": "mps-sdpa"
+  },
+  "bound": {
+   "prompt": 0.044160714454463824,
+   "teacher": 0.1162039776904102,
+   "cached": 0.05773711580198692
+  },
+  "cosine_floor": {
+   "prompt": 0.9990249156494356,
+   "teacher": 0.9932483177844633,
+   "cached": 0.998333212729434
+  },
+  "previous_floor": {
+   "prompt": 0.999194145,
+   "teacher": 0.994466421,
+   "cached": 0.998635047
+  },
+  "reported_not_adopted": {
+   "pooled_slack": 1.1,
+   "pooled_largest_ratio": 1.0045893870822387,
+   "pooled_largest_path": "cached",
+   "deficit_slacks": {
+    "prompt": 1.1,
+    "teacher": 1.1,
+    "cached": 1.1
+   },
+   "largest_deficit_ratio": 1.009199836638268,
+   "mean_slacks": {
+    "prompt": 1.1,
+    "teacher": 1.6,
+    "cached": 1.1
+   }
+  }
+ },
+ "burn": {
+  "commit": "2cf83d7030867dae96b7b23d2a8bbdc3efe06fc2",
+  "library_code_equals": "fa8426e5dc8cbcb269c29e211b119ea0acd61054",
+  "paths": {
+   "prompt": {
+    "rows": 1,
+    "minimum_cosine": 0.999200341318,
+    "decision": 0,
+    "normalized_deviation": 0.03999147,
+    "of_envelope": 0.9961,
+    "of_bound": 0.9056,
+    "bound": 0.04416071,
+    "cosine_floor": 0.999024916,
+    "cosines": [
+     0.999200341
+    ]
+   },
+   "teacher": {
+    "rows": 32,
+    "minimum_cosine": 0.996039426551,
+    "decision": 30,
+    "normalized_deviation": 0.08900083,
+    "of_envelope": 0.8425,
+    "of_bound": 0.7659,
+    "bound": 0.116204,
+    "cosine_floor": 0.993248318,
+    "cosines": [
+     0.999200334,
+     0.999946514,
+     0.999985399,
+     0.99998975,
+     0.99975392,
+     0.999735847,
+     0.999960823,
+     0.999963033,
+     0.999964274,
+     0.999953542,
+     0.999969829,
+     0.999973157,
+     0.999966204,
+     0.999979413,
+     0.999970931,
+     0.999983099,
+     0.999977237,
+     0.999982358,
+     0.999972673,
+     0.999456956,
+     0.999928397,
+     0.999967817,
+     0.999966758,
+     0.999982363,
+     0.999981087,
+     0.999839176,
+     0.999929462,
+     0.999971241,
+     0.999183797,
+     0.999235055,
+     0.996039427,
+     0.99911699
+    ]
+   },
+   "cached": {
+    "rows": 32,
+    "minimum_cosine": 0.998557984489,
+    "decision": 22,
+    "normalized_deviation": 0.05370318,
+    "of_envelope": 1.0231,
+    "of_bound": 0.9301,
+    "bound": 0.05773712,
+    "cosine_floor": 0.998333213,
+    "cosines": [
+     0.999200341,
+     0.999947929,
+     0.999962639,
+     0.999991313,
+     0.999989406,
+     0.99999131,
+     0.999296741,
+     0.999553919,
+     0.999809607,
+     0.999882415,
+     0.999900223,
+     0.99995068,
+     0.999428652,
+     0.99993162,
+     0.999949768,
+     0.9999346,
+     0.999909861,
+     0.999851144,
+     0.99986302,
+     0.999798883,
+     0.999818004,
+     0.999930872,
+     0.998557984,
+     0.99990184,
+     0.999852803,
+     0.999960483,
+     0.999963994,
+     0.999536955,
+     0.999937522,
+     0.999927677,
+     0.999845245,
+     0.999875974
+    ]
+   }
+  },
+  "top1": "32/32 on the teacher and cached paths and 1/1 on the prompt row: the gate reported no top-1 or bound violation",
+  "summary_line": "Nemotron 3.5 official corresponding-path parity: load_seconds=78.295, stateless_prompt_seconds=0.998, teacher_seconds=0.463, cached_seconds=4.201, f16_envelope_floors[prompt,teacher,cached]=[0.999024916, 0.993248318, 0.998333213], f32_truth_prompt_cosine=0.999200341318, f32_truth_teacher_minimum=0.996039426551@30, f32_truth_cached_minimum=0.998557984489@22, f16_oracle_prompt_cosine=0.999997922454, f16_oracle_teacher_minimum=0.994472478923, f16_oracle_cached_minimum=0.999700840921, stateless_hidden_minimum_cosine=0.999996915653@11, cached_prefill_hidden_minimum_cosine=0.999996915653@11, cached_decode_hidden_minimum_cosine=0.999994958685@27, stateless_hidden_sha256=177e9af9013ce345644de1cfb8b1f293b91ca642ab76e4461dedfed1d55e6d35, cached_prefill_hidden_sha256=177e9af9013ce345644de1cfb8b1f293b91ca642ab76e4461dedfed1d55e6d35, cached_decode_hidden_sha256=4248a09634d33a837dbb68ce17d7b23ff6b211c6555f4c9dc4fc8946aaf4631f, official_crossed_path_minimum_diagnostic=0.921504794757, decisions_per_path=32, total_seconds=272.514"
+ },
+ "binaries": [
+  {
+   "path": "/Volumes/bag of holding/cargo-targets/tfm-nemotron-envelope/release/deps/nemotron_h_artifacts-4cd54efee0f15525",
+   "sha256": "50c9a3dfa10a47e30d64cbccd12730dfad03956e6269014954c7cb6fc2a965a3"
+  }
+ ],
+ "build_log": "gates/logs/build.log",
+ "runs": [
+  {
+   "name": "bundles.official_f16_graphs_admit_each_other_leave_one_out",
+   "test": "official_f16_graphs_admit_each_other_leave_one_out",
+   "kind": "bundle-only",
+   "exit": 0,
+   "result": "pass",
+   "expected": "pass",
+   "heavy_model_lock": false,
+   "wall_seconds": 5.0,
+   "peak_memory_footprint_bytes": 265011896,
+   "max_swap_growth_mib": 0,
+   "log": "gates/logs/bundles.official_f16_graphs_admit_each_other_leave_one_out.log"
+  },
+  {
+   "name": "nemotron-h.f16.metal.official-precision",
+   "test": "compares_pinned_nemotron_f16_with_official_base_reference",
+   "kind": "real-checkpoint",
+   "exit": 0,
+   "result": "pass",
+   "expected": "pass",
+   "heavy_model_lock": true,
+   "wall_seconds": 275.9,
+   "peak_memory_footprint_bytes": 69251337096,
+   "max_swap_growth_mib": 0,
+   "log": "gates/logs/nemotron-h.f16.metal.official-precision.log"
+  }
+ ],
+ "tallies": {
+  "runs": 2,
+  "pass": 2,
+  "fail": 0,
+  "as_expected": 2
+ },
+ "findings": [
+  {
+   "id": "envelope-slacks-are-rounding",
+   "status": "settled: the compiled slacks are the derivation's",
+   "summary": "From the four official graphs alone, the largest leave-one-out ratios are 1.0002 (prompt, CPU eager), 1.0042 (teacher, CPU SDPA), and 1.0046 (cached, MPS SDPA), so every slack is 1.1, the rounding up to two significant digits rather than a measured spread. The worst rows coincide across graphs (teacher decision 18 in three graphs, cached decision 22 in both MPS graphs), so the graphs agree at their spikes; the per-path slack rests on four ratios, twelve pooled, where the envelope round's rest on 80 to 128. The cosine floors become 0.999025 (prompt), 0.993248 (teacher), and 0.998333 (cached), from 0.999194, 0.994466, and 0.998635.",
+   "evidence": [
+    {
+     "log": "derivation/envelope.txt",
+     "quotes": [
+      "- envelope E 4.014610e-02 (cpu-eager decision 0); slack 1.1 from 1.0002 (cpu-eager); bound 4.416071e-02, cosine floor 0.999024916",
+      "- envelope E 1.056400e-01 (cpu-sdpa decision 18); slack 1.1 from 1.0042 (cpu-sdpa); bound 1.162040e-01, cosine floor 0.993248318",
+      "- envelope E 5.248829e-02 (mps-sdpa decision 22); slack 1.1 from 1.0046 (mps-sdpa); bound 5.773712e-02, cosine floor 0.998333213"
+     ]
+    },
+    {
+     "log": "gates/logs/bundles.official_f16_graphs_admit_each_other_leave_one_out.log",
+     "quotes": [
+      "Nemotron official F16 envelope Cached: envelope 5.248829e-2 (mps-sdpa), slack 1.1, bound 5.773712e-2, cosine floor 0.998333213"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "gate-passes-on-the-rounded-slack",
+   "status": "passed; the rule awaits review",
+   "summary": "The Nemotron-H Metal/F16 official-precision gate passes under the envelope rule. Cached decision 22 reproduces the envelope round's failing cosine 0.998557984 to every printed digit; it is 1.0231 of the four-graph envelope and 0.930 of the bound. No official graph lies further than 1.0046 outside the envelope of the other three, so the pass depends on the slack's rounding (a 1.0046 ratio rounded to 1.1). Teacher rows reach at least 0.996039 (decision 30, 0.84 of the envelope), the prompt row 0.999200 (0.996 of the envelope), with exact top-1 on every row.",
+   "evidence": [
+    {
+     "log": "gates/logs/nemotron-h.f16.metal.official-precision.log",
+     "quotes": [
+      "Nemotron Burn F16 against the F32 truth Cached: 32 rows, minimum cosine 0.998557984489 at decision 22 (delta 5.370318e-2, 1.0231 of the envelope, 0.9301 of the bound 5.773712e-2; floor 0.998333213)",
+      "Nemotron Burn F16 against the F32 truth Teacher: 32 rows, minimum cosine 0.996039426551 at decision 30 (delta 8.900083e-2, 0.8425 of the envelope, 0.7659 of the bound 1.162040e-1; floor 0.993248318)",
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 51 filtered out; finished in 272.52s"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "teacher-decision-30",
+   "status": "open: deserves a targeted look",
+   "summary": "Burn's teacher row 30 is 0.996039 from F32 (0.997612 at 9a9c730, before the once-rounded SiLU), where every official F16 graph is near 0.99996. The per-path bound admits it (the teacher envelope is set by decision 18), so it is a Burn-side deviation the gate does not explain.",
+   "evidence": [
+    {
+     "log": "gates/logs/nemotron-h.f16.metal.official-precision.log",
+     "quotes": [
+      "Nemotron 3.5 official corresponding-path parity: load_seconds=78.295, stateless_prompt_seconds=0.998, teacher_seconds=0.463, cached_seconds=4.201, f16_envelope_floors[prompt,teacher,cached]=[0.999024916, 0.993248318, 0.998333213], f32_truth_prompt_cosine=0.999200341318, f32_truth_teacher_minimum=0.996039426551@30, f32_truth_cached_minimum=0.998557984489@22, f16_oracle_prompt_cosine=0.999997922454, f16_oracle_teacher_minimum=0.994472478923, f16_oracle_cached_minimum=0.999700840921, stateless_hidden_minimum_cosine=0.999996915653@11, cached_prefill_hidden_minimum_cosine=0.999996915653@11, cached_decode_hidden_minimum_cosine=0.999994958685@27, stateless_hidden_sha256=177e9af9013ce345644de1cfb8b1f293b91ca642ab76e4461dedfed1d55e6d35, cached_prefill_hidden_sha256=177e9af9013ce345644de1cfb8b1f293b91ca642ab76e4461dedfed1d55e6d35, cached_decode_hidden_sha256=4248a09634d33a837dbb68ce17d7b23ff6b211c6555f4c9dc4fc8946aaf4631f, official_crossed_path_minimum_diagnostic=0.921504794757, decisions_per_path=32, total_seconds=272.514"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "mps-control-not-bitwise",
+   "status": "recorded; cause not separated",
+   "summary": "Repeating the oracle's MPS eager graph with this round's tool (16 GiB budget, macOS 27.0.1; the oracle ran resident on macOS 15.7.9) is not bitwise equal to the oracle: cosine to it at least 0.999999588 (prompt), 0.999686218 (teacher, decision 28), 0.999869702 (cached, decision 8). Its cached decision 22 (0.998595604) lies 1.0097 of the envelope out. Measured: the difference; inferred, not measured: the OS change rather than offload, since the tiny official model shows offload bitwise neutral on MPS. Replacing the oracle with it, or adding it, would set the cached floor to 0.998300681; it is reported, not adopted.",
+   "evidence": [
+    {
+     "log": "derivation/envelope.txt",
+     "quotes": [
+      "- teacher: max delta 1.050496e-01 at decision 18 (cosine 0.994482288); minimum cosine to mps-eager 0.999686218, bitwise equal False",
+      "- cached: max delta 5.299803e-02 at decision 22 (cosine 0.998595604); minimum cosine to mps-eager 0.999869702, bitwise equal False"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "teacher-spike-is-attention-path",
+   "status": "measured",
+   "summary": "The teacher decision-18 spike (cosine near 0.9944) appears in CPU SDPA, MPS eager, and MPS SDPA but not in CPU eager (0.998632 at decision 27), so it follows the attention path, not the device. CPU SDPA's mean teacher deviation is 1.59 times the largest of the other graphs' (reported, not gated).",
+   "evidence": [
+    {
+     "log": "derivation/envelope.txt",
+     "quotes": [
+      "- cpu-sdpa: max delta 1.056400e-01 at decision 18 (cosine 0.994420097), mean delta 2.886415e-02; leave-one-out 1.0042 (deficit 1.0084, mean 1.5945)"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "resident-mps-load-swaps",
+   "status": "fixed in the driver; recorded",
+   "summary": "A resident F16 load of the 30B model onto MPS grew swap by 12.5 GiB in 80 s on this host and left the system volume too full for the next graph; the watchdog's kill orphaned both generators. MPS graphs now use the CPU's 16 GiB block budget with offloaded blocks executing on MPS, and the driver kills the process group.",
+   "evidence": [
+    {
+     "log": "generator/logs/attempt-1/mps-sdpa.log",
+     "quotes": [
+      "== exit=-9 wall=80.4s min_free_pct=35 max_swap_growth_mib=12478 swapin_mib=254 pressured_swapin_mib=0 min_root_free_gib=11.8 WATCHDOG_KILLED: swap grew by 12478 MiB"
+     ]
+    },
+    {
+     "log": "generator/logs/attempt-1/cpu-sdpa.log",
+     "quotes": [
+      "== exit=-9 wall=10.0s min_free_pct=32 max_swap_growth_mib=2035 swapin_mib=386 pressured_swapin_mib=0 min_root_free_gib=9.9 WATCHDOG_KILLED: system volume down to 9.9 GiB free"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "closer-to-the-f16-oracle",
+   "status": "measured; attribution inferred",
+   "summary": "Against the F16 oracle Burn moved closer than at 9a9c730 (cached minimum 0.999701 from 0.999299, hidden traces at least 0.999995 from 0.999802), while its cached decision 22 moved further from F32. Attributed to the once-rounded SiLU matching the official F.silu by the envelope round's isolate control (that site alone restores the 9a9c730 statistics); not re-measured here.",
+   "evidence": [
+    {
+     "log": "gates/logs/nemotron-h.f16.metal.official-precision.log",
+     "quotes": [
+      "Nemotron 3.5 official corresponding-path parity: load_seconds=78.295, stateless_prompt_seconds=0.998, teacher_seconds=0.463, cached_seconds=4.201, f16_envelope_floors[prompt,teacher,cached]=[0.999024916, 0.993248318, 0.998333213], f32_truth_prompt_cosine=0.999200341318, f32_truth_teacher_minimum=0.996039426551@30, f32_truth_cached_minimum=0.998557984489@22, f16_oracle_prompt_cosine=0.999997922454, f16_oracle_teacher_minimum=0.994472478923, f16_oracle_cached_minimum=0.999700840921, stateless_hidden_minimum_cosine=0.999996915653@11, cached_prefill_hidden_minimum_cosine=0.999996915653@11, cached_decode_hidden_minimum_cosine=0.999994958685@27, stateless_hidden_sha256=177e9af9013ce345644de1cfb8b1f293b91ca642ab76e4461dedfed1d55e6d35, cached_prefill_hidden_sha256=177e9af9013ce345644de1cfb8b1f293b91ca642ab76e4461dedfed1d55e6d35, cached_decode_hidden_sha256=4248a09634d33a837dbb68ce17d7b23ff6b211c6555f4c9dc4fc8946aaf4631f, official_crossed_path_minimum_diagnostic=0.921504794757, decisions_per_path=32, total_seconds=272.514"
+     ]
+    }
+   ]
+  }
+ ],
+ "decisions": [
+  {
+   "id": "nemotron-envelope-rule",
+   "user_review": true,
+   "implemented": true,
+   "what": "The two-graph floor is replaced by the registered four-graph envelope rule with per-path slacks 1.1/1.1/1.1, the envelope computed in the test from authenticated rows, a fail-closed reader of the two SDPA bundles, a bundle-only re-derivation test, and every row measured before judgment. Implemented because the derivation is sound by the registered method; adopting it as the gate's rule awaits the maintainer.",
+   "commits": [
+    "8ad5fb96577d8f54c04109b2f1d2c53cfa1c1682",
+    "4155bf0a915fb491833e1552f2e48bec7e808b24",
+    "8ef285eb5c3713abac69604767dd419b4dd1e19c",
+    "c25a2cb48eacfe5ff0a6cf543795175cd745a4ad",
+    "b4e2bdbeb6e011d77ba29b0e10903593bf59925c",
+    "0a6a1245b79868cecf3df17168af07f1bd37e458",
+    "2354b22c1f7dd005da22ad7a9b95c0ae408f32f5",
+    "2cf83d7030867dae96b7b23d2a8bbdc3efe06fc2",
+    "bae4f05aeab3b7542894d6e98362650d516956ec"
+   ]
+  }
+ ],
+ "awaiting_maintainer": [
+  "Adopting the four-graph envelope rule for Nemotron-H: its slacks are the rounding's 1.1 over coincident worst rows, and the gate passes only because 1.0046 rounds to 1.1 (Burn's cached row 22 is 1.0231 of the envelope).",
+  "Whether a repeat of an official graph (the MPS control moves the cached envelope by about 1%), more official graphs (for example other experts implementations or a regenerated oracle on the current macOS), or pooling with other checkpoints should widen the evidence behind the slack.",
+  "Burn's teacher decision 30 (0.996039 from F32 where every official F16 graph is near 0.99996)."
+ ],
+ "not_run": [
+  "The crate-wide test and warning-denied Clippy matrix (--all-targets --all-features), rustdoc, the documentation audit, and check_release.py: no library code changed; only the Nemotron target and the Python tools were checked.",
+  "Every other real-checkpoint gate, benchmark, and smoke, including the Nemotron-H Metal smoke: the library code equals the base commit.",
+  "CUDA, ROCm, and coverage.",
+  "Official F32 hidden traces and real-weight MTP parity for Nemotron-H (still open)."
+ ],
+ "source_validation": {
+  "checks": [
+   {
+    "name": "clippy-default",
+    "log": "validation/clippy-default.log",
+    "command": "cargo clippy --locked --test nemotron_h_artifacts -- -D warnings",
+    "commit": "2cf83d7030867dae96b7b23d2a8bbdc3efe06fc2",
+    "exit": 0
+   },
+   {
+    "name": "clippy-metal",
+    "log": "validation/clippy-metal.log",
+    "command": "cargo clippy --locked --no-default-features --features std,metal,tokenizers,chat-templates --test nemotron_h_artifacts -- -D warnings",
+    "commit": "2cf83d7030867dae96b7b23d2a8bbdc3efe06fc2",
+    "exit": 0
+   },
+   {
+    "name": "fmt",
+    "log": "validation/fmt.log",
+    "command": "cargo fmt --check",
+    "commit": "2cf83d7030867dae96b7b23d2a8bbdc3efe06fc2",
+    "exit": 0
+   },
+   {
+    "name": "msrv-1.92.0-test-nemotron",
+    "log": "validation/msrv-1.92.0-test-nemotron.log",
+    "command": "cargo +1.92.0 test --locked --test nemotron_h_artifacts (CARGO_TARGET_DIR=/Volumes/bag of holding/cargo-targets/tfm-nemotron-envelope-msrv)",
+    "commit": "2cf83d7030867dae96b7b23d2a8bbdc3efe06fc2",
+    "exit": 0
+   },
+   {
+    "name": "python-tests",
+    "log": "validation/python-tests.log",
+    "command": "python3 -m unittest discover -s scripts/tests",
+    "commit": "bae4f05aeab3b7542894d6e98362650d516956ec",
+    "exit": 0
+   },
+   {
+    "name": "test-nemotron-default",
+    "log": "validation/test-nemotron-default.log",
+    "command": "cargo test --locked --test nemotron_h_artifacts",
+    "commit": "2cf83d7030867dae96b7b23d2a8bbdc3efe06fc2",
+    "exit": 0
+   },
+   {
+    "name": "test-nemotron-metal",
+    "log": "validation/test-nemotron-metal.log",
+    "command": "cargo test --locked --release --no-default-features --features std,metal,tokenizers,chat-templates --test nemotron_h_artifacts",
+    "commit": "2cf83d7030867dae96b7b23d2a8bbdc3efe06fc2",
+    "exit": 0
+   }
+  ],
+  "passed": true
+ },
+ "historical_records": {
+  "half-precision-calibration-20261017.json": "3649f61e5cf3357659488585aad32dd4991500b6c7c1c729291bec41ba67d376",
+  "mac-validation-20261017.json": "df865651e42b98427e6537be1292544a59450b54c92d0b89febd172ae0226c41",
+  "half-precision-envelope-20261018.json": "f7be043ec694e98a0ad8fdb223e8eff935c9aa19b3bb46463abce11f6492ab18",
+  "half-precision-followups-20261017.json": "606b662b8b14064c756c2b8b7a9940c5d6478067f6a198bb905226e06190fc6d",
+  "half-precision-review-20261018.json": "87a6aad328798a481c34c3c2eee7ca3ec50a5ce6ef10baaba3de5faa8b4caf8b",
+  "reference-precision-followups-20261016.json": "bcfd19b68b049593cb83d495712e4e0a7ed0acf6ca1a07f559b068362bfa7120",
+  "../nemotron-3.5-lightning-30b-a3b-a9904d24bcc1d289a1950fa9d2b978c47cf903b9.json": "5b2cd355fa9da7f23113ba84ba5d84eed735cbe1f4c83eb53c4403dbbcdb80ca"
+ },
+ "files": {
+  "bundles/bundle-digests.json": "71850d7310cfdd1dc84a3df4d08838a1162b644f8b087d607a56ff5dfe6a524c",
+  "bundles/f16-cpu-sdpa/reference.json": "96253a039c3fb3580cf9fdd2bc12cfb88d6dad265f445f76f6559c40cb2d7f53",
+  "bundles/f16-mps-eager-control/reference.json": "a5f62fda6383a541c4956e6e920e475241b8c295191c57cdaa7c4b96fd4171bf",
+  "bundles/f16-mps-sdpa/reference.json": "4298f895b7ed5f174d15008398359e7240c238f89112915860897618b974fba7",
+  "derivation/assessment.txt": "d62fe26e1b2b361b541e37fbd8f37af517cf2b81cfbcea803a2921c8f51b6f0e",
+  "derivation/envelope.json": "9b9ad2a4a31c54ac59f3ec096406dad7a3778f38c9511f1b194a3b2583672193",
+  "derivation/envelope.txt": "02b4b745777c59d7f05d676b70f416f20da42759595cabebd4c1e2fde55d46a5",
+  "derivation/method.txt": "401ca266cc277f715e552fbc164b8fd49a0700a76f35e9e0655e7085a151f2b0",
+  "gates/logs/build.log": "b52510e730a167daffd10edda3f76cd517cb69cf6546fc180af0a6f0a179947e",
+  "gates/logs/bundles.official_f16_graphs_admit_each_other_leave_one_out.log": "0d500a883a25f3def448194d5320ba167e5af3294e179a80591551af78a401d5",
+  "gates/logs/driver.log": "fd104aaf702342008dab75d215d8543d67ef6e22ac261c1a3190bd0837d36a64",
+  "gates/logs/nemotron-h.f16.metal.official-precision.log": "bcd310ce6c9c07e7092c5806b2b749350577f1c3c198f8ff6b5508e3f2ee7d2b",
+  "gates/logs/runs.jsonl": "bfc5d19f60b29df9f8404cad76633c60041d6004d985c2e0468fc35dbf842d6f",
+  "gates/run_gate.py": "46764a39345f853d3d03133ac58405f6c2c06ddb571779d58157b68c6248e8c3",
+  "gates/run_locked_gate.sh": "4fb364c10739416a19d8e0b98a976c6703bd188b6d88df9d57c85ae7010845f1",
+  "generator/logs/attempt-1/cpu-sdpa.log": "3d049b95257a7b8c08e651b34f867a46a05554d0eb67a7576eec8864568d4f0d",
+  "generator/logs/attempt-1/driver.log": "e7dd825b006ce4589aa53fdad51482b095030300707d4dc67c433714cdea2cbe",
+  "generator/logs/attempt-1/mps-eager-control.log": "e2f23bd5fa911351ba8a46076748eda789a716582e9229ef814fa849cff728f7",
+  "generator/logs/attempt-1/mps-sdpa.log": "2af0c472a9c70be22d12b3a8bef60fda79dccbacf63beee6881a27cf54c75d29",
+  "generator/logs/attempt-1/runs.jsonl": "04d7fa65cd4588b911b6721a0ba9dd022906ea17f7778baf584dfdd9d1560c00",
+  "generator/logs/cpu-sdpa.log": "4848ec0465206e6d2bcb2c1f70e0259199d3e1c9607877cc087641c2e43a9598",
+  "generator/logs/driver.log": "10268457c5497571cadec7fe31a0dc8b4b110513256ed2009232f68572ca2ad6",
+  "generator/logs/mps-eager-control.log": "67846220a4fe34dac9649f819ca441d00cc9226f28f9309a23f163d766d14d2c",
+  "generator/logs/mps-sdpa.log": "585120489291622a0330f776178bc1c0a2ac6502588d616357f252827a234064",
+  "generator/logs/runs.jsonl": "ed0f664393a421f786e5c8eedba257c1ec7abc3b61474c41b009f64dba65d314",
+  "generator/run_graph.py": "83d9040f3991116f969f0028fe93e1b57639e1bc38a8287dcf9e93cf432d5ef7",
+  "generator/run_locked.sh": "3868a06c1eda9799e2eb2659c140da46c21ae137599d1c2879d6d7b5c934f858",
+  "record/build_record.py": "ae7aa344ab724338bf2edf12cc2fd51f2026a89cbece213cba959b5f1ebb81e3",
+  "validation/clippy-default.log": "a30f64be01857c7035f7316b35eae65f54faa47493d7bb9d67566a0c21cf14a3",
+  "validation/clippy-metal.log": "a077afe33da2bc9b7b6e88fd4a870908f2bf5bfa3e19b89f41ced5a3c1ae4665",
+  "validation/fmt.log": "a20dfaf593cb999425c35f2d04936279fd1ba893cdba315981542b1a0aae559b",
+  "validation/msrv-1.92.0-test-nemotron.log": "603cdb1e06d637835d2cdc7af815139fea4393cbd7e38b494b477d70c89e8727",
+  "validation/python-tests.log": "bcf5109b116e24f91e7a28144b368eb535987df59ca9fbf00659458582551821",
+  "validation/test-nemotron-default.log": "4a78fc76d6064f58fa86e39fea8673df0e80c5d2086863d9859263b25f6306dd",
+  "validation/test-nemotron-metal.log": "25948d3fab52c8d27f5cb9bf671c35939630bc4088c7758178f4f3723260ae46"
+ }
+}

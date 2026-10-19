@@ -32,20 +32,22 @@ const PRECISION_DIR_ENV: &str = "TRANSFORMERS_NEMOTRON_H_PRECISION_DIR";
 const BUNDLE_DIRNAME: &str = "nemotron-3.5-lightning-30b-a3b-a9904d24-precision.bundle";
 
 /// Pinned SHA-256 of the bundle manifest.
-const MANIFEST_SHA256: &str = "5da4427df4c882d3c4d42b5c2d37c2c61a4837597c944b9c67a23903a7ce73f9";
+pub(super) const MANIFEST_SHA256: &str =
+    "5da4427df4c882d3c4d42b5c2d37c2c61a4837597c944b9c67a23903a7ce73f9";
 
 /// Official Transformers revision evaluated.
-const TRANSFORMERS_REVISION: &str = "cfa309cfa34b5497a32fd50af49aa97aac94c054";
+pub(super) const TRANSFORMERS_REVISION: &str = "cfa309cfa34b5497a32fd50af49aa97aac94c054";
 
 /// Exact config identity of the evaluated checkpoint.
-const CONFIG_SHA256: &str = "a3827a0f5e311547b40943dc081e3ff2f8a277466e8c1a3df2291e8db8a7617c";
+pub(super) const CONFIG_SHA256: &str =
+    "a3827a0f5e311547b40943dc081e3ff2f8a277466e8c1a3df2291e8db8a7617c";
 
 /// Pinned SHA-256 of the MPS/F16 oracle manifest the evaluation read its inputs from.
-const ORACLE_MANIFEST_SHA256: &str =
+pub(super) const ORACLE_MANIFEST_SHA256: &str =
     "bd3abb417f2fee82d1bef8bb654ca846fa4816351b1d9d7d0d057105f92de196";
 
 /// Official Nemotron-H sources executed, by checkout-relative path.
-const SOURCE_SHA256: [(&str, &str); 2] = [
+pub(super) const SOURCE_SHA256: [(&str, &str); 2] = [
     (
         "src/transformers/models/nemotron_h/configuration_nemotron_h.py",
         "00a4c60bd302d796b25c6ae25c608a5ee7e27f9a0adea92911b0c45470232052",
@@ -90,8 +92,11 @@ pub(super) enum RowKind {
 }
 
 impl RowKind {
+    /// Every row family, in gate order.
+    pub(super) const ALL: [Self; 3] = [Self::Prompt, Self::Teacher, Self::Cached];
+
     /// The bundle's label for this row family.
-    const fn label(self) -> &'static str {
+    pub(super) const fn label(self) -> &'static str {
         match self {
             Self::Prompt => "prompt",
             Self::Teacher => "teacher",
@@ -257,7 +262,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 /// Reads `path`, refusing symlinks, and checks its pinned digest.
-fn authenticated_bytes(path: &Path, expected_sha256: &str) -> Vec<u8> {
+pub(super) fn authenticated_bytes(path: &Path, expected_sha256: &str) -> Vec<u8> {
     let metadata = fs::symlink_metadata(path)
         .unwrap_or_else(|error| panic!("inspect {}: {error}", path.display()));
     assert!(
@@ -277,7 +282,7 @@ fn authenticated_bytes(path: &Path, expected_sha256: &str) -> Vec<u8> {
 }
 
 /// Decodes little-endian binary32 values, requiring the exact row geometry and finite values.
-fn decode_rows(label: &str, bytes: &[u8], rows: usize) -> Vec<f32> {
+pub(super) fn decode_rows(label: &str, bytes: &[u8], rows: usize) -> Vec<f32> {
     assert_eq!(
         bytes.len(),
         rows * REFERENCE_VOCABULARY_SIZE * 4,
@@ -297,7 +302,7 @@ fn decode_rows(label: &str, bytes: &[u8], rows: usize) -> Vec<f32> {
 }
 
 /// Reads one manifest field, failing with its JSON path.
-fn field<'a>(value: &'a Value, path: &[&str]) -> &'a Value {
+pub(super) fn field<'a>(value: &'a Value, path: &[&str]) -> &'a Value {
     path.iter().fold(value, |node, key| {
         node.get(key)
             .unwrap_or_else(|| panic!("precision manifest lacks {}", path.join(".")))

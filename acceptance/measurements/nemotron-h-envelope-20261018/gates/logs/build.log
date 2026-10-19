@@ -1,0 +1,10 @@
+== source 2cf83d7030867dae96b7b23d2a8bbdc3efe06fc2 dirty=0
+== preflight 2026-10-18T09:34:32Z free: / 20.5 GiB, /Volumes/bag of holding 16.57 GiB (CARGO_TARGET_DIR=/Volumes/bag of holding/cargo-targets/tfm-nemotron-envelope, incremental: only the test crate rebuilds)
+== uptime  5:34  up 16 days, 14:55, 3 users, load averages: 4.10 3.87 3.05
+== cmd cargo test --locked --release --no-default-features --features std,metal,tokenizers,chat-templates --test nemotron_h_artifacts --no-run
+   Compiling transformers v0.1.0 (/Users/nover/repos/transformers-worktrees/tfm-nemotron-envelope)
+    Finished `release` profile [optimized] target(s) in 36.81s
+  Executable tests/nemotron_h_artifacts.rs (/Volumes/bag of holding/cargo-targets/tfm-nemotron-envelope/release/deps/nemotron_h_artifacts-4cd54efee0f15525)
+== exit=0
+== binary /Volumes/bag of holding/cargo-targets/tfm-nemotron-envelope/release/deps/nemotron_h_artifacts-4cd54efee0f15525 sha256 50c9a3dfa10a47e30d64cbccd12730dfad03956e6269014954c7cb6fc2a965a3
+== source after build 2cf83d7030867dae96b7b23d2a8bbdc3efe06fc2 dirty=0
