@@ -990,6 +990,61 @@ worktree, under the heavy-model lock except for the bundle-only tests.
   recomputes every status, quote, benchmark figure, and identity from the
   committed evidence.
 
+### Qwen3.5-0.8B benchmark re-baseline (October 18)
+
+On October 18 the maintainer decided to "re-baseline the Qwen3.5-0.8B
+benchmarks on the current host (macOS 27.0.1, same Mac15,11), and report cold
+first token as a diagnostic rather than a pass/fail gate." This answers the
+benchmark item the review round above left to the maintainer. The
+[re-baseline record](acceptance/measurements/qwen3.5-0.8b-metal-rebaseline-20261018.json)
+carries the decision, and `scripts/tests/test_qwen35_rebaseline_record.py`
+recomputes every sample, statistic, and identity in it from the committed
+reports.
+
+- Protocol: the [campaign protocol](BENCHMARKS.md#qwen35-08b-benchmark-campaign-protocol)
+  replaces the review's confounded reruns. The two binaries alternate inside
+  every round, and two 4 x 4 Latin squares counterbalance the binary and
+  benchmark order. Every sample waits out a 120 s cooldown and is admitted at
+  1- and 5-minute loads of at most 4.0 and 6.0; a sample whose in-run load
+  exceeds 6.0 is rerun. Load and Metal shader-cache growth are recorded
+  around every process. A campaign takes at least 8 rounds and must reach a
+  steady state (half-medians within 2.5%). `scripts/qwen35_benchmark_protocol.py`
+  implements it, with synthetic-campaign tests.
+- Binaries: the head `fa8426e`, built from its worktree, and the September
+  source `c70057e` (the September 10 series' `src` tree), rebuilt in a
+  temporary detached worktree that was then removed. Both were built with
+  rustc 1.92.0, `std,metal,tokenizers,chat-templates`, and the release
+  profile, and ran under the heavy-model lock on the Mac15,11 with macOS
+  27.0.1 (26A434) on AC power. The September 10 series ran on macOS 15.7.9
+  (Metal 3), a different series.
+- Execution: a first attempt, which admitted samples on the 1-minute load
+  alone, ran one contaminated sample and was stopped; it is kept and unused.
+  The campaign then ran 48 clean processes in 12 rounds. Five attempts
+  contaminated by other CPU work (in-run loads 6.1 to 24.1) were rerun. The
+  planned 8 rounds were not steady, so one block was added, and rounds 3 to
+  12 are steady.
+- Reference (head, steady-state medians): model-only decode of 128 steps
+  `3.560`, `3.547`, and `3.542` s at 32, 128, and 512 source tokens; prefill
+  `48.6`, `61.0`, and `161.4` ms; natural loops `1.110` s (model API) and
+  `1.414` s (public coordinator); strict load `0.934` and `0.936` s. On the
+  same host the head takes 0.30 to 0.96 of the September source's time on
+  every gated metric. Every gated median of both binaries is below its
+  September 10 value, and every token hash is unchanged. These medians, not
+  the September 10 summaries, are what later sources are judged against, at
+  the unchanged 5% alert and confirmed 10% failure thresholds.
+- Cold first token (diagnostic, not gated): head median `0.155` s (range
+  `0.120` to `0.227` s) in the baseline benchmark and `0.161` s (`0.118` to
+  `0.366` s) in the public one; September source `0.260` s and `0.284` s.
+  In every cell it correlates with the shader-cache growth of the same
+  process (Spearman +0.70 to +0.87) and falls over the rounds. The record
+  keeps the measured correlations apart from the inferred explanation
+  (Metal pipeline compilation against a growing shader cache).
+- Unchanged: the v0.1 release record, the September 10 summaries, and the
+  earlier rounds' records keep their bytes (`tests/acceptance_records.rs`
+  pins the release record's digest), the support claims, and the documented
+  historical slowdown. Not run: the long-prefill series, a supervised memory
+  run, the FLAN-T5-small benchmarks, and CUDA/ROCm.
+
 Record each replay as a new measurement with its exact source identity; do not
 overwrite the historical records below.
 
@@ -1001,7 +1056,11 @@ Metal/F32 profiles. On September 10 the user explicitly approved the controlled
 Qwen measurements as the v0.1 baseline, while retaining the unexplained
 historical slowdown. This changes the baseline policy, not the measured results
 or the future 5% alert / confirmed 10% failure thresholds. No new benchmark is
-claimed by that approval. Larger families, quantized quality and real-weight
+claimed by that approval. On October 18 the maintainer re-baselined
+Qwen3.5-0.8B on the current host and made cold first token a diagnostic; the
+[re-baseline record](acceptance/measurements/qwen3.5-0.8b-metal-rebaseline-20261018.json)
+is now the reference for future Qwen comparisons, and the release record is
+unchanged. Larger families, quantized quality and real-weight
 MTP remain experimental.
 
 The [`b4d6410` source-gate record](acceptance/measurements/v0_1-source-gates-20260910.json)

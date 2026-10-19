@@ -266,7 +266,7 @@ shader-cache growth and with the round number.
 ### Gates and judging
 
 A candidate is judged against the recorded reference, which since the
-re-baseline is the `head` block of
+re-baseline is the `reference` block (label `head`) of
 [the October 18 record](acceptance/measurements/qwen3.5-0.8b-metal-rebaseline-20261018.json):
 
 - **alert:** a gated median that changes by more than 5% in either
@@ -303,6 +303,69 @@ Run the campaign from a directory without `cubecl.toml` or `burn.toml` on its
 ancestor path, and leave each binary's source tree untouched until the
 campaign ends: the harness checks its own source files and records the tree's
 commit and status at run time.
+
+### October 18 re-baseline on the current host
+
+The [re-baseline record](acceptance/measurements/qwen3.5-0.8b-metal-rebaseline-20261018.json)
+applies this protocol to the head `fa8426e`, built from its worktree, and to
+the September source `c70057e`, whose `src` tree is the September 10 series'
+and which was rebuilt in a temporary detached worktree, since removed. Both
+were built with rustc 1.92.0 and `std,metal,tokenizers,chat-templates` in the
+release profile, and ran on the Mac15,11 with macOS 27.0.1 (26A434) on AC
+power. The September 10 series ran on macOS 15.7.9 (24G830, Metal 3), so by
+this protocol it is a different series.
+
+- A first attempt admitted samples on the 1-minute load alone. Its first
+  sample shared the CPU with another session's tests (252.9 s instead of
+  about 210 s, single decode repetitions up to 15.5 s against about
+  3.55 s), so it was stopped, the 5-minute admission threshold and the
+  in-run contamination rule were added, and the campaign restarted from
+  round 1. The attempt is kept and unused.
+- The campaign ran 48 clean processes in 12 rounds between 00:01 and 04:23
+  UTC on October 19. Five attempts whose in-run load exceeded 6.0 (6.1 to
+  24.1) were rerun. After the planned 8 rounds no window was steady: nine
+  series drifted, among them the September binary's warm metrics, whose
+  first two rounds ran up to 14% slow, and the strict loads. One block was
+  added, and rounds 3 to 12 are steady (largest half-median drift 2.1%, the
+  head's strict load in the baseline benchmark).
+
+Steady-state medians over rounds 3 to 12, in seconds unless noted. The head
+column is the reference for future comparisons; the September 10 values are
+single-run medians on macOS 15.7.9:
+
+| Metric (baseline benchmark unless noted) | Head `fa8426e` | September source `c70057e` | Head / September | September 10 approved |
+| --- | ---: | ---: | ---: | ---: |
+| Strict load, baseline / public benchmark | 0.934 / 0.936 | 0.973 / 0.979 | 0.96 / 0.96 | 1.413 / 1.408 |
+| Prefill at 32 / 128 / 512 tokens (ms) | 48.6 / 61.0 / 161.4 | 64.5 / 148.3 / 530.4 | 0.75 / 0.41 / 0.30 | 75.7 / 178.1 / 615.8 |
+| First-token latency at 32 / 128 / 512 (ms) | 56.5 / 68.9 / 169.6 | 72.4 / 156.2 / 538.4 | 0.78 / 0.44 / 0.32 | 84.2 / 187.6 / 623.6 |
+| Model-only decode, 128 steps, at 32 / 128 / 512 | 3.560 / 3.547 / 3.542 | 4.053 / 4.050 / 4.039 | 0.88 / 0.88 / 0.88 | 4.758 / 4.747 / 4.774 |
+| Decode with greedy readback at 32 / 128 / 512 | 4.572 / 4.560 / 4.557 | 5.068 / 5.064 / 5.054 | 0.90 / 0.90 / 0.90 | 5.815 / 5.794 / 5.799 |
+| Natural loop, model API / public coordinator | 1.110 / 1.414 | 1.233 / 1.578 | 0.90 / 0.90 | 1.421 / 1.751 |
+| Cold first token (diagnostic), baseline / public: median | 0.155 / 0.161 | 0.260 / 0.284 | 0.59 / 0.57 | 0.168 / 0.366 |
+| Cold first token (diagnostic), baseline / public: range | 0.120-0.227 / 0.118-0.366 | 0.190-0.403 / 0.248-0.443 | | |
+
+Measured: the head's model-only decode is 36.0 to 36.1 tokens/s. Every gated
+median of both binaries is below its September 10 value, the head's by 19 to
+74% and the September source's by 10 to 31%. On this host the head takes
+0.30 to 0.96 of the September source's time on every gated metric. In every
+(binary, benchmark) cell the cold first token correlates with the Metal
+shader-cache growth of the same process (Spearman +0.70 to +0.87) and falls
+with the round number (-0.63 to -0.84). Over all 12 rounds its maximum is
+0.253 s (head) and 0.510 s (September source) in the baseline benchmark, and
+0.366 s and 0.519 s in the public one. Every token and prediction
+hash equals the September 10 reports, and every run passed the harness's
+official-reference check before timing.
+
+Inferred, not measured: the cold first token on this host is dominated by
+Metal pipeline compilation, which shrinks as the per-user shader cache
+accumulates each binary's pipelines. The September source's own cold first
+token reads 55% above its September 10 value in the baseline benchmark (22%
+below it in the public one) while its warm and natural-loop medians read 10
+to 17% below theirs, which fits the operating-system change rather than a
+source regression; the cache was neither cleared nor controlled, so the
+campaign does not attribute the cold time causally. The historical
+approximately 36-to-27 tokens/s slowdown is not explained by this record and
+remains a documented limitation.
 
 ## Packed-weight protocol
 
@@ -915,7 +978,7 @@ series.
 
 | Artifact | Recorded evidence | Open gates |
 | --- | --- | --- |
-| [Qwen3.5-0.8B](acceptance/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17.json), F16 Metal | Full-vector cosine `0.999998221` against Transformers 5.2/MPS F16; identical reference top-10 and 32 greedy tokens; cached/stateless top-1 agreement at every prefix. The first smoke wall time including load and GPU compilation was `142.52 s`; the cached acceptance wall time including cold load was `158.15 s`. | Later repeated warm timing, sampled phase memory and cache accounting are retained in the September 10 series. The bounded F16 profile is supported with the explicitly accepted historical slowdown; long-context quality/performance remains experimental. |
+| [Qwen3.5-0.8B](acceptance/qwen3.5-0.8b-2fc06364715b967f1860aea9cf38778875588b17.json), F16 Metal | Full-vector cosine `0.999998221` against Transformers 5.2/MPS F16; identical reference top-10 and 32 greedy tokens; cached/stateless top-1 agreement at every prefix. The first smoke wall time including load and GPU compilation was `142.52 s`; the cached acceptance wall time including cold load was `158.15 s`. | Later repeated warm timing, sampled phase memory and cache accounting are retained in the September 10 series; since October 18 the [re-baseline record](acceptance/measurements/qwen3.5-0.8b-metal-rebaseline-20261018.json) is the timing reference. The bounded F16 profile is supported with the explicitly accepted historical slowdown; long-context quality/performance remains experimental. |
 | Same artifact, Q4/G64 Burnpack v2 | The source/plan-bound sidecar contains 186 packed matrices. The [populated 32K stress record](acceptance/measurements/qwen3.5-0.8b-q4-32k-stress-20260909.json) authenticates the complete artifact and all six target files, then fills 32,767 positions in 128 bounded prefill calls and the final position through recurrent decode. All logits and terminal states remained finite; overflow was atomic and reset matched fresh logits. Analytical cache payload is `422,191,104` bytes, comprising `12,288` KV bytes per token and `19,537,920` fixed recurrent bytes. Synchronized one-shot diagnostics were `50.843 s` prefill including full-vocabulary checks and `0.138 s` final decode/readback. Whole-process peak footprint was `3,047,626,496` bytes and maximum RSS `2,556,231,680` bytes. Raw chunk times, input/output hashes, source/executable identity and timing boundaries are retained. | The repetitive stress input is not a quality corpus or official 32K oracle. No warmup/repetition performance baseline or phase-specific high-water memory is claimed. Q4 NLL and Q8 single-backend acceptance remain pending. |
 | [Qwen3.8-27B](acceptance/qwen3.8-27b-1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0.json), F16 Metal | Strictly applied 851 text tensors from 18 shards for the official numerical gate. Burn matched the pinned Transformers 5.2/MPS F16 full-vocabulary prompt logits at cosine `0.999999881`, exact top-1 token 799, all 32 cached greedy tokens, and stateless top-1 at every generated prefix. That cold gate took `218.79 s`; peak RSS was `11,254,513,664` bytes and macOS reported a `63,811,727,296`-byte peak process footprint. A separate text-plus-MTP smoke applied 866 tensors and passed MTP, recurrent decode, and 66 hidden-trace comparisons. | Quantized reference/quality, 32K stress, output hashing, and standardized warm latency/throughput remain pending. |
 | Same Qwen3.8 artifact, Q8 Burnpack plus retained F16 Metal tensors | Streaming conversion packed 497 BF16 matrices with group size 64, retained 369 tensors, applied all 866 mapped tensors while keeping at most one source shard open, and allowlisted 333 visual tensors. The validated payload is `27,223,326,720` bytes in a `27,223,642,316`-byte artifact; the largest materialized tensor was `1,350,860,800` bytes. Stateless and cached logits were finite with top-1 token 271 and cosine `1.000000000`; MTP and recurrent decode were also finite. The cold diagnostic test reported `985.53 s`, while its enclosing process took `1241.12 s`; peak RSS was `29,786,243,072` bytes and macOS peak process footprint was `34,317,474,944` bytes. These are end-to-end smoke observations, not standardized benchmark timings. | Reference parity, longer generation, Q8 corpus quality, output hashing, 32K stress, and standardized latency/throughput remain pending. |
@@ -937,7 +1000,10 @@ Metal/F32 profiles are now supported. Their
 the controlled September 10 Qwen timing baseline with explicit user approval,
 retaining the unexplained historical slowdown and all old measurements. It
 also selects the separate public-coordinator and FLAN timing series for their
-own measurement boundaries. Earlier rows describe historical observations,
+own measurement boundaries. For Qwen3.5-0.8B the October 18
+[re-baseline record](acceptance/measurements/qwen3.5-0.8b-metal-rebaseline-20261018.json)
+supersedes both Qwen series as the reference for future comparisons, without
+editing the release record. Earlier rows describe historical observations,
 not new benchmarks or blanket support for other profiles. Muse Glimmer has a committed
 official-reference short-context correctness run. Nemotron-H now has a
 committed authenticated real-weight Metal base-model smoke, but that run is

@@ -379,6 +379,15 @@ code written against unreleased sources.
   `qk_l2_epsilon` field), and the unreleased `qwen3_moe::router_logits_point`
   and `router_weights_point` (use `Layer::router_logits` and
   `router_weights`).
+- **Benchmark policy:** by the maintainer's October 18 decision, Qwen3.5-0.8B
+  timing is judged against the head `fa8426e` reference measured on the
+  current host (Mac15,11, macOS 27.0.1), not the September 10 series from
+  macOS 15.7.9. Warm, natural-loop, and strict-load medians keep the 5% alert
+  and confirmed 10% failure thresholds; cold first token, which includes
+  Metal pipeline compilation, is reported as a median and range and is no
+  longer gated. The v0.1 release record is unchanged, and no support claim
+  changes ([record](acceptance/measurements/qwen3.5-0.8b-metal-rebaseline-20261018.json),
+  [protocol](BENCHMARKS.md#qwen35-08b-benchmark-campaign-protocol)).
 
 ### Fixed
 
@@ -784,6 +793,17 @@ earlier row-by-row or per-chunk algorithm, which each test keeps as an oracle.
   baseline for the maintainer and corrects the envelope record's benchmark
   verdict and its claim that no real-checkpoint gate selects the eager graph
   (Muse-Glimmer's does). No checkpoint is promoted.
+- A Qwen3.5-0.8B benchmark campaign protocol,
+  `scripts/qwen35_benchmark_protocol.py`, plans, runs, summarizes, and judges
+  campaigns that alternate two binaries in counterbalanced Latin-square
+  rounds with a cooldown, load admission, in-run contamination reruns, and a
+  steady-state rule; synthetic-campaign tests cover it. Its first campaign
+  re-baselines Qwen3.5-0.8B: the head `fa8426e` against the September
+  source `c70057e`, both rebuilt with rustc 1.92.0, in 12 rounds (48 clean
+  processes, steady from round 3). It is checked by
+  `scripts/tests/test_qwen35_rebaseline_record.py` and
+  `tests/acceptance_records.rs`
+  ([record](acceptance/measurements/qwen3.5-0.8b-metal-rebaseline-20261018.json)).
 - The configuration fuzz target covers all eleven family parsers without
   count filters, and the modular-spec generator draws clamped experts,
   embedding scales, and logit caps.
