@@ -156,6 +156,18 @@ are collected in [MIGRATION.md](MIGRATION.md#upgrading-from-010).
   largest power of two at which every dense checkpoint contract fits the
   artifact limit), `MAX_EXPERTS` (2^20), and `MAX_CHECKPOINT_TENSORS`
   (10,000,000).
+- Numeric-range hazards: `checkpoint::RangeHazard`, a dtype a family declares
+  its checkpoints are measured to overflow, with the evidence and whether the
+  family certifies a packed path for them (`RangeHazard::with_certified_packed_path`,
+  `packed_path_certified`; Gemma 3 declares F16 without one,
+  `GemmaVariant::range_hazards` and `GemmaCheckpointContract::range_hazards`);
+  `MappingPlan::declare_range_hazards` and `MappingPlan::range_hazards`, which
+  carry a family's declarations to the shared planner (serialization omits
+  them, so the plan format is unchanged); the generic `check_range_hazards`
+  over a strict `LoadPlan`, which `build_load_plan` runs for the declared
+  hazards; `CheckpointError::RangeHazard`; and the load option
+  `LoadOptions::range_hazards` (`RangeHazardPolicy::Refuse` by default,
+  `Accept` as the explicit opt-in).
 - Checkpoints: exact MXFP4 decoding (`MappingPlan::dequantize_mxfp4`,
   `TensorOperation::DequantizeMxfp4`), `install_packed_parameter`
   (`PackedInstall`, `packed_layout_is_exact`), `CheckpointError::InvalidTensorHeader`
@@ -385,6 +397,29 @@ code written against unreleased sources.
   in `models::shared::scaling`; one verified ceiling (`crate::division`)
   replaces three copies; and modular clamped experts run through the shared
   `SparseMoe` forward. Outputs are bit-identical.
+- **Gemma 3 in F16 (behavior change).** Loading a Gemma 3 checkpoint
+  (`model_type` `gemma3` or `gemma3_text`) whose parameters, and so
+  activations, would be F16, whether cast with `DTypePolicy::Cast(F16)` or
+  stored in F16 and kept by `DTypePolicy::Auto`, now fails while planning,
+  before any payload is read, with `CheckpointError::RangeHazard`
+  (`Error::CheckpointPlan` from `AutoCausalLm::load_local`,
+  `GemmaCheckpointLoadError::Checkpoint` from `GemmaForCausalLm::load_checkpoint`,
+  and directly from `checkpoint::build_load_plan` given the Gemma contract's
+  expected tensors and mappings).
+  It used to load and return non-finite logits: the published checkpoints
+  overflow F16 in Transformers too (gemma-3-4b-it's block-5 post-MLP residual
+  reaches `73,509.6`, beyond `65,504`; 12B and 27B overflow at blocks 6 and 8).
+  The message names the measured overflow, the alternatives (F32, and BF16
+  where the backend can store it; packed Q4/Q8 weights with F32 activations
+  are named as not offered, because no Gemma packed path is certified and the
+  automatic loader refuses a Gemma packed sidecar), and the opt-in: `LoadOptions::range_hazards = RangeHazardPolicy::Accept` loads the
+  faithful, overflowing graph for experiments. The refusal covers unmeasured
+  Gemma 3 sizes too; Gemma 2, F32, and BF16 loads are unchanged. The Gemma
+  gate's `TRANSFORMERS_GEMMA_DTYPE=f16` runs now expect the refusal
+  (`TRANSFORMERS_GEMMA_RANGE_HAZARDS=accept` evaluates the faithful graph and
+  fails), and `LoadOptions` gained the public field `range_hazards`, so
+  exhaustive literals need it (serialized options without it load with the
+  default).
 - **Deprecated:** `LoadedModel::into_parts` (and its variants),
   `CacheConfig::physical_capacity`, `BURNPACK_QUANTIZATION_FORMAT_VERSION`,
   `BurnpackQuantizationManifest::new`,

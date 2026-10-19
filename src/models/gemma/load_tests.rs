@@ -1,16 +1,18 @@
 //! Strict loading: committed tiny checkpoints load exactly from every
 //! published namespace, the vision tower is reported as ignored, malformed
-//! checkpoints fail before any payload is installed, and the sink rejects
-//! targets the configured graph does not own.
+//! checkpoints fail before any payload is installed, the sink rejects
+//! targets the configured graph does not own, and Gemma 3's declared F16
+//! range hazard refuses F16 loads unless the caller accepts the overflow.
 
 use std::path::{Path, PathBuf};
 
-use burn::tensor::TensorData;
+use burn::tensor::{DType, TensorData, f16};
 use safetensors::{Dtype, SafeTensors, tensor::TensorView};
 
 use super::*;
 use crate::{
     CausalLmInput, ForwardOptions, LogitsSelection,
+    checkpoint::{DTypePolicy, RangeHazardPolicy, TensorDType},
     models::{
         config::ModelConfig,
         gemma::{
@@ -454,4 +456,430 @@ fn packed_payloads_install_the_artifact_exactly() {
     crate::checkpoint::packed_sink_support::assert_install_keeps_packed_weights_exact(
         |parameter, data| install("model.layers.0.self_attn.q_proj.weight", parameter, data),
     );
+}
+
+// Range hazards: Gemma 3 refuses F16 unless the overflow is accepted.
+
+/// Load options selecting `dtype_policy` under the range-hazard `policy`.
+fn hazard_options(dtype_policy: DTypePolicy, policy: RangeHazardPolicy) -> LoadOptions {
+    LoadOptions {
+        dtype_policy,
+        range_hazards: policy,
+        ..LoadOptions::default()
+    }
+}
+
+/// Copies `case` with every tensor stored in F16, each F32 value rounded once.
+fn stored_in_f16(case: &str) -> tempfile::TempDir {
+    rewritten(case, |entries| {
+        for (name, dtype, _, bytes) in entries.iter_mut() {
+            assert_eq!(*dtype, Dtype::F32, "{name}: the fixtures store F32");
+            *bytes = bytes
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .flat_map(|chunk| f16::from_f32(f32::from_le_bytes(*chunk)).to_le_bytes())
+                .collect();
+            *dtype = Dtype::F16;
+        }
+    })
+}
+
+/// Rewrites a multimodal copy's text `config.json` as the `gemma3` wrapper Transformers writes.
+fn wrap_as_gemma3(directory: &Path) {
+    let text: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(directory.join("config.json")).unwrap())
+            .unwrap();
+    let wrapper = serde_json::json!({
+        "architectures": ["Gemma3ForConditionalGeneration"],
+        "model_type": "gemma3",
+        "text_config": text,
+        "vision_config": {"model_type": "siglip_vision_model"},
+    });
+    std::fs::write(directory.join("config.json"), wrapper.to_string()).unwrap();
+}
+
+/// Counts the storage-owning parameters strict planning installs for the checkpoint at `root`.
+///
+/// Plans with the hazard accepted, so F16 storage is counted too.
+fn planned_parameters(root: &Path) -> usize {
+    let config = std::fs::read_to_string(root.join("config.json")).unwrap();
+    let config = GemmaConfig::from_json_str(&config).unwrap();
+    let manifest = CheckpointManifest::discover(root, &LoadOptions::default()).unwrap();
+    let source =
+        GemmaCheckpointSource::detect(manifest.tensors.keys().map(String::as_str)).unwrap();
+    config
+        .checkpoint_contract(GemmaCheckpointOptions { source })
+        .unwrap()
+        .build_load_plan(
+            &manifest,
+            &hazard_options(DTypePolicy::Auto, RangeHazardPolicy::Accept),
+        )
+        .unwrap()
+        .tensors
+        .len()
+}
+
+/// Asserts that `error` is Gemma 3's F16 refusal naming all `parameters`, the embedding first.
+fn assert_gemma3_f16_refusal(error: &CheckpointError, parameters: usize, context: &str) {
+    let CheckpointError::RangeHazard {
+        hazard,
+        target,
+        parameters: refused,
+    } = error
+    else {
+        panic!("{context}: expected Gemma 3's F16 refusal, got {error}");
+    };
+    assert_eq!(
+        *hazard,
+        GemmaVariant::Gemma3Text.range_hazards()[0],
+        "{context}"
+    );
+    assert_eq!(target, "model.embed_tokens.weight", "{context}");
+    assert_eq!(*refused, parameters, "{context}");
+}
+
+/// Last-position logits of [`prompt_logits`]'s prompt, read as F32 whatever the model's dtype.
+fn prompt_logits_as_f32(model: &GemmaForCausalLm<B>) -> Vec<f32> {
+    let output = model
+        .forward(
+            CausalLmInput {
+                token_ids: ints([[5, 17, 3, 29, 8]]),
+                token_mask: None,
+                position_ids: None,
+            },
+            &ForwardOptions::default(),
+        )
+        .unwrap();
+    host(output.logits.cast(DType::F32))
+}
+
+/// Gemma 3 refuses F16 parameters, cast or stored, in every published namespace, before installing any.
+///
+/// The refusal is a planning error: no execution failure, no installed
+/// parameter, and the count names every storage-owning tensor of the plan.
+#[test]
+fn gemma3_refuses_f16_parameters_before_installing_any() {
+    let text_only = fixture("gemma3-text");
+    let current = multimodal(
+        "gemma3-text",
+        "model.language_model",
+        &["model.vision_tower.vision_model.post_layernorm.weight"],
+    );
+    let legacy = multimodal(
+        "gemma3-text",
+        "language_model.model",
+        &["vision_tower.vision_model.post_layernorm.weight"],
+    );
+    let wrapped = multimodal(
+        "gemma3-text",
+        "model.language_model",
+        &["model.vision_tower.vision_model.post_layernorm.weight"],
+    );
+    wrap_as_gemma3(wrapped.path());
+    let stored = stored_in_f16("gemma3-text");
+    let cast = DTypePolicy::Cast(TensorDType::F16);
+    for (root, policy, context) in [
+        (text_only.as_path(), cast, "gemma3_text, cast"),
+        (current.path(), cast, "multimodal namespace, cast"),
+        (legacy.path(), cast, "legacy multimodal namespace, cast"),
+        (wrapped.path(), cast, "gemma3 wrapper, cast"),
+        (stored.path(), DTypePolicy::Auto, "F16 storage under Auto"),
+        (
+            stored.path(),
+            DTypePolicy::Preserve,
+            "F16 storage under Preserve",
+        ),
+    ] {
+        let mut model = graph(root);
+        let error = model
+            .load_checkpoint(root, &hazard_options(policy, RangeHazardPolicy::default()))
+            .unwrap_err();
+        assert!(error.execution_failure().is_none(), "{context}");
+        let GemmaCheckpointLoadError::Checkpoint(error) = &error else {
+            panic!("{context}: expected a planning error, got {error}");
+        };
+        assert_gemma3_f16_refusal(error, planned_parameters(root), context);
+        assert!(
+            !model.model.embed_tokens.weight.is_initialized(),
+            "{context}: nothing was installed"
+        );
+    }
+}
+
+/// Accepting the overflow loads the faithful F16 graph, cast or stored, and it runs in F16.
+///
+/// The tiny fixture stays far inside F16's range, so its logits are finite
+/// and close to the F32 graph's; a real Gemma 3 checkpoint's are not.
+#[test]
+fn accepting_the_overflow_loads_the_faithful_f16_graph() {
+    let root = fixture("gemma3-text");
+    let mut reference = graph(&root);
+    reference
+        .load_checkpoint(&root, &LoadOptions::default())
+        .unwrap();
+    let reference = prompt_logits(&reference);
+    let stored = stored_in_f16("gemma3-text");
+    for (root, policy, context) in [
+        (
+            root.as_path(),
+            DTypePolicy::Cast(TensorDType::F16),
+            "cast to F16",
+        ),
+        (stored.path(), DTypePolicy::Auto, "stored in F16"),
+    ] {
+        let mut model = graph(root);
+        let outcome = model
+            .load_checkpoint(root, &hazard_options(policy, RangeHazardPolicy::Accept))
+            .unwrap_or_else(|error| panic!("{context}: {error}"));
+        assert!(outcome.report.is_strictly_valid(), "{context}");
+        assert_eq!(
+            model.model.embed_tokens.weight.val().dtype(),
+            DType::F16,
+            "{context}"
+        );
+        let logits = prompt_logits_as_f32(&model);
+        assert!(logits.iter().all(|logit| logit.is_finite()), "{context}");
+        let gap = crate::models::gemma::model::test_support::max_gap(&logits, &reference);
+        assert!(gap < 0.05, "{context}: F16 logits deviate by {gap}");
+    }
+}
+
+/// F32 and BF16 Gemma 3 loads, cast or kept from storage, are unaffected by the refusing default.
+#[test]
+fn f32_and_bf16_gemma3_loads_are_unaffected() {
+    let root = fixture("gemma3-text");
+    let stored = stored_in_f16("gemma3-text");
+    for (root, policy, dtype) in [
+        (root.as_path(), DTypePolicy::Auto, DType::F32),
+        (
+            root.as_path(),
+            DTypePolicy::Cast(TensorDType::F32),
+            DType::F32,
+        ),
+        (
+            root.as_path(),
+            DTypePolicy::Cast(TensorDType::BF16),
+            DType::BF16,
+        ),
+        (
+            stored.path(),
+            DTypePolicy::Cast(TensorDType::F32),
+            DType::F32,
+        ),
+        (
+            stored.path(),
+            DTypePolicy::Cast(TensorDType::BF16),
+            DType::BF16,
+        ),
+    ] {
+        let mut model = graph(root);
+        let outcome = model
+            .load_checkpoint(root, &hazard_options(policy, RangeHazardPolicy::Refuse))
+            .unwrap_or_else(|error| panic!("{policy:?}: {error}"));
+        assert!(outcome.report.is_strictly_valid(), "{policy:?}");
+        assert_eq!(
+            model.model.embed_tokens.weight.val().dtype(),
+            dtype,
+            "{policy:?}"
+        );
+    }
+}
+
+/// Gemma 2 declares no hazard (none was measured), so its F16 loads proceed under the refusing default.
+#[test]
+fn gemma2_declares_no_hazard_and_loads_in_f16() {
+    assert!(GemmaVariant::Gemma2.range_hazards().is_empty());
+    let root = fixture("gemma2");
+    let stored = stored_in_f16("gemma2");
+    for (root, policy) in [
+        (root.as_path(), DTypePolicy::Cast(TensorDType::F16)),
+        (stored.path(), DTypePolicy::Auto),
+    ] {
+        let mut model = graph(root);
+        let outcome = model
+            .load_checkpoint(root, &hazard_options(policy, RangeHazardPolicy::Refuse))
+            .unwrap_or_else(|error| panic!("{policy:?}: {error}"));
+        assert!(outcome.report.is_strictly_valid(), "{policy:?}");
+        assert_eq!(model.model.embed_tokens.weight.val().dtype(), DType::F16);
+    }
+}
+
+/// The refusal names Gemma 3, F16, the measured overflow and the unmeasured sizes, the alternatives, and the opt-in.
+///
+/// Gemma certifies no packed path, so the refusal says that packed weights
+/// with F32 activations are not offered and that the automatic loader
+/// refuses a packed sidecar, instead of suggesting them.
+#[test]
+fn the_gemma3_refusal_names_the_overflow_the_alternatives_and_the_opt_in() {
+    assert!(!GemmaVariant::Gemma3Text.range_hazards()[0].packed_path_certified());
+    let root = fixture("gemma3-text");
+    let message = graph(&root)
+        .load_checkpoint(
+            &root,
+            &hazard_options(
+                DTypePolicy::Cast(TensorDType::F16),
+                RangeHazardPolicy::Refuse,
+            ),
+        )
+        .unwrap_err()
+        .to_string();
+    for fragment in [
+        // The checkpoint family and the dtype.
+        "Gemma 3 (model_type gemma3 or gemma3_text) checkpoints are known to overflow F16",
+        "planned parameters in F16 (first `model.embed_tokens.weight`)",
+        // The measured overflow, its reference, and what was not measured.
+        "google/gemma-3-4b-it (revision 093f9f38)",
+        "block 5's MLP reaches 73,509.6 at the BOS position, channel 443",
+        "beyond F16's largest finite value 65,504",
+        "Transformers 5.2.0's CPU and MPS F16 graphs",
+        "gemma-3-12b-it and gemma-3-27b-it",
+        "Unmeasured: other sizes (such as 1B and 270M) and fine-tunes",
+        "acceptance/measurements/half-precision-envelope-20261018.json",
+        // The alternatives.
+        "F32 (`DTypePolicy::Cast(TensorDType::F32)`)",
+        "BF16 (`DTypePolicy::Cast(TensorDType::BF16)`) on a backend that can store it \
+         (Burn 0.21's Metal backend cannot)",
+        // The packed path is not an alternative for Gemma.
+        "Packed Q4/Q8 weights with F32 activations are not offered: the family has not \
+         certified a packed path for these checkpoints, and the automatic loader refuses a \
+         quantized Burnpack sidecar for them.",
+        // The opt-in and its consequence.
+        "set `LoadOptions::range_hazards` to `RangeHazardPolicy::Accept`",
+        "its logits are expected to be non-finite",
+    ] {
+        assert!(
+            message.contains(fragment),
+            "missing {fragment:?} in {message}"
+        );
+    }
+    assert!(
+        !message.contains("or with packed Q4/Q8 weights"),
+        "{message}"
+    );
+}
+
+/// The refusal's packed-path statement holds: the automatic loader refuses a packed sidecar for `gemma3` and `gemma3_text`.
+///
+/// The check precedes planning, so a caller following the refusal to a
+/// quantized Burnpack sidecar over an F32 plan meets a
+/// [`crate::Error::BackendCapability`] naming the certified families, which
+/// the refusal already announced. A `gemma3` wrapper is checked as the
+/// `gemma3_text` model its `text_config` names.
+#[test]
+fn the_automatic_loader_refuses_a_gemma3_packed_sidecar_as_the_refusal_says() {
+    let text_only = fixture("gemma3-text");
+    let wrapped = multimodal(
+        "gemma3-text",
+        "model.language_model",
+        &["model.vision_tower.vision_model.post_layernorm.weight"],
+    );
+    wrap_as_gemma3(wrapped.path());
+    for (root, context) in [
+        (text_only.as_path(), "gemma3_text"),
+        (wrapped.path(), "gemma3"),
+    ] {
+        let options = crate::AutoLoadOptions {
+            checkpoint: hazard_options(
+                DTypePolicy::Cast(TensorDType::F32),
+                RangeHazardPolicy::Refuse,
+            ),
+            quantized_burnpack: Some(root.join("weights.bpk")),
+            load_tokenizer: false,
+            ..crate::AutoLoadOptions::default()
+        };
+        let Err(crate::Error::BackendCapability(message)) =
+            crate::AutoCausalLm::<B>::load_local(root, &options, &Default::default())
+        else {
+            panic!("{context}: a packed sidecar must be refused");
+        };
+        assert!(
+            message.contains("packed Burnpack loading for `gemma3_text` is not yet certified"),
+            "{context}: {message}"
+        );
+    }
+}
+
+/// Automatic loading refuses F16 `gemma3` and `gemma3_text` checkpoints, honors the opt-in, and leaves the rest alone.
+///
+/// The refusal arrives as [`crate::Error::CheckpointPlan`] before the graph
+/// is allocated; the multimodal wrapper still reports its vision tensor as
+/// intentionally ignored once accepted.
+#[test]
+fn automatic_loading_applies_the_gemma3_policy() {
+    let text_only = fixture("gemma3-text");
+    let vision = "model.vision_tower.vision_model.post_layernorm.weight";
+    let wrapped = multimodal("gemma3-text", "model.language_model", &[vision]);
+    wrap_as_gemma3(wrapped.path());
+    let gemma2 = fixture("gemma2");
+    let load = |root: &Path, dtype: TensorDType, policy: RangeHazardPolicy| {
+        let options = crate::AutoLoadOptions {
+            checkpoint: hazard_options(DTypePolicy::Cast(dtype), policy),
+            load_tokenizer: false,
+            ..crate::AutoLoadOptions::default()
+        };
+        crate::AutoCausalLm::<B>::load_local(root, &options, &Default::default())
+    };
+    for (root, ignored, context) in [
+        (text_only.as_path(), &[][..], "gemma3_text"),
+        (wrapped.path(), &[vision][..], "gemma3"),
+    ] {
+        let Err(crate::Error::CheckpointPlan(error)) =
+            load(root, TensorDType::F16, RangeHazardPolicy::Refuse)
+        else {
+            panic!("{context}: an F16 load must be refused while planning");
+        };
+        assert_gemma3_f16_refusal(&error, planned_parameters(root), context);
+        let accepted = load(root, TensorDType::F16, RangeHazardPolicy::Accept)
+            .unwrap_or_else(|error| panic!("{context}: {error}"));
+        assert_eq!(
+            accepted.load_report().allowlisted_ignored,
+            ignored,
+            "{context}"
+        );
+        for dtype in [TensorDType::F32, TensorDType::BF16] {
+            load(root, dtype, RangeHazardPolicy::Refuse)
+                .unwrap_or_else(|error| panic!("{context} in {dtype}: {error}"));
+        }
+    }
+    load(&gemma2, TensorDType::F16, RangeHazardPolicy::Refuse)
+        .unwrap_or_else(|error| panic!("gemma2 in F16: {error}"));
+}
+
+/// The shared planner refuses Gemma 3 in F16 when given the contract's own parts, not just the contract method.
+///
+/// `build_load_plan` over [`GemmaCheckpointContract::expected_tensors`] and
+/// [`GemmaCheckpointContract::mappings`] is a public path to a plan that
+/// [`execute_local_load_plan`] streams into the graph, so the declaration
+/// must ride on the mapping plan the shared planner reads. Accepting the
+/// overflow plans and installs the faithful F16 graph through the same path.
+#[test]
+fn the_shared_planner_refuses_gemma3_f16_from_the_contract_parts() {
+    let root = fixture("gemma3-text");
+    let manifest = CheckpointManifest::discover(&root, &LoadOptions::default()).unwrap();
+    let source =
+        GemmaCheckpointSource::detect(manifest.tensors.keys().map(String::as_str)).unwrap();
+    let contract = graph(&root)
+        .config()
+        .checkpoint_contract(GemmaCheckpointOptions { source })
+        .unwrap();
+    assert_eq!(
+        contract.mappings().range_hazards(),
+        GemmaVariant::Gemma3Text.range_hazards()
+    );
+    let plan = |policy: RangeHazardPolicy| {
+        crate::checkpoint::build_load_plan(
+            &manifest,
+            contract.expected_tensors(),
+            contract.mappings(),
+            &hazard_options(DTypePolicy::Cast(TensorDType::F16), policy),
+        )
+    };
+    let error = plan(RangeHazardPolicy::default()).unwrap_err();
+    assert_gemma3_f16_refusal(&error, planned_parameters(&root), "shared planner");
+    let accepted = plan(RangeHazardPolicy::Accept).unwrap();
+    let mut model = graph(&root);
+    let outcome = execute_local_load_plan(&manifest, &accepted, &mut model).unwrap();
+    assert!(outcome.report.is_strictly_valid());
+    assert_eq!(model.model.embed_tokens.weight.val().dtype(), DType::F16);
 }

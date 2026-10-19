@@ -745,8 +745,29 @@ prefill outside one where the reference clamps prefill time steps.
 Half-precision runs follow the references' numerics, including their range.
 gemma-3-4b-it (and its 12B and 27B siblings) overflows F16 in Transformers
 too: the residual addition after block 5's MLP at the BOS position exceeds
-F16's `65,504`, and every logit after it is NaN. The crate evaluates that
-faithful graph if asked to load Gemma 3 in F16; use BF16 or F32 instead. No
+F16's `65,504`, and every logit after it is NaN. The crate therefore refuses
+to load Gemma 3 in F16 by default (`CheckpointError::RangeHazard`); use BF16
+or F32 instead. An experiment that needs the faithful F16 graph, to study the
+overflow, run a truncated stack whose blocks stay in range (gemma-3-4b-it's
+blocks 0 to 4 are finite), or test an intervention that keeps activations
+finite, opts in explicitly:
+
+```rust
+use transformers::checkpoint::{DTypePolicy, LoadOptions, RangeHazardPolicy, TensorDType};
+
+let options = transformers::AutoLoadOptions {
+    checkpoint: LoadOptions {
+        dtype_policy: DTypePolicy::Cast(TensorDType::F16),
+        range_hazards: RangeHazardPolicy::Accept,
+        ..LoadOptions::default()
+    },
+    ..transformers::AutoLoadOptions::default()
+};
+assert_eq!(options.checkpoint.range_hazards, RangeHazardPolicy::Accept);
+```
+
+Pass these options to `AutoCausalLm::load_local`. The loaded graph is the
+reference's, so expect non-finite logits from the full stack. No
 hook point exposes the residual between a block's attention and MLP
 additions, which itself exceeds F16's range in 28 of gemma-3-4b-it's 34
 blocks, so a clamped F16 variant cannot be built from hooks alone; the

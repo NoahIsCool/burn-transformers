@@ -38,7 +38,11 @@
 //!   [`CheckpointError::LanguageNamespaceNotFound`] or
 //!   [`CheckpointError::AmbiguousLanguageNamespace`], and Gemma as
 //!   [`CheckpointError::LanguageEmbeddingNotFound`] or
-//!   [`CheckpointError::AmbiguousLanguageEmbedding`];
+//!   [`CheckpointError::AmbiguousLanguageEmbedding`]. A plan that executes a
+//!   dtype the family declares its checkpoints overflow (Gemma 3 in F16) is
+//!   [`CheckpointError::RangeHazard`] unless [`LoadOptions::range_hazards`]
+//!   accepts it: the family declares the [`RangeHazard`] on its
+//!   [`MappingPlan`], and [`build_load_plan`] runs [`check_range_hazards`];
 //! - family-specific preconditions: GPT-2 reports a failed layout detection
 //!   as `Namespace` and rejects non-floating storage as `NonFloatParameter`,
 //!   and Qwen3.5 rejects MTP options that disagree with the model's MTP graph
@@ -73,6 +77,7 @@ mod artifact;
 mod budget;
 mod dtype;
 mod error;
+mod hazard;
 mod layout;
 mod lexical;
 mod mapping;
@@ -91,6 +96,7 @@ pub use artifact::{
 pub(crate) use budget::require_source_tensors;
 pub use dtype::TensorDType;
 pub use error::{CheckpointError, Result};
+pub use hazard::{RangeHazard, RangeHazardPolicy, check_range_hazards};
 pub(crate) use mapping::build_load_plan_with_index_total_size_policy;
 pub use mapping::{
     ExpectedTensor, KeyMatcher, LoadPlan, MappingPlan, PlannedSource, PlannedTensor,

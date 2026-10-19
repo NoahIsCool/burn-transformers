@@ -321,3 +321,55 @@ fn invalid_configurations_have_no_contract() {
             .is_err()
     );
 }
+
+/// Every Gemma 3 contract carries the variant's F16 declaration, in every namespace; Gemma 2's carry none.
+///
+/// The declaration names both `model_type` values a Gemma 3 checkpoint can
+/// carry, offers F32 and BF16 instead, certifies no packed path, and keeps
+/// measured and unmeasured sizes apart in its evidence. The contract's
+/// mapping plan carries it, so the shared planner enforces it.
+#[test]
+fn contracts_carry_the_variant_range_hazards() {
+    let [hazard] = GemmaVariant::Gemma3Text.range_hazards() else {
+        panic!("Gemma 3 declares exactly one range hazard");
+    };
+    assert_eq!(hazard.dtype(), crate::checkpoint::TensorDType::F16);
+    assert_eq!(
+        hazard.checkpoints(),
+        "Gemma 3 (model_type gemma3 or gemma3_text)"
+    );
+    assert_eq!(
+        hazard.alternatives(),
+        [
+            crate::checkpoint::TensorDType::F32,
+            crate::checkpoint::TensorDType::BF16
+        ]
+    );
+    assert!(!hazard.packed_path_certified());
+    let evidence = hazard.evidence();
+    let unmeasured = evidence.find("Unmeasured:").expect("unmeasured sizes");
+    assert!(evidence.starts_with("measured on google/gemma-3-4b-it"));
+    assert!(evidence[..unmeasured].contains("73,509.6"));
+    assert!(evidence[unmeasured..].contains("1B and 270M"));
+    for source in GemmaCheckpointSource::ALL {
+        for (variant, expected) in [
+            (GemmaVariant::Gemma2, &[][..]),
+            (GemmaVariant::Gemma3Text, std::slice::from_ref(hazard)),
+        ] {
+            // A multimodal source needs a null final soft-cap, which Gemma 2 defaults to 30.
+            let config = GemmaConfig {
+                final_logit_softcapping: None,
+                ..small(variant)
+            };
+            let contract = config
+                .checkpoint_contract(GemmaCheckpointOptions { source })
+                .unwrap();
+            assert_eq!(contract.range_hazards(), expected, "{variant:?} {source:?}");
+            assert_eq!(
+                contract.mappings().range_hazards(),
+                expected,
+                "{variant:?} {source:?}: the shared planner reads the mapping plan's declarations"
+            );
+        }
+    }
+}

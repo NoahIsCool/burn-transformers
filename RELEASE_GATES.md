@@ -259,7 +259,7 @@ Each test verifies the checkpoint/bundle pairing through the bundle's
 | Gate | Command (after `cargo test --release`) | Environment | Default tolerances |
 | --- | --- | --- | --- |
 | Llama family | `--test llama_family_artifacts -- --ignored --nocapture --test-threads 1` | `TRANSFORMERS_LLAMA_FAMILY_DIR`, `TRANSFORMERS_LLAMA_FAMILY_REFERENCE_DIR`, `_DECODE_TRUTH_DIR` (cached greedy); optional `_TOLERANCE`, `_MIN_GREEDY`; `_DTYPE` (`f32` default, `bf16`, `f16`), which for half precision needs `_OFFICIAL_DIRS` (four official graphs) and refuses `_TOLERANCE` | F32: `1e-3` absolute logits (F32 drift `7.6e-5` to `3.83e-4` on SmolLM-135M, Qwen3-4B, SmolLM3-3B, and Llama-3.1-8B, Flex and Metal); at least 2 decisive greedy tokens. Qwen2-7B's first-position activations reach about 7,000, so an F32 bundle's own rounding (`1.6e-3`) exceeds the tolerance: qualify it against a `--dtype float64` bundle, where Flex stays within `2.9e-4` and Metal reaches `1.9e-3` at one first-position logit, run with `TRANSFORMERS_LLAMA_FAMILY_TOLERANCE=2.5e-3`. Half precision: per prompt `s_max` and `s_mean` times the envelope of the four official graphs' deviation from the same F32 or F64 bundle (BF16 `1.5`/`1.3`, F16 `1.7`/`1.7`; see below) |
-| Gemma | `--test gemma_artifacts -- --ignored --nocapture --test-threads 1` | `TRANSFORMERS_GEMMA_DIR`, `TRANSFORMERS_GEMMA_REFERENCE_DIR`, `TRANSFORMERS_GEMMA_LONG_REFERENCE_DIR`, `_DECODE_TRUTH_DIR` and `_LONG_DECODE_TRUTH_DIR` (cached tests); optional `_TOLERANCE`, `_LONG_TOLERANCE`, `_MIN_GREEDY`; `_DTYPE` (`f32` default, `bf16`; `f16` is refused), which for BF16 needs `_OFFICIAL_DIRS` and `_LONG_OFFICIAL_DIRS` and refuses both tolerances | F32: `1e-3`; `5e-3` across the sliding window, where Transformers' own eager and SDPA graphs differ by `3.2e-3`. Half precision: the Llama-family rule |
+| Gemma | `--test gemma_artifacts -- --ignored --nocapture --test-threads 1` | `TRANSFORMERS_GEMMA_DIR`, `TRANSFORMERS_GEMMA_REFERENCE_DIR`, `TRANSFORMERS_GEMMA_LONG_REFERENCE_DIR`, `_DECODE_TRUTH_DIR` and `_LONG_DECODE_TRUTH_DIR` (cached tests); optional `_TOLERANCE`, `_LONG_TOLERANCE`, `_MIN_GREEDY`; `_DTYPE` (`f32` default, `bf16`; `f16` expects the library's Gemma 3 refusal, and with `_RANGE_HAZARDS=accept` evaluates the faithful graph and fails), which for BF16 needs `_OFFICIAL_DIRS` and `_LONG_OFFICIAL_DIRS`, and in half precision refuses both tolerances | F32: `1e-3`; `5e-3` across the sliding window, where Transformers' own eager and SDPA graphs differ by `3.2e-3`. Half precision: the Llama-family rule |
 | gpt-oss | `--test gpt_oss_artifacts -- --ignored --nocapture --test-threads 1` | `TRANSFORMERS_GPT_OSS_DIR`, `TRANSFORMERS_GPT_OSS_REFERENCE_DIR`; optional `_DTYPE` (defaults to the bundle's dtype), `_TOLERANCE`, `_MEAN_TOLERANCE`, `_MIN_GREEDY` | F32 run and bundle: `1e-3` max, `1e-4` mean; any half-precision side: `2.7` max, Transformers' own full-model BF16 deviation from the full F32 reference (`2.665`) rounded up, and `0.15` mean, kept from the earlier four-block calibration (the official BF16 mean is at most `0.108`, the crate's Flex/BF16 mean `0.112`) |
 
 Every cached-greedy check feeds the reference's tokens back and compares each
@@ -305,7 +305,7 @@ model, so its pass is not a gate pass.
 
 Half-precision Llama-family and Gemma runs (`TRANSFORMERS_LLAMA_FAMILY_DTYPE`
 or `TRANSFORMERS_GEMMA_DTYPE`: `bf16` on Flex, `f16` on Metal for the Llama
-family, either on CUDA; Gemma's `f16` runs fail as uncalibrated) are judged against the same F32
+family, either on CUDA; Gemma 3's `f16` runs check the library's refusal instead, below) are judged against the same F32
 bundles (F64 for Qwen2-7B), the *truths*, with bounds read at run time from
 the official implementation itself. Each truth has four official graphs in
 the run's dtype, written by the same script with the truth's prompts and
@@ -367,7 +367,8 @@ relates the two dtypes' deviations. A truth whose official graph is
 non-finite in the run's dtype has no envelope there, and the run fails as
 `uncalibrated` before the checkpoint loads: Qwen2-7B in F16 (official CPU and
 MPS eager F16 logits are NaN on every prompt) and gemma-3-4b-it in F16 (all
-four graphs overflow, as below).
+four graphs overflow, as below), whose `f16` runs now check the library's
+refusal before any envelope is read.
 
 Decoding is judged by *truth-anchored rows*. The decode truth's stateless rows
 at the truth's teacher-forced greedy positions are the reference; `E_dec` is
@@ -410,10 +411,8 @@ alone; they evaluate no Burn model, so their passes are not gate passes. The
 previous single-bundle calibration stays recorded, unchanged, in the
 [half-precision calibration record](acceptance/measurements/half-precision-calibration-20261017.json).
 
-Gemma F16 is uncalibrated (all official F16 graphs overflow): an `f16` run
-reads them from `TRANSFORMERS_GEMMA_F16_OFFICIAL_DIRS` and
-`TRANSFORMERS_GEMMA_LONG_F16_OFFICIAL_DIRS` and fails as uncalibrated before
-its checkpoint loads, as Qwen2-7B's F16 runs do. gemma-3-4b-it overflows F16 in Transformers
+Gemma 3 F16 is refused by the library (all official F16 graphs overflow).
+gemma-3-4b-it overflows F16 in Transformers
 too: the first value beyond `65,504` is the residual addition after block 5's
 MLP at the BOS position (`51,941.5 + 21,568.1 = 73,509.6` in F32), identically
 in torch CPU and MPS F16 and in this crate's Metal and Flex F16;
@@ -426,10 +425,35 @@ existing `backend cannot store checkpoint dtype BF16` error (measured at
 `8181605` on SmolLM-135M and gemma-3-4b-it, at the first parameter
 `model.embed_tokens.weight`); a probe of Burn 0.22
 passes every step, which an upgrade (a maintainer decision: MSRV 1.95 and the
-backend-erased tensor API) would revisit. The crate still loads Gemma 3 in F16
-and evaluates the faithful graph; whether it should refuse such loads by
-default, and whether the gates should refuse `f16` outright and drop a
-Metal/F16 Gemma profile, is decision (d), open for the maintainer.
+backend-erased tensor API) would revisit.
+
+Following the maintainer's decision (d) of October 18, Gemma 3 declares F16 a
+numeric-range hazard (`GemmaVariant::range_hazards`, a `RangeHazard` with the
+measured evidence) on the Gemma contract's `MappingPlan`, and the generic
+check `check_range_hazards`, which the shared planner `build_load_plan` runs
+after strict planning for the hazards a mapping plan declares, refuses any
+plan whose parameters are F16 (cast, or stored and kept by
+`DTypePolicy::Auto`) with
+`CheckpointError::RangeHazard`, before any payload is read and, through
+`AutoCausalLm::load_local`, before the graph is allocated. The message names
+Gemma 3, F16, the measured overflow and the unmeasured sizes, the alternatives
+(F32, and BF16 where the backend can store it; packed Q4/Q8 weights with F32
+activations are named as not offered, since no Gemma packed path is
+certified), and the opt-in: `LoadOptions::range_hazards =
+RangeHazardPolicy::Accept`, which loads the faithful, overflowing graph for
+experiments. The refusal is family-wide (all `gemma3` and `gemma3_text`
+checkpoints, measured or not); Gemma 2 declares no hazard, because no Gemma 2
+checkpoint has been measured in F16. No model name enters the shared check.
+A `TRANSFORMERS_GEMMA_DTYPE=f16` gate run therefore expects that refusal: it
+loads with the default policy, requires `CheckpointError::RangeHazard` with the
+declared hazard, prints it, and passes without judging logits, so its pass
+qualifies the refusal and not F16 numerics. With
+`TRANSFORMERS_GEMMA_RANGE_HAZARDS=accept` the run loads the faithful graph,
+prints the first non-finite hidden state and the number of non-finite logits
+of the bundle's first prompt, and fails, since no F16 envelope exists. The
+Gemma gate has no Metal/F16 profile: Metal qualifies Gemma in F32, and Flex
+(and CUDA) qualify it in BF16. Neither F16 path has been recorded in an
+acceptance record yet.
 
 These gates establish experimental validation only; none promotes a
 checkpoint. The Flex and Metal F32 runs at `f4c56c4` and the runs of the Mac
@@ -452,9 +476,9 @@ variables, `bf16` or, for the Llama family, `f16`) keep the official envelope
 above on every device and refuse those tolerance variables, since TF32 rounds
 F32 operands and their matrix products take the stored F16 or BF16 tensors
 (read from the source, not measured). The envelope's official graphs ran on
-this Mac's CPU and MPS; no official CUDA graph is part of it. Gemma's `f16`
-runs fail as uncalibrated everywhere, so `bf16` is its half-precision run on
-CUDA. The FLAN-T5-small release gate qualifies F32 numerics at
+this Mac's CPU and MPS; no official CUDA graph is part of it. Gemma 3's
+`f16` runs check the library's refusal everywhere, so `bf16` is its
+half-precision run on CUDA. The FLAN-T5-small release gate qualifies F32 numerics at
 `atol = rtol = 1e-4` and refuses a TF32 device:
 
 ```sh
@@ -911,12 +935,13 @@ profile), and its integrated-head rerun:
   long prompt is decisive under the envelope tolerance, so those cached
   greedy tests rest on the decode rows alone;
 - F16 measurements of Gemma 3 1B and 270m and of Gemma 2 (no local
-  checkpoints), and a maintainer decision on a library-level Gemma 3 F16
-  policy (a default refusal with an explicit opt-in, declared by the family
-  and checked by a generic load-option policy); until then the library
-  evaluates the faithful, overflowing graph, and Gemma `f16` gate runs fail as
-  uncalibrated (the gate-level refusal recorded here anticipated the decision
-  and was withdrawn in the review round below);
+  checkpoints). The maintainer has since decided the library-level Gemma 3
+  F16 policy (decision (d)), now implemented as a family-declared range hazard
+  with a default refusal and an explicit opt-in (above, under the Gemma F16
+  paragraph of the experimental gates), which also refuses those unmeasured
+  Gemma 3 sizes; Gemma 2 declares no hazard until it is measured (the
+  gate-level refusal recorded here had anticipated the decision and was
+  withdrawn in the review round below);
 - Metal BF16, unavailable on the pinned Burn 0.21; a Burn 0.22 upgrade (MSRV
   1.95 and the backend-erased tensor API) is a maintainer decision;
 - a non-finite guard in generation (a maintainer decision) and a

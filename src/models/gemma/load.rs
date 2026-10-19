@@ -91,7 +91,8 @@ pub enum GemmaCheckpointLoadError {
     ///
     /// A manifest with no Gemma language embedding, or with several, is
     /// [`CheckpointError::LanguageEmbeddingNotFound`] or
-    /// [`CheckpointError::AmbiguousLanguageEmbedding`].
+    /// [`CheckpointError::AmbiguousLanguageEmbedding`]; a refused Gemma 3 F16
+    /// plan is [`CheckpointError::RangeHazard`].
     #[error(transparent)]
     Checkpoint(
         /// Discovery, detection, or planning failure.
@@ -125,13 +126,26 @@ impl<B: Backend> GemmaForCausalLm<B> {
     /// multimodal release) is detected from the manifest; a multimodal
     /// checkpoint's vision tower is reported as intentionally ignored. No
     /// network access is performed. A missing, unexpected, misshapen, or
-    /// disallowed-dtype tensor fails before the first payload read. After
+    /// disallowed-dtype tensor fails before the first payload read. So does
+    /// a Gemma 3 plan whose parameters, and so activations, would be F16
+    /// (cast by [`DTypePolicy::Cast`](crate::checkpoint::DTypePolicy::Cast),
+    /// or stored and kept by
+    /// [`DTypePolicy::Auto`](crate::checkpoint::DTypePolicy::Auto)): the
+    /// published Gemma 3 checkpoints overflow F16 in their reference too
+    /// ([`super::GemmaVariant::range_hazards`]), so the load is refused unless
+    /// [`LoadOptions::range_hazards`] is
+    /// [`RangeHazardPolicy::Accept`](crate::checkpoint::RangeHazardPolicy::Accept),
+    /// the opt-in that installs the faithful, overflowing F16 graph. After
     /// an execution failure the partially initialized model must be
     /// discarded.
     ///
     /// # Errors
     ///
-    /// Returns a [`GemmaCheckpointLoadError`] naming the failing stage.
+    /// Returns a [`GemmaCheckpointLoadError`] naming the failing stage. A
+    /// refused Gemma 3 F16 plan is
+    /// [`GemmaCheckpointLoadError::Checkpoint`] holding
+    /// [`CheckpointError::RangeHazard`], raised while planning, before any
+    /// parameter is installed.
     pub fn load_checkpoint(
         &mut self,
         root: impl AsRef<Path>,
@@ -149,7 +163,10 @@ impl<B: Backend> GemmaForCausalLm<B> {
     ///
     /// # Errors
     ///
-    /// As [`Self::load_checkpoint`], without the namespace-detection error.
+    /// As [`Self::load_checkpoint`], without the namespace-detection error,
+    /// including the Gemma 3 F16 refusal
+    /// ([`CheckpointError::RangeHazard`] unless
+    /// [`LoadOptions::range_hazards`] accepts it).
     pub fn load_checkpoint_with(
         &mut self,
         root: impl AsRef<Path>,

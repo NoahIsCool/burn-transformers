@@ -73,8 +73,29 @@
 //! both sides of the window within `1.2e-3` (Transformers' own eager and
 //! SDPA graphs differ by `3.2e-3` there), a cached run whose 29 sliding
 //! layers wrap their 1024-slot rings within `1.5e-4`, and all 8 greedy
-//! tokens identical. Contexts beyond 1237 tokens, real-checkpoint Metal/F32
-//! and F16 acceptance, and Gemma 2 real weights are not yet gated.
+//! tokens identical. Contexts beyond 1237 tokens and Gemma 2 real weights
+//! are not yet gated; the gate's Metal/F32 and Flex/BF16 runs are recorded
+//! on the model status page, `ARCHITECTURE_COMPATIBILITY.md`.
+//!
+//! # F16 is refused for Gemma 3
+//!
+//! The published Gemma 3 checkpoints overflow F16 in their reference
+//! implementation too: in gemma-3-4b-it the residual addition after block
+//! 5's MLP reaches `73,509.6` at the BOS position, beyond F16's `65,504`, in
+//! Transformers' CPU and MPS F16 graphs as in this crate's, and the logits
+//! are non-finite (gemma-3-12b-it and 27b-it overflow at blocks 6 and 8).
+//! [`GemmaVariant::range_hazards`] therefore declares F16 for `gemma3_text`
+//! (which a multimodal `gemma3` checkpoint's `text_config` names) on the
+//! contract's mapping plan, and the shared planner
+//! ([`build_load_plan`](crate::checkpoint::build_load_plan)), which direct
+//! and automatic strict loading both use, refuses a plan whose parameters
+//! are F16 with [`CheckpointError::RangeHazard`](crate::checkpoint::CheckpointError::RangeHazard)
+//! before any payload is read. Load Gemma 3 in F32, in BF16 where the backend
+//! can store it (not Metal on Burn 0.21), or set
+//! [`LoadOptions::range_hazards`](crate::checkpoint::LoadOptions::range_hazards)
+//! to [`RangeHazardPolicy::Accept`](crate::checkpoint::RangeHazardPolicy::Accept)
+//! to evaluate the faithful, overflowing F16 graph for experiments. Gemma 2
+//! declares no hazard: no Gemma 2 checkpoint has been measured in F16.
 
 mod architecture;
 mod checkpoint;
